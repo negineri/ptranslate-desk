@@ -88,6 +88,9 @@ pub struct Status {
     paused: bool,
     shortcut: String,
     accessibility: bool,
+    mock: bool,
+    logging_in: bool,
+    auth_error: Option<String>,
 }
 
 #[tauri::command]
@@ -97,11 +100,16 @@ pub fn session_status(app: AppHandle) -> Status {
     let (paused, shortcut) = (ui.paused, ui.shortcut.clone());
     drop(ui);
     let logged_in = app.state::<Backend>().session.lock().unwrap().logged_in;
+    let backend = app.state::<Backend>();
+    let auth_error = backend.auth_error.lock().unwrap().clone();
     Status {
         logged_in,
         paused,
         shortcut,
         accessibility: accessibility(),
+        mock: backend.auth.is_mock(),
+        logging_in: backend.auth.is_busy(),
+        auth_error,
     }
 }
 
@@ -200,7 +208,7 @@ pub fn open_popup(app: &AppHandle, text: String) -> Result<(), String> {
     }
     if !app.state::<Backend>().session.lock().unwrap().logged_in {
         show_main(app);
-        return Err("モックにログインしてください".into());
+        return Err("ログインしてください".into());
     }
     // 既に表示中なら隠さずに内容だけを替える。古いフォーカス喪失で新しい小窓を閉じないため。
     crate::cancel_window(app, "popup");
@@ -346,7 +354,7 @@ pub fn refresh_menu(app: &AppHandle) -> tauri::Result<()> {
     let status = session_status(app.clone());
     let first = MenuItem::with_id(
         app,
-        "main",
+        if status.logged_in { "main" } else { "login" },
         if status.logged_in {
             "主窓を開く"
         } else {
@@ -415,6 +423,13 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
 pub fn menu_action(app: &AppHandle, action: &str) -> Result<(), String> {
     match action {
+        "login" => {
+            show_main(app);
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = crate::login(app).await;
+            });
+        }
         "main" => show_main(app),
         "settings" => {
             show_main(app);
@@ -429,7 +444,12 @@ pub fn menu_action(app: &AppHandle, action: &str) -> Result<(), String> {
             refresh_menu(app).map_err(|_| "メニューを更新できませんでした")?;
             let _ = app.emit("session-changed", ());
         }
-        "logout" => crate::change_login(app, false),
+        "logout" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = crate::logout(app).await;
+            });
+        }
         "quit" => {
             crate::cancel_all(app);
             app.exit(0);

@@ -181,6 +181,8 @@ ms my ne nl pa pl ru si sk sl sr sw ta te th tl ur uz vi`)。表示名はサー�
 `done` か `error` が来る前に接続が切れたら、「接続が途中で切れました」として扱う。
 
 応答 (失敗): `{"error": "日本語のメッセージ"}` を、次の状態で返す。
+ただし本番の認証プロキシが返す **403 は nginx の HTML**。403 の本文は JSON として読まず、
+状態の番号だけでログインし直させる。
 
 | 状態 | 意味 | クライアントのすること |
 | --- | --- | --- |
@@ -210,10 +212,11 @@ Authorization Code + PKCE (S256)**、リダイレクトは **ループバック*
 
 1. クライアントは 127.0.0.1 の空いているポートで一時的に待ち受け、OS の既定のブラウザで authorize の URL を開く
    - `client_id`: `translator-desktop`
-   - `scope`: `openid profile email offline_access`
+   - `scope`: `openid profile offline_access` (`email` は入れない)
    - `redirect_uri`: `http://127.0.0.1:<port>/callback`
    - `code_challenge` / `code_challenge_method=S256`、`state`
 2. 利用者がブラウザで Authentik にログインする (既にログインしていれば画面はすぐ戻る)
+   - 初回は Authentik の同意の画面が出る。これが正常な動き
 3. コールバックで `state` を確かめ、token の URL で code をトークンに替える
 4. ブラウザには「ログインしました。このタブは閉じて構いません」を返す
 
@@ -223,7 +226,8 @@ URL は OIDC の discovery (`https://atk01.witenp.com/application/o/translator-d
 ### 6.2 トークンの使い方
 
 - API には `Authorization: Bearer <access token>` を付ける。access token は Authentik が署名した JWT で、
-  有効期限は 10 分の見込み (サーバー側の設定で決まる)
+  有効期限は本番では 10 分、refresh token は 30 日
+- `email` を scope に入れると、oauth2-proxy が `email_verified: false` を理由に 403 で断るため、要求しない
 - 期限の 1 分前か、401 を受けたら refresh token で更新する。更新に失敗したらログインし直させる
 - 起動したときに refresh token があれば、黙って更新してログイン済みにする
 

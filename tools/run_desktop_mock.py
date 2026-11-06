@@ -54,6 +54,7 @@ def main() -> int:
     threading.Thread(target=mock.serve_forever, daemon=True).start()
     env = {key: value for key, value in os.environ.items() if not key.startswith("TR_")}
     env.update(
+        PTRANSLATE_MOCK="1",
         TR_LISTEN_HOST="127.0.0.1",
         TR_LISTEN_PORT="8002",
         TR_UPSTREAM_URL=f"http://127.0.0.1:{mock.server_port}/v1/completions",

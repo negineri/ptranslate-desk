@@ -27,17 +27,17 @@ Claude Code は [CLAUDE.md](CLAUDE.md) からこのファイルを読む。
    モジュール (`shared/` など) に分ける。Web はビルドなしで読めること。区切りの試験 (同じ原文で同じ区切りに
    なる、SPEC 10 章の 4) を足す
 2. **デスクトップのクライアント:** `desktop/` に Tauri 2 で作る。SPEC の 3〜8 章を満たす。最初は主窓と
-   認証 (SPEC 6 章) から。試験はモックを相手にする (SPEC 11 章)。認証まわりは、サーバー側の準備 (下) が
-   済むまでモックで進める
+   認証 (SPEC 6 章) から。試験はモックを相手にする (SPEC 11 章)。認証の試験もローカルの OIDC モックで行う。
+   本番の確認は利用者に明示された範囲で行う
 3. **CI:** デスクトップのビルド (Windows・macOS・Linux) と、`v*` のタグでの GitHub Releases への配布を
    `.github/workflows/` に足す。署名は SPEC 9 章が決まってから
 4. **リリース:** サーバーのイメージは `v*` のタグで `ghcr.io/negineri/ptranslate-desk/server` に出る
    (`ci.yml`)。本番はそのイメージをバージョンと digest で固定して使う
 
-## サーバー側の準備 (非公開のリポジトリで行う。ここでは待つだけ)
+## サーバー側の準備 (非公開のリポジトリで実施済み)
 
-デスクトップから Bearer の JWT で API を呼べるようにするため、本番に次を入れる予定。済むまでは、本番の
-`https://translate.witenp.com/` にデスクトップから認証付きでつなげない。
+デスクトップから Bearer の JWT で API を呼べるようにするため、次の準備は済んでいる。
+接続先と認証の規則は SPEC の 6 章を参照。scope に `email` を入れない。
 
 - Authentik に公開クライアント `translator-desktop` (PKCE、ループバックのリダイレクト、refresh token)
 - 認証プロキシ (oauth2-proxy) で Bearer の JWT を通す

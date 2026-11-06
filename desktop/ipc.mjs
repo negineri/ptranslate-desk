@@ -29,8 +29,11 @@ export async function desktopFetch(route, { body, signal, popupRevision = null }
         case "bytes": reader.enqueue(Uint8Array.from(event.bytes)); break;
         case "end": finish(); break;
         case "canceled": abort(); break;
+        case "login_required":
+          finish(new Error(`サーバーが ${event.status} を返しました。ログインし直してください`));
+          break;
         case "error":
-          finish(new Error("ローカルのモックサーバーに接続できないか、接続が途中で切れました"));
+          finish(new Error("翻訳サーバーに接続できないか、接続が途中で切れました"));
           break;
       }
     };

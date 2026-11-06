@@ -31,13 +31,21 @@ export async function copyText(text) {
 }
 
 const loginButton = document.createElement("button");
-loginButton.textContent = "モックにログイン";
+loginButton.textContent = "ログイン";
 document.getElementById("who").after(" ", loginButton);
+const cancelLogin = document.createElement("button");
+cancelLogin.textContent = "ログインを中止";
+cancelLogin.hidden = true;
+loginButton.after(" ", cancelLogin);
+cancelLogin.addEventListener("click", () => { void invoke("cancel_login").catch(showError); });
 let resolveLogin;
 const login = new Promise((resolve) => { resolveLogin = resolve; });
 
 async function restoreSession() {
   const status = await invoke("session_status");
+  loginButton.disabled = status.logging_in;
+  cancelLogin.hidden = !status.logging_in;
+  if (!loginButton.dataset.loggedIn) loginButton.textContent = status.mock ? "モックにログイン" : "ログイン";
   if (status.logged_in && !loginButton.dataset.loggedIn) {
     const settings = await invoke("load_settings").catch(showError);
     savedSettings = settings ? JSON.stringify(settings) : null;
@@ -48,20 +56,25 @@ async function restoreSession() {
     await pendingSave;
     location.reload();
   }
+  if (status.auth_error) showError(status.auth_error);
   return status;
 }
 
 loginButton.addEventListener("click", async () => {
   loginButton.disabled = true;
+  const loggingIn = !loginButton.dataset.loggedIn;
+  cancelLogin.hidden = !loggingIn;
   try {
     await pendingSave;
-    await invoke("set_mock_login", { loggedIn: !loginButton.dataset.loggedIn });
+    await invoke(loggingIn ? "login" : "logout");
     await restoreSession();
   } catch (error) { showError(error); }
-  finally { loginButton.disabled = false; }
+  finally { loginButton.disabled = false; cancelLogin.hidden = true; }
 });
 
 await listen("session-changed", () => { void restoreSession().catch(showError); });
+await listen("login-started", () => { loginButton.disabled = true; cancelLogin.hidden = false; });
+await invoke("restore_session").catch(showError);
 await restoreSession().catch(showError);
 
 export async function desktopFetch(...args) { await login; return request(...args); }

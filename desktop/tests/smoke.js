@@ -79,6 +79,7 @@
     await wait(async () => !(await snapshot()).popup_visible && (await snapshot()).requests === 0);
     step = "ログアウト";
     await menu("logout");
+    await wait(async () => !(await invoke("session_status")).logged_in);
     let refused = false;
     try {
       await window.__TAURI__.core.invoke("start_request", {

@@ -5,6 +5,23 @@ Tauri 2 の主窓をローカルの翻訳モックで試せます。Rust、Node.
 
 macOS は 13 以降に対応します。Mac では Xcode Command Line Tools (`xcode-select --install`) を使います。
 
+## 本番にログインする
+
+アプリを起動して「ログイン」を押すか、メニューバーの「ログイン」を選びます。
+OS の既定のブラウザで Authentik にログインし、初回の同意の画面で許可してください。
+`tamesareru-members` に入っていないアカウントは Authentik の画面で断られます。
+ログイン後、主窓に Authentik の利用者名が表示されます。
+
+接続先は `https://translate.witenp.com`、認証は公開クライアント `translator-desktop` の
+Authorization Code + PKCE (S256) です。authorize・token・revoke の URL は discovery から取得し、
+scope は `openid profile offline_access` に限定します。`email` は要求しません。
+
+access token は Rust のメモリ、refresh token は macOS のキーチェーン (Windows は資格情報マネージャー、
+Linux は Secret Service) に保存します。トークンを画面・ログ・設定ファイルへ渡しません。
+起動時と有効期限の 1 分前、API の 401 応答時に更新します。更新に失敗したときや 403 を受けたときは、
+ログインし直します。403 の HTML は JSON として読みません。
+ログアウトすると端末の資格情報を削除し、discovery の revoke URL でも無効化します。
+
 ## モックで起動する
 
 リポジトリのルートで、次の 1 コマンドを実行します。
@@ -65,12 +82,13 @@ python3 tools/run_desktop_mock.py
    ```sh
    cd desktop
    npm ci
-   npm run dev
+   PTRANSLATE_MOCK=1 npm run dev
    ```
 
 4. 「モックにログイン」を押し、原文を入力します。「ログアウト」でモックのセッションを終了します。
 
-接続先は `127.0.0.1:8002` 固定です。認証プロキシの代わりに Rust 側でモック利用者のヘッダーを付けます。
+モック起動では `PTRANSLATE_MOCK=1` を渡します。この場合だけ接続先を `127.0.0.1:8002` に固定し、
+認証プロキシの代わりに Rust 側でモック利用者のヘッダーを付けます。モックは OS の資格情報に触れません。
 主窓は Web 版の画面と翻訳モジュールから生成します。言語・文体・用語集・自動翻訳の設定は、
 OS 標準のアプリ設定ディレクトリにある `settings.json` に保存します。
 
@@ -86,7 +104,7 @@ npm run build
 `src-tauri/target/release/bundle/macos/PTranslate Desk.app` と
 `src-tauri/target/release/bundle/dmg/` 内の dmg が生成されます。
 現段階は開発用で、Developer ID の署名と公証はしていません。
-アプリを単独で起動する場合も、上の手順のモックと翻訳サーバーを先に起動してください。
+アプリを単独で起動すると、本番にログインできます。
 
 ビルド済みのアプリをモックとまとめて起動するには、リポジトリのルートで実行します。
 
@@ -121,6 +139,5 @@ OS の実際のキー監視と、ほかのアプリへのコピーキー送信�
 
 ## これから実装するもの
 
-本番の Authentik 認証とキーチェーンへの保存は未実装です。サーバー側の準備が済むまではモックを使います。
 自動起動、履歴、自動更新、Windows・Linux でのショートカットによる選択文の取得は未実装です。
 仕様は [SPEC](../docs/SPEC.md) を参照してください。

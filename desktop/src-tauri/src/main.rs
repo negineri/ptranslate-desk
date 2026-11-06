@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod auth;
 #[cfg(target_os = "macos")]
 mod macos;
 mod resident;
@@ -24,10 +25,12 @@ fn smoke_result(app: tauri::AppHandle, passed: bool, step: String) {
 use reqwest::{Client, Method};
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::HashMap, sync::Mutex, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tauri::{async_runtime::JoinHandle, ipc::Channel, AppHandle, Emitter, Manager, WebviewWindow};
-
-const MOCK_SERVER: &str = "http://127.0.0.1:8002";
 
 #[derive(Default)]
 struct Session {
@@ -73,8 +76,9 @@ fn cancel_all(app: &AppHandle) {
 }
 
 struct Backend {
-    client: Client,
+    auth: Arc<auth::Auth>,
     session: Mutex<Session>,
+    auth_error: Mutex<Option<String>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -85,6 +89,16 @@ enum Message {
     End,
     Error,
     Canceled,
+    LoginRequired { status: u16 },
+}
+
+fn publish_auth(app: &AppHandle, error: Option<String>) {
+    let backend = app.state::<Backend>();
+    let logged_in = backend.auth.is_authenticated();
+    if logged_in || error.is_some() {
+        *backend.auth_error.lock().unwrap() = error;
+    }
+    change_login(app, logged_in);
 }
 
 fn change_login(app: &AppHandle, logged_in: bool) {
@@ -106,8 +120,52 @@ fn change_login(app: &AppHandle, logged_in: bool) {
 }
 
 #[tauri::command]
-fn set_mock_login(app: AppHandle, logged_in: bool) {
-    change_login(&app, logged_in);
+async fn restore_session(app: AppHandle) -> Result<(), String> {
+    let result = app.state::<Backend>().auth.restore().await;
+    publish_auth(&app, result.as_ref().err().cloned());
+    result
+}
+
+#[tauri::command]
+async fn login(app: AppHandle) -> Result<auth::LoginReport, String> {
+    let auth = app.state::<Backend>().auth.clone();
+    if auth.is_busy() {
+        return Err("ログインを待っています".into());
+    }
+    let _ = app.emit("login-started", ());
+    let result = async {
+        auth.login().await?;
+        if auth.is_mock() { return Ok(auth::LoginReport::default()); }
+        let report = auth.verify().await?;
+        if !report.verified {
+            let message = if report.api_status == 401 {
+                format!("ログイン後もサーバーが 401 を返しました。サーバー側で利用者名の設定を確認してください。claim の名前: {}", report.claim_names.join(", "))
+            } else { "サーバーが 403 を返しました。ログインし直してください".into() };
+            return Err(message);
+        }
+        Ok(report)
+    }.await;
+    publish_auth(&app, result.as_ref().err().cloned());
+    result
+}
+
+#[tauri::command]
+fn cancel_login(app: AppHandle) {
+    app.state::<Backend>().auth.cancel_login();
+}
+
+#[tauri::command]
+async fn logout(app: AppHandle) -> Result<(), String> {
+    let auth = app.state::<Backend>().auth.clone();
+    // ネットワークの revoke を待つ間にも画面と翻訳を止める。
+    auth.cancel_login();
+    change_login(&app, false);
+    let result = auth.logout().await;
+    if result.is_ok() {
+        *app.state::<Backend>().auth_error.lock().unwrap() = None;
+    }
+    publish_auth(&app, result.as_ref().err().cloned());
+    result
 }
 
 #[tauri::command]
@@ -138,7 +196,7 @@ fn start_request(
     let backend = app.state::<Backend>();
     let mut session = backend.session.lock().unwrap();
     if !session.logged_in {
-        return Err("モックにログインしてください".into());
+        return Err("ログインしてください".into());
     }
     let (method, path) = match route.as_str() {
         "api/config" => (Method::GET, "/api/config"),
@@ -171,17 +229,33 @@ fn start_request(
             }
         }
     }
-    let mut request = backend
-        .client
-        .request(method, format!("{MOCK_SERVER}{path}"))
-        .header("X-Forwarded-User", "mock-desktop");
-    if let Some(body) = body {
-        request = request.json(&body);
-    }
+    let auth = backend.auth.clone();
+    let app = app.clone();
     let cancel_stream = stream.clone();
     let task = tauri::async_runtime::spawn(async move {
         let result: Result<(), ()> = async {
-            let mut response = request.send().await.map_err(|_| ())?;
+            let mut response = match auth.send(method, path, body.as_ref()).await {
+                Ok(response) => response,
+                Err(_) if !auth.is_authenticated() => {
+                    let _ = stream.send(Message::LoginRequired { status: 401 });
+                    publish_auth(&app, Some("ログインし直してください".into()));
+                    return Ok(());
+                }
+                Err(_) => return Err(()),
+            };
+            if response.status() == 401 || response.status() == 403 {
+                let status = response.status().as_u16();
+                // nginx の 403 HTML は読まず、状態の番号だけを渡す。
+                let _ = stream.send(Message::LoginRequired { status });
+                let _ = auth.invalidate().await;
+                publish_auth(
+                    &app,
+                    Some(format!(
+                        "サーバーが {status} を返しました。ログインし直してください"
+                    )),
+                );
+                return Ok(());
+            }
             stream
                 .send(Message::Start {
                     status: response.status().as_u16(),
@@ -236,10 +310,37 @@ fn main() {
         )
         .manage(resident::Resident::default())
         .manage(Backend {
-            client,
+            auth: Arc::new(auth::Auth::new(client)),
             session: Mutex::new(Session::default()),
+            auth_error: Mutex::new(None),
         })
-        .setup(|app| resident::setup(app.handle()))
+        .setup(|app| {
+            resident::setup(app.handle())?;
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let auth = handle.state::<Backend>().auth.clone();
+                    auth.wait_for_refresh().await;
+                    if let Err(error) = auth.renew_if_needed().await {
+                        publish_auth(&handle, Some(error));
+                    }
+                }
+            });
+            if std::env::args().any(|arg| arg == "--verify-login") {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let result = login(handle.clone()).await;
+                    match result {
+                        Ok(report) => println!(
+                            "本番ログイン確認: verified={} status={}",
+                            report.verified, report.api_status
+                        ),
+                        Err(error) => println!("本番ログイン確認: {error}"),
+                    }
+                });
+            }
+            Ok(())
+        })
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
@@ -260,7 +361,10 @@ fn main() {
         });
     #[cfg(not(feature = "smoke-test"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
-        set_mock_login,
+        login,
+        logout,
+        restore_session,
+        cancel_login,
         start_request,
         stop_request,
         settings::load_settings,
@@ -275,7 +379,10 @@ fn main() {
     let builder = builder
         .manage(smoke::Smoke::default())
         .invoke_handler(tauri::generate_handler![
-            set_mock_login,
+            login,
+            logout,
+            restore_session,
+            cancel_login,
             start_request,
             stop_request,
             settings::load_settings,
