@@ -64,7 +64,7 @@ jobs:
         working-directory: desktop
       - run: npm run build -- --target universal-apple-darwin --bundles app
         working-directory: desktop
-      - run: lipo -verify_arch arm64 x86_64 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app/Contents/MacOS/ptranslate-desk'
+      - run: lipo 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app/Contents/MacOS/ptranslate-desk' -verify_arch arm64 x86_64
         working-directory: desktop
       # アプリ内の実行権限とシンボリックリンクを保つ。
       - run: ditto -c -k --sequesterRsrc --keepParent 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app' macos-app.zip
