@@ -1,5 +1,5 @@
 {
-  "productName": "翻訳",
+  "productName": "PTranslate Desk",
   "version": "0.1.0",
   "identifier": "com.witenp.ptranslate-desk",
   "build": {
@@ -10,8 +10,8 @@
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "label": "main", "title": "翻訳（モック）", "width": 1000, "height": 760 },
-      { "label": "popup", "title": "選んだ文を翻訳", "url": "popup.html", "width": 460, "height": 340,
+      { "label": "main", "title": "PTranslate Desk", "width": 1000, "height": 760 },
+      { "label": "popup", "title": "PTranslate Desk — 選んだ文を翻訳", "url": "popup.html", "width": 460, "height": 340,
         "visible": false, "alwaysOnTop": true, "skipTaskbar": true, "resizable": false }
     ]
   },

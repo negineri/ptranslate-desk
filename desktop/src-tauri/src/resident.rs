@@ -372,9 +372,9 @@ pub fn refresh_menu(app: &AppHandle) -> tauri::Result<()> {
         tray.set_menu(Some(menu))?;
         tray.set_icon_with_as_template(Some(tray_image(status.logged_in)), true)?;
         tray.set_tooltip(Some(if status.logged_in {
-            "翻訳"
+            "PTranslate Desk"
         } else {
-            "翻訳 — ログインしてください"
+            "PTranslate Desk — ログインしてください"
         }))?;
     }
     Ok(())
@@ -397,7 +397,7 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     TrayIconBuilder::with_id("translator")
         .icon(tray_image(false))
         .icon_as_template(true)
-        .tooltip("翻訳 — ログインしてください")
+        .tooltip("PTranslate Desk — ログインしてください")
         .on_menu_event(|app, event| {
             let _ = menu_action(app, event.id.as_ref());
         })

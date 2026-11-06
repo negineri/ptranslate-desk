@@ -76,7 +76,7 @@ settingsPanel.innerHTML = `<summary>デスクトップの設定</summary>
   </select>
   <p class="hint" id="shortcut-status"></p>
   <button id="accessibility">アクセシビリティの設定を開く</button>
-  <p class="hint">macOS のシステム設定で「翻訳」を許可してください。許可後はアプリを再起動してください。
+  <p class="hint">macOS のシステム設定で「PTranslate Desk」を許可してください。許可後はアプリを再起動してください。
   主窓を閉じても常駐します。終了するにはメニューバーの「終了」か ⌘Q を使います。</p>`;
 document.querySelector("section").append(settingsPanel);
 const shortcut = document.getElementById("shortcut");

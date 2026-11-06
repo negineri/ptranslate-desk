@@ -1,6 +1,7 @@
-# 翻訳のデスクトップクライアント 仕様 (SPEC)
+# PTranslate Desk 仕様 (SPEC)
 
-ptranslate-desk のサーバー (`server/`) を裏側にして、DeepL のデスクトップアプリのように使えるクライアント。
+PTranslate Desk は、このリポジトリのサーバー (`server/`) を裏側にして、DeepL のデスクトップアプリのように使えるクライアント。
+Web 版の名前は PTranslate。
 このファイルだけを読めば実装を始められるように書く。
 
 この仕様の中の「サーバー」は、認証プロキシ (nginx + oauth2-proxy) の後ろで動く `server/translator.py`、

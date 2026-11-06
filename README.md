@@ -1,4 +1,4 @@
-# ptranslate-desk
+# PTranslate Desk
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/logo/png/horizontal-white@2x.png">
@@ -6,6 +6,7 @@
 </picture>
 
 PLaMo 3 Translate (llama.cpp の llama-server) を裏側にした、Web とデスクトップの翻訳アプリ。
+デスクトップ版の名前は「PTranslate Desk」、Web 版は「PTranslate」です。
 DeepL のように、文章を貼って訳す画面と、選んだ文をショートカットで訳す小窓を目指す。
 
 | 部分 | 場所 | 状態 |

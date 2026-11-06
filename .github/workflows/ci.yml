@@ -50,7 +50,7 @@ jobs:
       - run: npm run build -- --bundles app
         working-directory: desktop
       # アプリ内の実行権限とシンボリックリンクを保つ。
-      - run: ditto -c -k --sequesterRsrc --keepParent 'src-tauri/target/release/bundle/macos/翻訳.app' macos-app.zip
+      - run: ditto -c -k --sequesterRsrc --keepParent 'src-tauri/target/release/bundle/macos/PTranslate Desk.app' macos-app.zip
         working-directory: desktop
       - uses: actions/upload-artifact@v4
         with:

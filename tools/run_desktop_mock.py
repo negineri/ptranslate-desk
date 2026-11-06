@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""モック、翻訳サーバー、デスクトップの主窓をまとめて起動する。"""
+"""PTranslate Desk、翻訳サーバー、モックをまとめて起動する。"""
 
 from __future__ import annotations
 

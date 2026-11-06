@@ -1,4 +1,4 @@
-# デスクトップ版 (macOS)
+# PTranslate Desk (macOS)
 
 Tauri 2 の主窓をローカルの翻訳モックで試せます。Rust、Node.js、各 OS の
 [Tauri の開発に必要なツール](https://v2.tauri.app/start/prerequisites/)を用意してください。Ubuntu では追加で `libdbus-1-dev` が必要です。
@@ -26,7 +26,7 @@ python3 tools/run_desktop_mock.py
 
 1. 「モックにログイン」し、主窓の「デスクトップの設定」を開きます。
 2. 「アクセシビリティの設定を開く」を押し、macOS の「プライバシーとセキュリティ →
-   アクセシビリティ」で「翻訳」を許可します。開発用の実行ファイルで試す場合は、実行している
+   アクセシビリティ」で「PTranslate Desk」を許可します。開発用の実行ファイルで試す場合は、実行している
    アプリまたは端末に許可が必要な場合があります。許可後はアプリを再起動します。
 3. ほかのアプリで文を選び、⌘C を 0.5 秒以内に 2 回押します。コピーされた文をマウスの近くの
    小窓で訳し、届いた分から表示します。
@@ -83,7 +83,7 @@ npm ci
 npm run build
 ```
 
-`src-tauri/target/release/bundle/macos/翻訳.app` と
+`src-tauri/target/release/bundle/macos/PTranslate Desk.app` と
 `src-tauri/target/release/bundle/dmg/` 内の dmg が生成されます。
 現段階は開発用で、Developer ID の署名と公証はしていません。
 アプリを単独で起動する場合も、上の手順のモックと翻訳サーバーを先に起動してください。
@@ -91,7 +91,7 @@ npm run build
 ビルド済みのアプリをモックとまとめて起動するには、リポジトリのルートで実行します。
 
 ```sh
-python3 tools/run_desktop_mock.py --app desktop/src-tauri/target/release/bundle/macos/翻訳.app
+python3 tools/run_desktop_mock.py --app 'desktop/src-tauri/target/release/bundle/macos/PTranslate Desk.app'
 ```
 
 開発用の実行ファイルだけを作る場合は、次を実行します。
