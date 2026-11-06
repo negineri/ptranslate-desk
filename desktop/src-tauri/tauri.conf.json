@@ -11,5 +11,10 @@
     "withGlobalTauri": true,
     "windows": [{ "title": "翻訳（モック）", "width": 1000, "height": 760 }]
   },
-  "bundle": { "active": false }
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": ["icons/icon.png"],
+    "macOS": { "minimumSystemVersion": "13.0" }
+  }
 }

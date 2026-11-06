@@ -6,7 +6,7 @@ DeepL のように、文章を貼って訳す画面と、選んだ文をショ�
 | 部分 | 場所 | 状態 |
 | --- | --- | --- |
 | サーバー (API と Web の画面を返す) | `server/translator.py`、`server/static/index.html` | 動く。本番 (`https://translate.witenp.com/`) で使っている |
-| デスクトップのクライアント | `desktop/` (まだ無い) | 仕様だけ: [docs/SPEC.md](docs/SPEC.md) |
+| デスクトップのクライアント | `desktop/` | macOS の主窓をモックで実行できる: [起動とビルド](desktop/README.md) |
 | 翻訳エンジンのモック | `tools/mock_plamo.py` | 試験と手元の開発用 |
 
 ## サーバーを動かす

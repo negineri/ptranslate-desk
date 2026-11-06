@@ -2,6 +2,17 @@
 
 mod settings;
 
+#[cfg(feature = "smoke-test")]
+#[tauri::command]
+fn smoke_result(app: tauri::AppHandle, passed: bool, step: String) {
+    println!(
+        "Mac WebView smoke test: {}",
+        if passed { "PASS" } else { "FAIL" }
+    );
+    println!("確認項目: {step}");
+    app.exit(if passed { 0 } else { 1 });
+}
+
 use reqwest::{Client, Method};
 use serde::Serialize;
 use serde_json::Value;
@@ -111,19 +122,38 @@ fn main() {
         .read_timeout(Duration::from_secs(120))
         .build()
         .expect("HTTP クライアントの作成に失敗しました");
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Backend {
             client,
             session: Mutex::new(Session::default()),
-        })
+        });
+    #[cfg(not(feature = "smoke-test"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        set_mock_login,
+        start_request,
+        stop_request,
+        settings::load_settings,
+        settings::save_settings
+    ]);
+    #[cfg(feature = "smoke-test")]
+    let builder = builder
         .invoke_handler(tauri::generate_handler![
             set_mock_login,
             start_request,
             stop_request,
             settings::load_settings,
-            settings::save_settings
+            settings::save_settings,
+            smoke_result
         ])
+        .on_page_load(|window, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                window
+                    .eval(include_str!("../../tests/smoke.js"))
+                    .expect("試験を開始できませんでした");
+            }
+        });
+    builder
         .run(tauri::generate_context!())
         .expect("翻訳アプリを起動できませんでした");
 }

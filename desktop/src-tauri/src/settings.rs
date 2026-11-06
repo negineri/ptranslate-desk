@@ -12,6 +12,10 @@ pub struct Settings {
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    #[cfg(feature = "smoke-test")]
+    if let Some(dir) = std::env::var_os("PTRANSLATE_SMOKE_CONFIG") {
+        return Ok(PathBuf::from(dir).join("settings.json"));
+    }
     app.path()
         .app_config_dir()
         .map(|dir| dir.join("settings.json"))

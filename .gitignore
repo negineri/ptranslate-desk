@@ -6,3 +6,4 @@ target/
 dist/
 
 /desktop/src-tauri/gen/
+/desktop/macos-app.zip

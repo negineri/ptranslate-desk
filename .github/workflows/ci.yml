@@ -25,6 +25,37 @@ jobs:
       - run: python -m unittest discover -s server/tests -v
       - run: node --test server/tests/test_translation.mjs
 
+  desktop-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
+      - run: python3 tools/run_desktop_mock.py --smoke-test
+      - run: npm ci
+        working-directory: desktop
+      - run: npm run build -- --bundles app
+        working-directory: desktop
+      # アプリ内の実行権限とシンボリックリンクを保つ。
+      - run: ditto -c -k --sequesterRsrc --keepParent 'src-tauri/target/release/bundle/macos/翻訳.app' macos-app.zip
+        working-directory: desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: desktop/macos-app.zip
+          if-no-files-found: error
+
   image:
     needs: server
     runs-on: ubuntu-latest
