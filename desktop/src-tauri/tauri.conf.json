@@ -9,7 +9,11 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "title": "翻訳（モック）", "width": 1000, "height": 760 }]
+    "windows": [
+      { "label": "main", "title": "翻訳（モック）", "width": 1000, "height": 760 },
+      { "label": "popup", "title": "選んだ文を翻訳", "url": "popup.html", "width": 460, "height": 340,
+        "visible": false, "alwaysOnTop": true, "skipTaskbar": true, "resizable": false }
+    ]
   },
   "bundle": {
     "active": true,

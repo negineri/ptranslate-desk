@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>選んだ文を翻訳</title>
+<!-- shared-style -->
+<style>
+  main { padding: 14px; }
+  .heading { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  #direction { flex: 1; font-size: .9rem; color: var(--muted); }
+  #out { min-height: 170px; height: 170px; overflow-y: auto; background: var(--panel); }
+  #status { margin-top: 6px; }
+  .row { justify-content: flex-end; }
+</style>
+</head>
+<body><main>
+  <div class="heading"><span id="direction">選んだ文を翻訳</span><button id="close" aria-label="閉じる">閉じる</button></div>
+  <div id="out" aria-live="polite"></div>
+  <div id="status" class="hint" role="status"></div>
+  <div class="row"><button id="copy" disabled>コピー</button><button id="open-main">主窓で開く</button></div>
+</main><script type="module" src="./popup.mjs"></script></body>
+</html>

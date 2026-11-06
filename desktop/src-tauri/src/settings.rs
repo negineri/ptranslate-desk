@@ -1,14 +1,29 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, io::ErrorKind, path::PathBuf};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Settings {
     source: String,
     target: String,
     form: String,
     glossary: String,
     auto: bool,
+    pub shortcut: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            target: "auto".into(),
+            form: String::new(),
+            glossary: String::new(),
+            auto: true,
+            shortcut: "double-copy".into(),
+        }
+    }
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -36,6 +51,8 @@ pub fn load_settings(app: AppHandle) -> Result<Option<Settings>, String> {
 
 #[tauri::command]
 pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
+    let previous = load_settings(app.clone())?.unwrap_or_default();
+    crate::resident::configure_shortcut(&app, &settings.shortcut)?;
     let path = settings_path(&app)?;
     let dir = path.parent().expect("設定ファイルの親ディレクトリ");
     let save = || -> Result<(), Box<dyn std::error::Error>> {
@@ -45,5 +62,26 @@ pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
         file.persist(&path)?;
         Ok(())
     };
-    save().map_err(|_| "設定を保存できませんでした".into())
+    if save().is_err() {
+        let _ = crate::resident::configure_shortcut(&app, &previous.shortcut);
+        return Err("設定を保存できませんでした".into());
+    }
+    let _ = app.emit("settings-changed", ());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_settings_saved_before_shortcuts_were_added() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"source":"en","target":"ja","form":"polite","glossary":"","auto":false}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.shortcut, "double-copy");
+        assert_eq!(settings.source, "en");
+        assert!(!settings.auto);
+    }
 }

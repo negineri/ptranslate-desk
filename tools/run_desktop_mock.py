@@ -88,13 +88,13 @@ def main() -> int:
                 result = app.wait(timeout=60 if args.smoke_test else None)
                 if args.smoke_test and result == 0:
                     deadline = time.monotonic() + 5
-                    while stats["canceled"] < 1 and time.monotonic() < deadline:
+                    while stats["canceled"] < 3 and time.monotonic() < deadline:
                         time.sleep(0.1)
-                    if stats["canceled"] < 1:
+                    if stats["canceled"] < 3:
                         raise RuntimeError("中止が翻訳エンジンに伝わりませんでした")
                     print("翻訳エンジンまでの中止: PASS", flush=True)
                     saved = json.loads((Path(config) / "settings.json").read_text())
-                    if set(saved) != {"source", "target", "form", "glossary", "auto"}:
+                    if set(saved) != {"source", "target", "form", "glossary", "auto", "shortcut"}:
                         raise RuntimeError("設定に保存してはいけない項目があります")
                     print("設定の保存と原文・訳文を保存しないこと: PASS", flush=True)
                 return result

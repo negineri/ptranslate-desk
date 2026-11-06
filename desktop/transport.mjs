@@ -1,4 +1,7 @@
-const { Channel, invoke } = window.__TAURI__.core;
+import { desktopFetch as request } from "./ipc.mjs";
+const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
+
 function showError(error) {
   const status = document.getElementById("status");
   status.textContent = String(error);
@@ -7,102 +10,106 @@ function showError(error) {
 
 let savedSettings = null;
 let pendingSave = Promise.resolve();
-
 export const settingsStorage = {
   getItem() { return savedSettings; },
   setItem(_key, value) {
-    savedSettings = value;
-    const settings = JSON.parse(value);
-    pendingSave = pendingSave.then(() => invoke("save_settings", { settings })).catch(showError);
+    const previous = savedSettings;
+    const settings = { ...JSON.parse(savedSettings || "{}"), ...JSON.parse(value) };
+    const next = JSON.stringify(settings);
+    savedSettings = next;
+    pendingSave = pendingSave.then(() => invoke("save_settings", { settings })).catch((error) => {
+      if (savedSettings === next) savedSettings = previous;
+      showError(error);
+    });
+    return pendingSave;
   },
 };
 
 export async function copyText(text) {
-  try {
-    await window.__TAURI__.clipboardManager.writeText(text);
-    return true;
-  } catch (error) {
-    showError(error);
-    return false;
-  }
+  try { await window.__TAURI__.clipboardManager.writeText(text); return true; }
+  catch (error) { showError(error); return false; }
 }
 
 const loginButton = document.createElement("button");
 loginButton.textContent = "モックにログイン";
 document.getElementById("who").after(" ", loginButton);
-
 let resolveLogin;
 const login = new Promise((resolve) => { resolveLogin = resolve; });
-loginButton.addEventListener("click", async () => {
-  loginButton.disabled = true;
-  try {
-    if (loginButton.dataset.loggedIn) {
-      await invoke("set_mock_login", { loggedIn: false });
-      await pendingSave;
-      location.reload();
-      return;
-    }
+
+async function restoreSession() {
+  const status = await invoke("session_status");
+  if (status.logged_in && !loginButton.dataset.loggedIn) {
     const settings = await invoke("load_settings").catch(showError);
     savedSettings = settings ? JSON.stringify(settings) : null;
-    await invoke("set_mock_login", { loggedIn: true });
     loginButton.dataset.loggedIn = "true";
     loginButton.textContent = "ログアウト";
     resolveLogin();
-  } catch (error) {
-    showError(error);
-  } finally {
-    loginButton.disabled = false;
+  } else if (!status.logged_in && loginButton.dataset.loggedIn) {
+    await pendingSave;
+    location.reload();
   }
+  return status;
+}
+
+loginButton.addEventListener("click", async () => {
+  loginButton.disabled = true;
+  try {
+    await pendingSave;
+    await invoke("set_mock_login", { loggedIn: !loginButton.dataset.loggedIn });
+    await restoreSession();
+  } catch (error) { showError(error); }
+  finally { loginButton.disabled = false; }
 });
 
-let nextId = 0;
+await listen("session-changed", () => { void restoreSession().catch(showError); });
+await restoreSession().catch(showError);
 
-export async function desktopFetch(route, { body, signal } = {}) {
-  await login;
-  signal?.throwIfAborted();
-  const id = ++nextId;
-  const stream = new Channel();
-  let reader;
-  let finished = false;
-  const responseBody = new ReadableStream({ start(controller) { reader = controller; } });
+export async function desktopFetch(...args) { await login; return request(...args); }
 
-  return new Promise((resolve, reject) => {
-    function finish(error) {
-      if (finished) return;
-      finished = true;
-      signal?.removeEventListener("abort", abort);
-      if (error) {
-        reader.error(error);
-        reject(error);
-      } else {
-        reader.close();
-      }
-      void started.then(() => invoke("stop_request", { id })).catch(() => {});
-    }
-
-    function abort() {
-      finish(new DOMException("中止しました", "AbortError"));
-    }
-
-    stream.onmessage = (event) => {
-      if (finished) return;
-      switch (event.kind) {
-        case "start":
-          resolve(new Response(responseBody, { status: event.status }));
-          break;
-        case "bytes":
-          reader.enqueue(Uint8Array.from(event.bytes));
-          break;
-        case "end":
-          finish();
-          break;
-        case "error":
-          finish(new Error("ローカルのモックサーバーに接続できないか、接続が途中で切れました"));
-          break;
-      }
-    };
-    const started = invoke("start_request", { id, route, body: body ? JSON.parse(body) : null, stream });
-    void started.catch((error) => finish(new Error(String(error))));
-    signal?.addEventListener("abort", abort, { once: true });
-  });
+const settingsPanel = document.createElement("details");
+settingsPanel.id = "desktop-settings";
+settingsPanel.innerHTML = `<summary>デスクトップの設定</summary>
+  <label for="shortcut">選んだ文を翻訳するショートカット</label>
+  <select id="shortcut">
+    <option value="double-copy">⌘C を 0.5 秒以内に 2 回</option>
+    <option value="CommandOrControl+Shift+T">⌘⇧T</option>
+  </select>
+  <p class="hint" id="shortcut-status"></p>
+  <button id="accessibility">アクセシビリティの設定を開く</button>
+  <p class="hint">macOS のシステム設定で「翻訳」を許可してください。許可後はアプリを再起動してください。
+  主窓を閉じても常駐します。終了するにはメニューバーの「終了」か ⌘Q を使います。</p>`;
+document.querySelector("section").append(settingsPanel);
+const shortcut = document.getElementById("shortcut");
+const shortcutStatus = document.getElementById("shortcut-status");
+async function updateShortcutStatus() {
+  const status = await invoke("session_status");
+  shortcut.value = status.shortcut;
+  shortcutStatus.textContent = status.paused ? "ショートカットを一時的に止めています" :
+    status.accessibility ? "ショートカットを使えます" : "選んだ文を取得するにはアクセシビリティの許可が必要です";
 }
+shortcut.addEventListener("change", async () => {
+  shortcut.disabled = true;
+  await settingsStorage.setItem("translator", JSON.stringify({ shortcut: shortcut.value }));
+  await updateShortcutStatus().catch(showError);
+  shortcut.disabled = false;
+});
+document.getElementById("accessibility").addEventListener("click", () => {
+  void invoke("open_accessibility_settings").catch(showError);
+});
+await listen("show-settings", () => { settingsPanel.open = true; settingsPanel.scrollIntoView(); });
+await listen("session-changed", () => { void updateShortcutStatus().catch(showError); });
+await listen("desktop-error", ({ payload }) => showError(payload));
+await listen("translation-interrupted", () => document.getElementById("stop").click());
+
+async function takeMainText() {
+  if (document.querySelector("section").inert) return;
+  const text = await invoke("take_main_text");
+  if (text === null) return;
+  const source = document.getElementById("src");
+  source.value = text;
+  source.dispatchEvent(new Event("input"));
+  document.getElementById("go").click();
+}
+await listen("main-text", () => { void takeMainText().catch(showError); });
+document.addEventListener("desktop-ready", () => { void takeMainText().catch(showError); });
+void updateShortcutStatus().catch(showError);

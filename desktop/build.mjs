@@ -13,7 +13,10 @@ await Promise.all([
     .replace("await navigator.clipboard.writeText(els.out.textContent);",
       "if (!await copyText(els.out.textContent)) return;")
     .replace("<section>", "<section inert>")
-    .replace("  restore();", '  restore();\n  document.querySelector("section").inert = false;')),
+    .replace("  restore();", '  restore();\n  document.querySelector("section").inert = false;\n  document.dispatchEvent(new Event("desktop-ready"));')),
   copyFile(new URL("translation.mjs", source), new URL("translation.mjs", dist)),
   copyFile(new URL("./transport.mjs", import.meta.url), new URL("transport.mjs", dist)),
+  ...["ipc.mjs", "popup.mjs"].map((name) => copyFile(new URL(name, import.meta.url), new URL(name, dist))),
+  readFile(new URL("popup.html", import.meta.url), "utf8").then((popup) =>
+    writeFile(new URL("popup.html", dist), popup.replace("<!-- shared-style -->", html.match(/<style>[\s\S]*?<\/style>/)[0]))),
 ]);

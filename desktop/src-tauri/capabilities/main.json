@@ -1,5 +1,5 @@
 {
   "identifier": "main",
-  "windows": ["main"],
-  "permissions": ["clipboard-manager:allow-write-text"]
+  "windows": ["main", "popup"],
+  "permissions": ["clipboard-manager:allow-write-text", "core:event:allow-listen", "core:event:allow-unlisten"]
 }
