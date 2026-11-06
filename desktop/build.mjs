@@ -1,0 +1,19 @@
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+
+const source = new URL("../server/static/", import.meta.url);
+const dist = new URL("./dist/", import.meta.url);
+const html = await readFile(new URL("index.html", source), "utf8");
+const script = '<script type="module">';
+if (!html.includes(script)) throw new Error("Web 画面のモジュールを見つけられません");
+await mkdir(dist, { recursive: true });
+await Promise.all([
+  writeFile(new URL("index.html", dist), html.replace(
+    script, script + '\nimport { desktopFetch as fetch, settingsStorage as localStorage, copyText } from "./transport.mjs";',
+  ).replace("このブラウザに", "この端末に")
+    .replace("await navigator.clipboard.writeText(els.out.textContent);",
+      "if (!await copyText(els.out.textContent)) return;")
+    .replace("<section>", "<section inert>")
+    .replace("  restore();", '  restore();\n  document.querySelector("section").inert = false;')),
+  copyFile(new URL("translation.mjs", source), new URL("translation.mjs", dist)),
+  copyFile(new URL("./transport.mjs", import.meta.url), new URL("transport.mjs", dist)),
+]);

@@ -1,0 +1,15 @@
+{
+  "productName": "翻訳",
+  "version": "0.1.0",
+  "identifier": "com.witenp.ptranslate-desk",
+  "build": {
+    "beforeDevCommand": { "script": "node build.mjs", "wait": true },
+    "beforeBuildCommand": "node build.mjs",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "title": "翻訳（モック）", "width": 1000, "height": 760 }]
+  },
+  "bundle": { "active": false }
+}
