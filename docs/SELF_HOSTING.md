@@ -101,7 +101,7 @@ TR_LISTEN_HOST=127.0.0.1 TR_LISTEN_PORT=8002 \
 
 別の端末から1章のcurlを再実行すると実際の訳が返ります。これは構築時の手動確認であり、自動試験には実エンジンを使いません。
 エンジンがAPIキーを要求する場合だけ `TR_API_KEY` を設定します。空の警告はキー不要のローカルエンジンなら正常です。
-その他の環境変数は[READMEの一覧](../README.md#サーバーを動かす)を参照してください。
+その他の環境変数は[以下の一覧](#サーバーの環境変数)を参照してください。
 
 再起動後も動かすには、ソースを `/srv/ptranslate-desk`、llama.cppを `/srv/llama.cpp` などに配置し、
 専用ユーザーとsystemdサービスを作ります。モデルのキャッシュを保存できるホームディレクトリを用意します。
@@ -171,6 +171,23 @@ docker run -d --name ptranslate --restart unless-stopped --network host \
 
 上のタグは例です。`docker image inspect` で取得したRepoDigestを使い、実運用では `image@sha256:...` に固定してください。
 Pythonサービスとコンテナはどちらか一方を使います。
+
+### サーバーの環境変数
+
+| 環境変数                            | 既定                                          | 意味                                             |
+| ----------------------------------- | --------------------------------------------- | ------------------------------------------------ |
+| `TR_UPSTREAM_URL`                   | (必須)                                        | 翻訳エンジン (llama-server) の `/v1/completions` |
+| `TR_API_KEY`                        | 空                                            | 翻訳エンジンに付ける `Authorization: Bearer`     |
+| `TR_MODEL` | `plamo-3-translate` | 翻訳エンジンに渡すモデル名 |
+| `TR_LISTEN_HOST` / `TR_LISTEN_PORT` | `127.0.0.1` / `8002` (コンテナでは `0.0.0.0`) | 待ち受け                                         |
+| `TR_MAX_CHARS`                      | 4000                                          | 1 回の原文の上限 (文字)                          |
+| `TR_MAX_PROMPT_CHARS`               | 12000                                         | 文脈・前の訳・用語集を合わせた上限 (文字)        |
+| `TR_MAX_GLOSSARY` | 200 | 用語集の組数の上限 |
+| `TR_MAX_ACTIVE_PER_USER`            | 2                                             | 1 人が同時に流せる翻訳の数                       |
+| `TR_UPSTREAM_TIMEOUT` | 600 | 翻訳エンジンとの通信タイムアウト（秒） |
+| `TR_HEARTBEAT_SECONDS` | 15 | SSEのハートビート間隔（秒） |
+| `TR_STATIC_DIR` | `server/static/`（コンテナでは `/app/static`） | Webの静的ファイルの配置先 |
+
 
 ## 4. AuthentikとHTTPSを用意する
 
