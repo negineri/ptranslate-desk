@@ -10,7 +10,19 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python3 tools/check_release_version.py --tag "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+
   server:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +38,7 @@ jobs:
       - run: node --test server/tests/test_translation.mjs
 
   desktop-macos:
+    needs: version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,25 +51,95 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
+          key: macos-universal
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
       - run: node desktop/build.mjs
       - run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
       - run: python3 tools/run_desktop_mock.py --smoke-test
       - run: npm ci
         working-directory: desktop
-      - run: npm run build -- --bundles app
+      - run: npm run build -- --target universal-apple-darwin --bundles app
+        working-directory: desktop
+      - run: lipo 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app/Contents/MacOS/ptranslate-desk' -verify_arch arm64 x86_64
         working-directory: desktop
       # アプリ内の実行権限とシンボリックリンクを保つ。
-      - run: ditto -c -k --sequesterRsrc --keepParent 'src-tauri/target/release/bundle/macos/PTranslate Desk.app' macos-app.zip
+      - run: ditto -c -k --sequesterRsrc --keepParent 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app' macos-app.zip
         working-directory: desktop
       - uses: actions/upload-artifact@v4
         with:
           name: macos-app
           path: desktop/macos-app.zip
           if-no-files-found: error
+
+  desktop-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [desktop-macos, image]
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: desktop-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          key: macos-universal
+      - run: npm ci
+        working-directory: desktop
+      - name: 更新署名用の秘密を確認
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" || -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "::error::更新署名用のActions secretsを設定してください"
+            exit 1
+          fi
+      - name: universal dmgと署名付き更新ファイルをReleaseに公開
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: PTranslate Desk ${{ github.ref_name }}
+          releaseBody: |
+            macOS 13以降向けのuniversal版です。Apple SiliconとIntelの両方で使えます。
+
+            署名していないので、初回は右クリックから開く
+
+            dmgを開き、PTranslate Deskをアプリケーションフォルダに入れてください。
+            更新用ファイルはTauriの更新署名で検証します。AppleのDeveloper ID署名・公証は未対応です。
+          releaseDraft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+      - name: 更新manifestの両アーキテクチャを確認
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir "$RUNNER_TEMP/ptranslate-manifest"
+          python3 tools/check_release_version.py --tag "$RELEASE_TAG" --manifest "$RUNNER_TEMP/ptranslate-manifest/latest.json"
 
   image:
     needs: server

@@ -104,6 +104,8 @@ npm run build
 `src-tauri/target/release/bundle/macos/PTranslate Desk.app` と
 `src-tauri/target/release/bundle/dmg/` 内の dmg が生成されます。
 現段階は開発用で、Developer ID の署名と公証はしていません。
+タグからの配布はApple Silicon・Intel共通のuniversal dmgです。
+Releaseの作成、更新署名のsecrets、バージョンの合わせ方は [配布手順](../docs/RELEASING.md) を参照してください。
 アプリを単独で起動すると、本番にログインできます。
 
 ビルド済みのアプリをモックとまとめて起動するには、リポジトリのルートで実行します。
@@ -139,5 +141,5 @@ OS の実際のキー監視と、ほかのアプリへのコピーキー送信�
 
 ## これから実装するもの
 
-自動起動、履歴、自動更新、Windows・Linux でのショートカットによる選択文の取得は未実装です。
+自動起動、履歴、Windows・Linux でのショートカットによる選択文の取得は未実装です。
 仕様は [SPEC](../docs/SPEC.md) を参照してください。

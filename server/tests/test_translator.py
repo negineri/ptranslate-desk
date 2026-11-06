@@ -12,8 +12,8 @@ import sys
 import threading
 import time
 import unittest
-from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -114,6 +114,18 @@ class ValidationTest(unittest.TestCase):
         self.assertIsNone(got["source"])
 
 
+class ServerBindTest(unittest.TestCase):
+    def test_server_and_mock_bind_without_reverse_dns(self):
+        with patch("socket.getfqdn", side_effect=AssertionError("逆引きを呼んでいます")):
+            server = tr.TranslationHTTPServer(("127.0.0.1", 0), tr.Handler)
+            mock, _ = mock_plamo.make_server()
+            for app in (server, mock):
+                with app:
+                    self.assertEqual(app.server_name, "127.0.0.1")
+                    self.assertEqual(app.server_port, app.socket.getsockname()[1])
+                    self.assertGreater(app.server_port, 0)
+
+
 class ServerTest(unittest.TestCase):
     """モックの翻訳エンジンを相手に、HTTP の動きを確かめる。"""
 
@@ -125,7 +137,7 @@ class ServerTest(unittest.TestCase):
         tr.API_KEY = "k"
         tr.HEARTBEAT_SECONDS = 1
         tr.STATIC_DIR = ROOT / "server" / "static"
-        cls.app = ThreadingHTTPServer(("127.0.0.1", 0), tr.Handler)
+        cls.app = tr.TranslationHTTPServer(("127.0.0.1", 0), tr.Handler)
         cls.app.daemon_threads = True
         threading.Thread(target=cls.app.serve_forever, daemon=True).start()
 

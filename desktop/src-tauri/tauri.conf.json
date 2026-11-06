@@ -3,22 +3,59 @@
   "version": "0.1.0",
   "identifier": "com.witenp.ptranslate-desk",
   "build": {
-    "beforeDevCommand": { "script": "node build.mjs", "wait": true },
+    "beforeDevCommand": {
+      "script": "node build.mjs",
+      "wait": true
+    },
     "beforeBuildCommand": "node build.mjs",
     "frontendDist": "../dist"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "label": "main", "title": "PTranslate Desk", "width": 1000, "height": 760 },
-      { "label": "popup", "title": "PTranslate Desk — 選んだ文を翻訳", "url": "popup.html", "width": 460, "height": 340,
-        "visible": false, "alwaysOnTop": true, "skipTaskbar": true, "resizable": false }
+      {
+        "label": "main",
+        "title": "PTranslate Desk",
+        "width": 1000,
+        "height": 760
+      },
+      {
+        "label": "popup",
+        "title": "PTranslate Desk — 選んだ文を翻訳",
+        "url": "popup.html",
+        "width": 460,
+        "height": 340,
+        "visible": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false
+      }
     ]
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-    "macOS": { "minimumSystemVersion": "13.0" }
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "requireSignedVersion": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc5OUMwRUMxMDlGRDAwQUEKUldTcUFQMEp3UTZjZVgydUNmblcxRHB1RDgyRDViRnFYS1VzeFc3Z2Q1MUlTR3psczA0VmFpQm0K",
+      "endpoints": [
+        "https://github.com/negineri/ptranslate-desk/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

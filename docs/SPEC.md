@@ -243,11 +243,17 @@ Authentik の `tamesareru-members` だけ (Web と同じ)。入っていない�
 
 ## 7. 配布と更新
 
-- 配布物: Windows は MSI か NSIS、macOS は dmg (公証済み)、Linux は AppImage と deb
+- 配布物: Windows は MSI か NSIS、macOS は universal (`universal-apple-darwin`) の dmg、Linux は AppImage と deb
 - 署名: macOS は Apple の Developer ID で署名と公証、Windows はコード署名 (無ければ SmartScreen の警告が出ることを
   README に書く)。署名の鍵はクライアントのリポジトリの CI の秘密に置く
+- Developer IDを用意するまでは、macOSの署名・公証は保留する。Releaseの説明に
+  「署名していないので、初回は右クリックから開く」と書く
 - 更新: Tauri の updater。更新の情報 (JSON) と配布物は、このリポジトリ (公開) の GitHub Releases に置く。
   起動時と 1 日 1 回確かめ、利用者が承認してから入れる
+- 更新用の秘密鍵とパスワードはActions secrets、公開鍵は `tauri.conf.json` に置く。
+  `latest.json` はApple SiliconとIntelの両方に同じ署名付きuniversal更新ファイルを割り当てる
+- `v*` タグと `tauri.conf.json` の `version` を一致させ、サーバーイメージと同じタグで配布する。
+  mainとPRはActionsの成果物だけを作る。手順は [RELEASING.md](RELEASING.md) を参照
 
 ## 8. 守ること
 

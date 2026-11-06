@@ -20,7 +20,7 @@ await Promise.all([
   copyFile(new URL("translation.mjs", source), new URL("translation.mjs", dist)),
   ...["logo.png", "favicon.ico"].map((name) => copyFile(new URL(name, source), new URL(name, dist))),
   copyFile(new URL("./transport.mjs", import.meta.url), new URL("transport.mjs", dist)),
-  ...["ipc.mjs", "popup.mjs"].map((name) => copyFile(new URL(name, import.meta.url), new URL(name, dist))),
+  ...["ipc.mjs", "popup.mjs", "updates.mjs"].map((name) => copyFile(new URL(name, import.meta.url), new URL(name, dist))),
   readFile(new URL("popup.html", import.meta.url), "utf8").then((popup) =>
     writeFile(new URL("popup.html", dist), popup.replace("<!-- shared-style -->", html.match(/<style>[\s\S]*?<\/style>/)[0]))),
 ]);

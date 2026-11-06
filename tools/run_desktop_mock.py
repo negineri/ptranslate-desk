@@ -59,6 +59,7 @@ def main() -> int:
         TR_LISTEN_PORT="8002",
         TR_UPSTREAM_URL=f"http://127.0.0.1:{mock.server_port}/v1/completions",
     )
+    started = time.monotonic()
     server = subprocess.Popen([sys.executable, "-I", "server/translator.py"], cwd=ROOT, env=env)
     app = None
     clipboard = None
@@ -66,7 +67,7 @@ def main() -> int:
         if args.smoke_test and sys.platform == "darwin":
             clipboard = subprocess.run(["pbpaste"], capture_output=True, check=True).stdout
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        deadline = time.monotonic() + 10
+        deadline = started + 30
         while True:
             if server.poll() is not None:
                 raise RuntimeError("翻訳サーバーを起動できませんでした")
@@ -76,6 +77,10 @@ def main() -> int:
                 )
                 with opener.open(request, timeout=1) as response:
                     if response.status == 200:
+                        print(
+                            f"翻訳サーバー起動: {time.monotonic() - started:.3f} 秒 (/api/config 応答確認)",
+                            flush=True,
+                        )
                         break
             except (urllib.error.URLError, TimeoutError):
                 if time.monotonic() >= deadline:
