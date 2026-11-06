@@ -26,6 +26,13 @@
   .langs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
   button, select, textarea { font: inherit; color: var(--text); background: var(--panel);
          border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
+  select { -webkit-appearance: none; appearance: none; padding-right: 32px; cursor: pointer;
+         background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                           linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+         background-position: right 16px center, right 12px center;
+         background-size: 4px 4px; background-repeat: no-repeat; }
+  button:focus-visible, select:focus-visible, textarea:focus-visible {
+         outline: 2px solid var(--accent); outline-offset: 2px; }
   button { cursor: pointer; }
   button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); padding: 8px 20px; font-weight: 600; }
   button:disabled { opacity: .5; cursor: default; }
