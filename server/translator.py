@@ -337,6 +337,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_static("index.html", "text/html; charset=utf-8")
             if method == "GET" and path == "/translation.mjs":
                 return self.serve_static("translation.mjs", "text/javascript; charset=utf-8")
+            if method == "GET" and path == "/logo.png":
+                return self.serve_static("logo.png", "image/png")
+            if method == "GET" and path == "/favicon.ico":
+                return self.serve_static("favicon.ico", "image/vnd.microsoft.icon")
             if not path.startswith("/api/"):
                 raise HttpError(404, "Not found")
             user = self.user()

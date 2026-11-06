@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!--
+    PTranslate Desk アプリアイコン
+    意図: 「訳」を書いた白い吹き出し = 翻訳を口に出して届けるアプリ。
+    配色は Web 画面のアクセントカラー (#2f6fde) に合わせている。
+  -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#57A1FF"/>
+      <stop offset="1" stop-color="#1F54D0"/>
+    </linearGradient>
+    <linearGradient id="glyph" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3D7BE8"/>
+      <stop offset="1" stop-color="#2050C0"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="232" fill="url(#tile)"/>
+  <g fill="#ffffff">
+    <rect x="160" y="216" width="704" height="544" rx="136"/>
+    <path d="M380,745 L520,745 L366,868 Q352,881 348,864 L368,745 Z"/>
+  </g>
+  <text x="512" y="652" font-family="Noto Sans CJK JP" font-weight="bold" font-size="420" fill="url(#glyph)" text-anchor="middle">訳</text>
+</svg>

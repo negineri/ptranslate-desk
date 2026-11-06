@@ -250,7 +250,10 @@ fn main() {
                 };
                 let _ = resident::menu_action(window.app_handle(), action);
             }
-            tauri::WindowEvent::Focused(false) if window.label() == "popup" => {
+            // 閉じてすぐ開き直した場合、古いフォーカス喪失イベントが後から届くことがある。
+            tauri::WindowEvent::Focused(false)
+                if window.label() == "popup" && !window.is_focused().unwrap_or(false) =>
+            {
                 resident::hide_popup(window.app_handle())
             }
             _ => {}

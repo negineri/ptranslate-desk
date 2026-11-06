@@ -1,5 +1,10 @@
 # ptranslate-desk
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo/png/horizontal-white@2x.png">
+  <img src="docs/logo/png/horizontal@2x.png" width="390" alt="PTranslate Desk">
+</picture>
+
 PLaMo 3 Translate (llama.cpp の llama-server) を裏側にした、Web とデスクトップの翻訳アプリ。
 DeepL のように、文章を貼って訳す画面と、選んだ文をショートカットで訳す小窓を目指す。
 

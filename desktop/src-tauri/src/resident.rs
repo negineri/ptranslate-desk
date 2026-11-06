@@ -380,20 +380,17 @@ pub fn refresh_menu(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-// 小さいメニューバーでもログイン状態を見分けられる、背景が透明の図形。
+// macOS のテンプレートアイコンはアルファ値で描画され、システムの配色に追従する。
 fn tray_image(logged_in: bool) -> tauri::image::Image<'static> {
-    let mut rgba = vec![0; 22 * 22 * 4];
-    for y in 3..19 {
-        for x in 3..19 {
-            let border = x == 3 || x == 18 || y == 3 || y == 18;
-            let mark = logged_in
-                && ((y == 8 && (7..15).contains(&x)) || (x == 11 && (6..16).contains(&y)));
-            if border || mark {
-                rgba[(y * 22 + x) * 4 + 3] = 255;
-            }
+    let image = tauri::image::Image::from_bytes(include_bytes!("../icons/tray/44x44.png"))
+        .expect("メニューバーのロゴを読み込めませんでした");
+    let mut rgba = image.rgba().to_vec();
+    if !logged_in {
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel[3] /= 2;
         }
     }
-    tauri::image::Image::new_owned(rgba, 22, 22)
+    tauri::image::Image::new_owned(rgba, image.width(), image.height())
 }
 
 pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {

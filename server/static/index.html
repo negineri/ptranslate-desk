@@ -5,6 +5,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>翻訳</title>
+<link rel="icon" href="./favicon.ico" sizes="any">
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6576; --line: #dde1e8;
@@ -20,7 +21,8 @@
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; }
   main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
-  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  h1 { display: flex; align-items: center; gap: 10px; font-size: 1.4rem; margin: 0 0 4px; }
+  .brand-mark { display: block; flex-shrink: 0; }
   .sub { color: var(--muted); margin: 0 0 16px; font-size: .9rem; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
   .langs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
@@ -59,7 +61,7 @@
 </head>
 <body>
 <main>
-  <h1>翻訳</h1>
+  <h1><img class="brand-mark" src="./logo.png" width="32" height="32" alt="">翻訳</h1>
   <p class="sub">PLaMo 3 Translate で訳します。原文と訳はサーバーに残りません。<span id="who"></span></p>
 
   <section>
