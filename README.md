@@ -47,7 +47,7 @@ Server-Sent Events なので、前段で応答を溜めない (nginx なら `pro
 
 ```bash
 python3 -m unittest discover -s server/tests -v
-black --check server tools   # CI と同じ版 (.github/workflows/ci.yml)
+ruff format --check server tools   # CI と同じ版 (.github/workflows/ci.yml)
 ```
 
 ## ライセンス

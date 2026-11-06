@@ -17,8 +17,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install black==26.3.1
-      - run: black --check --diff server tools
+      - run: pip install ruff==0.17.3
+      - run: ruff format --check --diff server tools
       - run: python -m unittest discover -s server/tests -v
 
   image:

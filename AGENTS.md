@@ -14,7 +14,7 @@ Claude Code は [CLAUDE.md](CLAUDE.md) からこのファイルを読む。
 
 ## 変更を出す前に
 
-- `black --check server tools` (版は `.github/workflows/ci.yml` と同じ) と
+- `ruff format --check server tools` (版は `.github/workflows/ci.yml` と同じ) と
   `python3 -m unittest discover -s server/tests -v` を通す
 - コンテナを変えたら `docker build .` が通ること
 - 公開リポジトリなので、秘密 (鍵、トークン)、内部のホスト名、本番の利用者名をコード・試験・コミットに入れない
