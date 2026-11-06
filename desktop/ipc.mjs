@@ -1,6 +1,6 @@
 const { Channel, invoke } = window.__TAURI__.core;
 
-// 主窓と小窓の両方で使う。所有者は Rust が呼び出し元の窓から決める。
+// メインウィンドウと翻訳ポップアップの両方で使う。所有者は Rust が呼び出し元の窓から決める。
 export async function desktopFetch(route, { body, signal, popupRevision = null } = {}) {
   signal?.throwIfAborted();
   const id = crypto.randomUUID();

@@ -19,9 +19,9 @@ use tokio::{
 use zeroize::Zeroizing;
 
 pub const SERVER: &str = "https://translate.witenp.com";
-const DISCOVERY: &str =
+pub const DISCOVERY: &str =
     "https://atk01.witenp.com/application/o/translator-desktop/.well-known/openid-configuration";
-const CLIENT_ID: &str = "translator-desktop";
+pub const CLIENT_ID: &str = "translator-desktop";
 const SCOPE: &str = "openid profile offline_access";
 const LOGIN_REQUIRED: &str = "ログインし直してください";
 
@@ -33,10 +33,12 @@ trait Vault: Send + Sync {
     fn clear(&self) -> Result<(), String>;
 }
 
-struct OsVault;
+struct OsVault {
+    account: String,
+}
 impl OsVault {
     fn entry(&self) -> Result<keyring::Entry, String> {
-        keyring::Entry::new("com.witenp.ptranslate-desk", CLIENT_ID)
+        keyring::Entry::new("com.witenp.ptranslate-desk", &self.account)
             .map_err(|_| "OS の資格情報の保管を開けませんでした".into())
     }
 }
@@ -92,6 +94,7 @@ pub struct Auth {
     client: Client,
     server: String,
     discovery_url: String,
+    client_id: String,
     vault: Arc<dyn Vault>,
     credentials: Mutex<Credentials>,
     cancellation: watch::Sender<u64>,
@@ -108,8 +111,19 @@ pub struct LoginReport {
     pub claim_names: Vec<String>,
 }
 
+pub struct ConnectionChange<'a>(&'a Auth);
+impl Drop for ConnectionChange<'_> {
+    fn drop(&mut self) {
+        self.0.busy.store(false, Ordering::SeqCst);
+    }
+}
+
 impl Auth {
+    #[cfg(test)]
     pub fn new(client: Client) -> Self {
+        Self::with_connection(client, crate::connection::Connection::default())
+    }
+    pub fn with_connection(client: Client, connection: crate::connection::Connection) -> Self {
         // モックでも本番へのヘッダー偽装はできない。接続先はループバック固定。
         let mock = std::env::var("PTRANSLATE_MOCK").as_deref() == Ok("1");
         Self {
@@ -117,11 +131,14 @@ impl Auth {
             server: if mock {
                 "http://127.0.0.1:8002"
             } else {
-                SERVER
+                &connection.server_url
             }
             .into(),
-            discovery_url: DISCOVERY.into(),
-            vault: Arc::new(OsVault),
+            discovery_url: connection.discovery_url.clone(),
+            client_id: connection.client_id.clone(),
+            vault: Arc::new(OsVault {
+                account: connection.vault_account(),
+            }),
             credentials: Mutex::new(Credentials::default()),
             cancellation: watch::channel(0).0,
             authenticated: AtomicBool::new(false),
@@ -138,6 +155,16 @@ impl Auth {
     }
     pub fn is_busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
+    }
+
+    pub fn begin_connection_change(&self) -> Result<ConnectionChange<'_>, String> {
+        if self.mock {
+            return Err("モック実行中は接続先を変更できません".into());
+        }
+        self.busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| "ログイン処理が終わるか、中止してから接続先を変更してください")?;
+        Ok(ConnectionChange(self))
     }
 
     async fn discovery(&self, credentials: &mut Credentials) -> Result<Discovery, String> {
@@ -235,7 +262,7 @@ impl Auth {
                 &discovery.token_endpoint,
                 &[
                     ("grant_type", "refresh_token"),
-                    ("client_id", CLIENT_ID),
+                    ("client_id", self.client_id.as_str()),
                     ("refresh_token", &previous),
                 ],
             )
@@ -312,7 +339,7 @@ impl Auth {
         let mut authorize = Url::parse(&discovery.authorization_endpoint)
             .map_err(|_| "ログインの設定が不正です")?;
         authorize.query_pairs_mut().extend_pairs([
-            ("client_id", CLIENT_ID),
+            ("client_id", self.client_id.as_str()),
             ("response_type", "code"),
             ("scope", SCOPE),
             ("redirect_uri", redirect.as_str()),
@@ -334,7 +361,7 @@ impl Auth {
                 &discovery.token_endpoint,
                 &[
                     ("grant_type", "authorization_code"),
-                    ("client_id", CLIENT_ID),
+                    ("client_id", self.client_id.as_str()),
                     ("code", &code),
                     ("redirect_uri", &redirect),
                     ("code_verifier", &verifier),
@@ -369,8 +396,11 @@ impl Auth {
         if self.mock {
             return Ok(());
         }
-        let refresh = self.vault.load();
         let mut credentials = self.credentials.lock().await;
+        // 更新処理が終わってから最新のrefresh tokenを読み、再認証も止める。
+        self.authenticated.store(false, Ordering::SeqCst);
+        credentials.initialized = true;
+        let refresh = self.vault.load();
         credentials.access = None;
         let cleared = self.vault.clear();
         let refresh = refresh?;
@@ -381,7 +411,7 @@ impl Auth {
                 .client
                 .post(&discovery.revocation_endpoint)
                 .form(&[
-                    ("client_id", CLIENT_ID),
+                    ("client_id", self.client_id.as_str()),
                     ("token", refresh.as_str()),
                     ("token_type_hint", "refresh_token"),
                 ])

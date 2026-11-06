@@ -15,8 +15,6 @@ use tauri::{
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
-pub const COMBINATION: &str = "CommandOrControl+Shift+T";
-
 #[derive(Default)]
 pub struct DoubleCopy {
     last: Option<Instant>,
@@ -88,6 +86,8 @@ pub struct Status {
     paused: bool,
     shortcut: String,
     accessibility: bool,
+    copy_monitor: bool,
+    copy_events: u64,
     mock: bool,
     logging_in: bool,
     auth_error: Option<String>,
@@ -95,6 +95,10 @@ pub struct Status {
 
 #[tauri::command]
 pub fn session_status(app: AppHandle) -> Status {
+    #[cfg(target_os = "macos")]
+    let (copy_monitor, copy_events) = crate::macos::monitor_status();
+    #[cfg(not(target_os = "macos"))]
+    let (copy_monitor, copy_events) = (false, 0);
     let resident = app.state::<Resident>();
     let ui = resident.ui.lock().unwrap();
     let (paused, shortcut) = (ui.paused, ui.shortcut.clone());
@@ -107,6 +111,8 @@ pub fn session_status(app: AppHandle) -> Status {
         paused,
         shortcut,
         accessibility: accessibility(),
+        copy_monitor,
+        copy_events,
         mock: backend.auth.is_mock(),
         logging_in: backend.auth.is_busy(),
         auth_error,
@@ -152,7 +158,7 @@ pub fn copy_key(app: &AppHandle, copy: bool, repeated: bool) {
 }
 
 pub fn configure_shortcut(app: &AppHandle, shortcut: &str) -> Result<(), String> {
-    if !["double-copy", COMBINATION].contains(&shortcut) {
+    if shortcut != "double-copy" && (shortcut.len() > 100 || !shortcut.contains('+')) {
         return Err("ショートカットの設定が不正です".into());
     }
     let resident = app.state::<Resident>();
@@ -160,15 +166,19 @@ pub fn configure_shortcut(app: &AppHandle, shortcut: &str) -> Result<(), String>
     if previous == shortcut {
         return Ok(());
     }
-    if shortcut == COMBINATION {
-        app.global_shortcut().register(COMBINATION).map_err(|_| {
+    if shortcut != "double-copy" {
+        app.global_shortcut().register(shortcut).map_err(|_| {
             "ショートカットを登録できません。ほかのアプリが使っていないか確認してください"
                 .to_string()
         })?;
-    } else {
-        app.global_shortcut()
-            .unregister(COMBINATION)
-            .map_err(|_| "ショートカットを解除できませんでした".to_string())?;
+    }
+    if previous != "double-copy" {
+        if app.global_shortcut().unregister(previous.as_str()).is_err() {
+            if shortcut != "double-copy" {
+                let _ = app.global_shortcut().unregister(shortcut);
+            }
+            return Err("ショートカットを解除できませんでした".into());
+        }
     }
     resident.ui.lock().unwrap().shortcut = shortcut.into();
     resident.copies.lock().unwrap().reset();
@@ -210,7 +220,7 @@ pub fn open_popup(app: &AppHandle, text: String) -> Result<(), String> {
         show_main(app);
         return Err("ログインしてください".into());
     }
-    // 既に表示中なら隠さずに内容だけを替える。古いフォーカス喪失で新しい小窓を閉じないため。
+    // 既に表示中なら隠さずに内容だけを替える。古いフォーカス喪失で新しい翻訳ポップアップを閉じないため。
     crate::cancel_window(app, "popup");
     let _ = app.emit_to("popup", "popup-hidden", ());
     crate::cancel_window(app, "main");
@@ -225,14 +235,14 @@ pub fn open_popup(app: &AppHandle, text: String) -> Result<(), String> {
     drop(ui);
     let window = app
         .get_webview_window("popup")
-        .ok_or("小窓を開けませんでした")?;
+        .ok_or("翻訳ポップアップを開けませんでした")?;
     if let Ok(cursor) = app.cursor_position() {
         let mut point = PhysicalPosition::new(cursor.x as i32 + 12, cursor.y as i32 + 12);
         if let Ok(Some(monitor)) = window.monitor_from_point(cursor.x, cursor.y) {
             let area = monitor.work_area();
             let size = window
                 .outer_size()
-                .map_err(|_| "小窓の大きさを取得できませんでした")?;
+                .map_err(|_| "翻訳ポップアップの大きさを取得できませんでした")?;
             point.x = point.x.clamp(
                 area.position.x,
                 (area.position.x + area.size.width as i32 - size.width as i32).max(area.position.x),
@@ -245,10 +255,14 @@ pub fn open_popup(app: &AppHandle, text: String) -> Result<(), String> {
         }
         window
             .set_position(point)
-            .map_err(|_| "小窓の位置を設定できませんでした")?;
+            .map_err(|_| "翻訳ポップアップの位置を設定できませんでした")?;
     }
-    window.show().map_err(|_| "小窓を開けませんでした")?;
-    window.set_focus().map_err(|_| "小窓を開けませんでした")?;
+    window
+        .show()
+        .map_err(|_| "翻訳ポップアップを開けませんでした")?;
+    window
+        .set_focus()
+        .map_err(|_| "翻訳ポップアップを開けませんでした")?;
     let _ = app.emit_to("popup", "popup-content", ());
     Ok(())
 }
@@ -270,11 +284,11 @@ fn report_error(app: &AppHandle, message: &str) {
 
 pub fn trigger(app: &AppHandle, copy_selection: bool) {
     let mode = if copy_selection {
-        COMBINATION
+        app.state::<Resident>().ui.lock().unwrap().shortcut.clone()
     } else {
-        "double-copy"
+        "double-copy".to_string()
     };
-    if !shortcut_enabled(app, mode) {
+    if (copy_selection && mode == "double-copy") || !shortcut_enabled(app, &mode) {
         return;
     }
     let resident = app.state::<Resident>();
@@ -287,7 +301,7 @@ pub fn trigger(app: &AppHandle, copy_selection: bool) {
         app.state::<Resident>()
             .capturing
             .store(false, Ordering::SeqCst);
-        if !shortcut_enabled(&app, mode) {
+        if !shortcut_enabled(&app, &mode) {
             return;
         }
         match result {
@@ -356,7 +370,7 @@ pub fn refresh_menu(app: &AppHandle) -> tauri::Result<()> {
         app,
         if status.logged_in { "main" } else { "login" },
         if status.logged_in {
-            "主窓を開く"
+            "メインウィンドウを開く"
         } else {
             "ログイン"
         },
@@ -417,7 +431,7 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     #[cfg(target_os = "macos")]
-    crate::macos::install_monitor(app);
+    crate::macos::watch_permission(app);
     Ok(())
 }
 

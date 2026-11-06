@@ -13,7 +13,7 @@
 - `png/icon-ios-1024.png` をマスターに Tauri CLI で `desktop/src-tauri/icons/` の各サイズのPNGを生成
 - `svg/ptranslate-mark-mono.svg` を元に、周囲の余白を狭めた `desktop/src-tauri/icons/tray/mark.svg` を作成し、
   同じ CLI で 22 / 44 px を生成 (小さいメニューバーでもマークを読み取りやすくするため)
-- `png/icon-64.png` を `server/static/logo.png` にコピーして Web・主窓・小窓で表示
+- `png/icon-64.png` を `server/static/logo.png` にコピーして Web・メインウィンドウ・翻訳ポップアップで表示
 - `png/favicon.ico` を `server/static/favicon.ico` にコピー
 - 横型ロゴの PNG はリポジトリの README で使用 (ライト・ダークの配色に追従)
 

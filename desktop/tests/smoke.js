@@ -9,6 +9,17 @@
     }
   };
   try {
+    step = "ログイン前の接続先設定";
+    await wait(() => $("connection-form"));
+    if ($("connection-settings").closest("section")) throw new Error("接続先設定がログイン前に操作できない");
+    const connection = await window.__TAURI__.core.invoke("load_connection");
+    if ($("server-url").value !== connection.server_url) throw new Error("接続先の読み込み");
+    let rejected = false;
+    try {
+      await window.__TAURI__.core.invoke("save_connection", { connection: { ...connection, server_url: "http://example.com" } });
+    } catch { rejected = true; }
+    if (!rejected) throw new Error("安全でない接続先を保存できてしまう");
+    step = "ログイン";
     await wait(() => [...document.querySelectorAll("button")].some((b) => b.textContent === "モックにログイン"));
     [...document.querySelectorAll("button")].find((b) => b.textContent === "モックにログイン").click();
     await wait(() => !document.querySelector("section").inert);
@@ -40,25 +51,25 @@
     await invoke("save_settings", { settings: { ...saved, shortcut: "CommandOrControl+Shift+T" } });
     if ((await invoke("session_status")).shortcut !== "CommandOrControl+Shift+T") throw new Error(step);
     await invoke("save_settings", { settings: { ...saved, shortcut: "double-copy" } });
-    step = "主窓を閉じても常駐";
+    step = "メインウィンドウを閉じても常駐";
     await action("close-main");
     await wait(async () => !(await snapshot()).main_visible);
     if (!(await snapshot()).tray) throw new Error(step);
-    step = "ショートカットから小窓のストリーミング";
+    step = "ショートカットから翻訳ポップアップのストリーミング";
     await action("shortcut", "Popup " + "waiting ".repeat(20));
     await wait(async () => (await snapshot()).popup.output.includes("Popup"));
     if (!(await snapshot()).popup_visible || (await snapshot()).requests !== 1) throw new Error(step);
-    step = "Esc で小窓を閉じて中止";
+    step = "Esc で翻訳ポップアップを閉じて中止";
     await action("escape");
     await wait(async () => !(await snapshot()).popup_visible && (await snapshot()).requests === 0);
     if (await invoke("popup_content") !== null) throw new Error(step);
-    step = "小窓で翻訳とコピー";
+    step = "翻訳ポップアップで翻訳とコピー";
     await action("shortcut", "Hello popup");
     await wait(async () => (await snapshot()).popup.status === "訳し終わりました");
     if (!(await snapshot()).popup.output.includes("[ja] Hello popup")) throw new Error(step);
     await action("copy");
     await wait(async () => (await snapshot()).popup.status === "訳をコピーしました");
-    step = "小窓から主窓への引き継ぎ";
+    step = "翻訳ポップアップからメインウィンドウへの引き継ぎ";
     await action("open-main");
     await wait(() => $("src").value === "Hello popup");
     await wait(() => $("status").textContent.startsWith("訳し終わりました"));
@@ -72,7 +83,7 @@
     await new Promise((resolve) => setTimeout(resolve, 250));
     if ((await snapshot()).popup_visible) throw new Error(step);
     await menu("pause");
-    step = "小窓の外にフォーカスを移して閉じる";
+    step = "翻訳ポップアップの外にフォーカスを移して閉じる";
     await action("shortcut", "Focus " + "waiting ".repeat(20));
     await wait(async () => (await snapshot()).popup.output.includes("Focus"));
     await menu("main");

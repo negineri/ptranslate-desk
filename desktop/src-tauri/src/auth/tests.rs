@@ -20,6 +20,7 @@ impl Vault for MemoryVault {
 }
 
 struct Model {
+    client_id: String,
     code: Secret,
     access: Secret,
     refresh: Secret,
@@ -60,6 +61,7 @@ impl Fixture {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let state = Arc::new(SyncMutex::new(Model {
+            client_id: CLIENT_ID.into(),
             code: random_secret().unwrap(),
             access: jwt(),
             refresh: random_secret().unwrap(),
@@ -133,7 +135,8 @@ impl Fixture {
                                 != Some(SCOPE)
                                 || params.get("code_challenge_method").map(String::as_str)
                                     != Some("S256")
-                                || params.get("client_id").map(String::as_str) != Some(CLIENT_ID);
+                                || params.get("client_id").map(String::as_str)
+                                    != Some(model.client_id.as_str());
                             model.challenge = params["code_challenge"].clone();
                             model.redirect = params["redirect_uri"].clone();
                             let redirect = Url::parse(&model.redirect).unwrap();
@@ -154,7 +157,8 @@ impl Fixture {
                             let refresh =
                                 form.get("grant_type").map(String::as_str) == Some("refresh_token");
                             model.bad_request |= form.contains_key("client_secret")
-                                || form.get("client_id").map(String::as_str) != Some(CLIENT_ID);
+                                || form.get("client_id").map(String::as_str)
+                                    != Some(model.client_id.as_str());
                             let valid = if refresh {
                                 model.refreshes += 1;
                                 form.get("refresh_token")
@@ -186,6 +190,8 @@ impl Fixture {
                             }
                         } else if path == "/custom-revoke" {
                             model.revokes += 1;
+                            model.bad_request |= form.get("client_id").map(String::as_str)
+                                != Some(model.client_id.as_str());
                             model.bad_request |= form
                                 .get("token")
                                 .is_none_or(|value| value != model.refresh.as_str());
@@ -246,6 +252,7 @@ impl Fixture {
         auth.server = self.url.clone();
         auth.discovery_url = format!("{}/discovery", self.url);
         auth.vault = self.vault.clone();
+        auth.client_id = self.state.lock().unwrap().client_id.clone();
         auth
     }
     async fn login(&self, auth: &Auth) {
@@ -383,4 +390,36 @@ async fn cancel_closes_loopback_and_never_installs_a_session() {
     assert!(!auth.is_authenticated());
     assert!(!auth.is_busy());
     assert!(fixture.vault.load().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn custom_client_configuration_is_used_for_login_refresh_and_revoke() {
+    let fixture = Fixture::new().await;
+    fixture.state.lock().unwrap().client_id = "self-hosted-desktop".into();
+    let auth = fixture.auth();
+    fixture.login(&auth).await;
+    assert!(auth.verify().await.unwrap().verified);
+    let restored = fixture.auth();
+    restored.restore().await.unwrap();
+    restored.logout().await.unwrap();
+    let state = fixture.state.lock().unwrap();
+    assert!(!state.bad_request);
+    assert_eq!(state.refreshes, 1);
+    assert_eq!(state.revokes, 1);
+}
+
+#[tokio::test]
+async fn connection_change_rejects_login_and_releases_lock_after_failure() {
+    let fixture = Fixture::new().await;
+    let auth = fixture.auth();
+    let guard = auth.begin_connection_change().unwrap();
+    assert!(auth.begin_connection_change().is_err());
+    assert!(auth
+        .login_with(|_| panic!("設定変更中はブラウザーを開かない"))
+        .await
+        .is_err());
+    drop(guard);
+    assert!(!auth.is_busy());
+    fixture.login(&auth).await;
+    assert!(auth.is_authenticated());
 }
