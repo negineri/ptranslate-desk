@@ -13,14 +13,14 @@ CIは公開前に次のバージョンが一致することを確認し、不一
 バージョンを更新したら、リポジトリのルートで次を確認します。
 
 ```sh
-python3 tools/check_release_version.py --tag v0.1.0
+python3 tools/check_release_version.py --tag v0.2.0
 ```
 
 mainへ反映後、一致するタグを作成してpushします。
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 `main` とPRではuniversalの `.app` をzipにまとめ、Actionsの成果物として保存します。
@@ -74,7 +74,8 @@ Release用設定 `desktop/src-tauri/tauri.release.conf.json` でだけ `createUp
 アドホック署名ではビルドが変わるとアクセシビリティの許可を登録し直す必要があります。
 Releaseの説明に次の案内を入れます。
 
-> 署名していないので、初回は右クリックから開く
+> AppleのDeveloper ID署名・公証は未対応です。起動がブロックされた場合は、
+> 「システム設定 → プライバシーとセキュリティ → このまま開く」を選んでください。
 
 右クリックでも開けない場合は、起動を試した後に「システム設定 → プライバシーとセキュリティ →
 このまま開く」を選びます。アクセシビリティを許可してもアプリが未許可と表示する場合は、

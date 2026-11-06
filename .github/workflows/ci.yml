@@ -126,7 +126,8 @@ jobs:
           releaseBody: |
             macOS 13以降向けのuniversal版です。Apple SiliconとIntelの両方で使えます。
 
-            署名していないので、初回は右クリックから開く
+            AppleのDeveloper ID署名・公証は未対応です。起動がブロックされた場合は、
+            「システム設定 → プライバシーとセキュリティ → このまま開く」を選んでください。
 
             dmgを開き、PTranslate Deskをアプリケーションフォルダに入れてください。
             更新用ファイルはTauriの更新署名で検証します。AppleのDeveloper ID署名・公証は未対応です。

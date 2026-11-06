@@ -166,7 +166,7 @@ Linuxの同一ホストのエンジンにつなぐ例は次のとおりです。
 docker run -d --name ptranslate --restart unless-stopped --network host \
   -e TR_LISTEN_HOST=127.0.0.1 \
   -e TR_UPSTREAM_URL=http://127.0.0.1:8080/v1/completions \
-  ghcr.io/negineri/ptranslate-desk/server:0.1.0
+  ghcr.io/negineri/ptranslate-desk/server:0.2.0
 ```
 
 上のタグは例です。`docker image inspect` で取得したRepoDigestを使い、実運用では `image@sha256:...` に固定してください。
@@ -448,8 +448,8 @@ server {
 ## 8. デスクトップの接続先を設定する
 
 [READMEのmacOSインストール手順](../README.md#インストールmacos)でアプリを入れます。
-接続先設定に対応する版を使ってください。**v0.1.0の配布物にはこの設定画面はありません**。
-修正版の配布前は、[ソースからビルド](../desktop/README.md#mac-のアプリをビルドする)して使います。
+接続先設定はv0.2.0以降で利用できます。ソースから実行する場合は
+[ビルド手順](../desktop/README.md#mac-のアプリをビルドする)を参照してください。
 
 ログイン前から表示される「接続先の設定」に次を入力します。
 
