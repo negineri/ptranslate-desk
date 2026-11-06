@@ -5,7 +5,9 @@ from pathlib import Path
 import cairosvg
 from PIL import Image, ImageDraw, ImageFont
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent
+if ROOT.name == "tools":
+    ROOT = ROOT.parent
 SVG = ROOT / "svg"
 PNG = ROOT / "png"
 PREV = ROOT / "preview"

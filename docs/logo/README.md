@@ -8,7 +8,9 @@
 
 `ptranslate-logo.zip` から展開した原素材を、この `docs/logo/` に保存しています。
 
-- `png/icon-1024.png` から Tauri CLI で `desktop/src-tauri/icons/` の PNG・ICO・ICNS を生成
+- macOSは `png/icon.icns` を `desktop/src-tauri/icons/icon.icns` にコピー (余白付きのmacOS用マーク)
+- Windowsは `png/icon-win.ico` を `desktop/src-tauri/icons/icon.ico` にコピー (角丸なしのスクエア)
+- `png/icon-ios-1024.png` をマスターに Tauri CLI で `desktop/src-tauri/icons/` の各サイズのPNGを生成
 - `svg/ptranslate-mark-mono.svg` を元に、周囲の余白を狭めた `desktop/src-tauri/icons/tray/mark.svg` を作成し、
   同じ CLI で 22 / 44 px を生成 (小さいメニューバーでもマークを読み取りやすくするため)
 - `png/icon-64.png` を `server/static/logo.png` にコピーして Web・主窓・小窓で表示
@@ -37,6 +39,8 @@ docs/logo/
 | ファイル | 用途 |
 | --- | --- |
 | `ptranslate-icon.svg` | アプリアイコン (角丸タイル + 訳バブル) |
+| `ptranslate-icon-fullbleed.svg` | iOS・汎用マスター (全面を使う正方形) |
+| `ptranslate-icon-mac.svg` | macOS用の曲線と余白を持つマーク |
 | `ptranslate-horizontal.svg` | 横型ロゴ (淡色背景用) |
 | `ptranslate-horizontal-white.svg` | 横型ロゴ (濃色背景用) |
 | `ptranslate-mark-mono.svg` | モノクロマーク・1 色ぬき (青) |
@@ -52,6 +56,9 @@ docs/logo/
 | `horizontal.png` / `horizontal@2x.png` | 横型ロゴ (淡色背景用) |
 | `horizontal-white@2x.png` | 横型ロゴ (濃色背景用) |
 | `mark-mono.png` | モノクロマーク |
+| `icon-ios-1024.png` | iOS・汎用マスター (角丸なし) |
+| `icon-mac-1024.png` / `icon.icns` | macOS用 (余白付き) |
+| `icon-win.ico` | Windows用 (16〜256px) |
 
 ### preview/
 
@@ -59,6 +66,7 @@ docs/logo/
 | --- | --- |
 | `final-sheet.png` | ブランドシート (全バリエーション) |
 | `github-social.png` | GitHub Social preview (1280×640) |
+| `sheet-platform.png` | Web・iOS・macOS・Windows用の比較 |
 
 ## カラー
 
@@ -83,8 +91,9 @@ docs/logo/
 
 ```bash
 cd docs/logo
-pip install --user --break-system-packages cairosvg fonttools
+pip install --user --break-system-packages cairosvg fonttools pillow
 python3 tools/gen_mono.py     # モノクロ SVG を再生成
+python3 tools/gen_platform.py # OS別のSVG・PNG・ICNS・ICOを再生成
 python3 tools/export_all.py   # 全 PNG・シートを再生成
 ```
 
