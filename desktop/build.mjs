@@ -11,6 +11,7 @@ await Promise.all([
   writeFile(new URL("index.html", dist), html.replace(
     script, script + '\nimport { desktopFetch as fetch, settingsStorage as localStorage, copyText } from "./transport.mjs";',
   ).replace("このブラウザに", "この端末に")
+    .replace("els.who.textContent = ` (${config.user} でログイン中)`;", "els.who.textContent = config.user;")
     .replace("<title>PTranslate</title>", `<title>${productName}</title>`)
     .replace(">PTranslate</h1>", `>${productName}</h1>`)
     .replace("await navigator.clipboard.writeText(els.out.textContent);",
