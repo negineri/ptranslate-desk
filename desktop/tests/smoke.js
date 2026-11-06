@@ -12,6 +12,11 @@
     step = "ログイン前の接続先設定";
     await wait(() => $("connection-form"));
     if ($("connection-settings").closest("section")) throw new Error("接続先設定がログイン前に操作できない");
+    if (!$("settings-page").hidden || $("translation-page").hidden) throw new Error("初期タブ");
+    $("settings-tab").click();
+    if ($("settings-page").hidden || !$("translation-page").hidden || $("settings-page").closest("[inert]")) throw new Error("ログイン前の設定タブ");
+    if (!$("settings-page").contains($("connection-form"))) throw new Error("接続先の配置");
+    $("translation-tab").click();
     const connection = await window.__TAURI__.core.invoke("load_connection");
     if ($("server-url").value !== connection.server_url) throw new Error("接続先の読み込み");
     let rejected = false;
@@ -31,6 +36,12 @@
     if ($("stop").hidden) throw new Error("ストリーミング");
     await wait(() => $("status").textContent === "訳し終わりました");
     if (!$("out").textContent.includes("[ja] Hello Mac")) throw new Error("訳文");
+    step = "設定タブへの切り替えと翻訳の保持";
+    const output = $("out").textContent;
+    $("settings-tab").click();
+    if ($("settings-page").hidden || !$("translation-page").hidden || !$("settings-page").contains($("desktop-settings"))) throw new Error(step);
+    $("settings-tab").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    if ($("translation-page").hidden || !$("settings-page").hidden || $("src").value !== "Hello Mac" || $("out").textContent !== output) throw new Error(step);
     step = "訳をコピー";
     $("copy").click();
     await wait(() => $("status").textContent === "訳をコピーしました");
@@ -76,7 +87,7 @@
     if (!(await snapshot()).main_visible || (await snapshot()).popup_visible) throw new Error(step);
     step = "メニューバーの設定と一時停止";
     await menu("settings");
-    await wait(() => $("desktop-settings").open);
+    await wait(() => $("desktop-settings").open && !$("settings-page").hidden);
     await menu("pause");
     if (!(await invoke("session_status")).paused) throw new Error(step);
     await action("shortcut", "Paused");

@@ -1,3 +1,4 @@
+import { settingsPage, showPage } from "./settings-view.mjs";
 const { invoke } = window.__TAURI__.core;
 const style = document.createElement("style");
 style.textContent = `#connection-settings { margin-bottom: 16px; }
@@ -21,7 +22,8 @@ panel.innerHTML = `<summary>接続先の設定</summary>
     <button id="save-connection" type="submit">保存して再起動</button>
     <p id="connection-status" class="hint" role="status"></p>
   </form>`;
-document.querySelector("section").before(panel);
+panel.open = true;
+settingsPage.append(panel);
 const status = panel.querySelector("#connection-status");
 try {
   const connection = await invoke("load_connection");
@@ -30,6 +32,7 @@ try {
   panel.querySelector("#client-id").value = connection.client_id;
 } catch (error) {
   status.textContent = String(error);
+  showPage(true);
   panel.open = true;
 }
 panel.querySelector("form").addEventListener("submit", async (event) => {

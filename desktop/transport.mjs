@@ -1,11 +1,17 @@
+import { settingsPage, showPage } from "./settings-view.mjs";
 import { desktopFetch as request } from "./ipc.mjs";
 import "./updates.mjs";
 import "./connection.mjs";
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
+const settingsError = document.createElement("p");
+settingsError.id = "settings-error";
+settingsError.setAttribute("role", "alert");
+settingsPage.prepend(settingsError);
+
 function showError(error) {
-  const status = document.getElementById("status");
+  const status = settingsPage.hidden ? document.getElementById("status") : document.getElementById("settings-error");
   status.textContent = String(error);
   status.className = "hint err";
 }
@@ -43,7 +49,7 @@ cancelLogin.addEventListener("click", () => { void invoke("cancel_login").catch(
 if (/Mac/.test(navigator.platform)) {
   const keychainHelp = document.createElement("details");
   keychainHelp.className = "hint";
-  keychainHelp.open = true;
+  keychainHelp.open = false;
   keychainHelp.innerHTML = `<summary>キーチェーンの確認が表示されたら</summary>
     <p>PTranslate Deskは、ログイン状態を保つための認証情報をmacOSのキーチェーンに保存しています。
     起動時やログインの更新時に、この情報を使う許可を求められることがあります。</p>
@@ -52,7 +58,7 @@ if (/Mac/.test(navigator.platform)) {
     通常はMacにログインするときのパスワードです。入力する場所はmacOSの確認画面です。</p>
     <p>「常に許可」で、この認証情報へのアクセスが許可され、以後の確認を省けます。
     アプリの更新や差し替え後は、再び確認が表示されることがあります。</p>`;
-  document.getElementById("who").closest("p").after(keychainHelp);
+  settingsPage.append(keychainHelp);
 }
 let resolveLogin;
 const login = new Promise((resolve) => { resolveLogin = resolve; });
@@ -114,7 +120,8 @@ settingsPanel.innerHTML = `<summary>デスクトップの設定</summary>
   <button id="accessibility">アクセシビリティの設定を開く</button>
   <p class="hint">macOS のシステム設定で「PTranslate Desk」を許可してください。許可は数秒以内に反映されます。
   メインウィンドウを閉じても常駐します。終了するにはメニューバーの「終了」か ⌘Q を使います。</p>`;
-document.querySelector("section").append(settingsPanel);
+settingsPanel.open = true;
+document.getElementById("connection-settings").after(settingsPanel);
 const shortcut = document.getElementById("shortcut");
 const shortcutStatus = document.getElementById("shortcut-status");
 async function updateShortcutStatus() {
@@ -133,7 +140,7 @@ async function updateShortcutStatus() {
     `アクセシビリティ: ${status.accessibility ? "許可済み" : "未許可"} / ⌘Cの監視: ${status.copy_monitor ? "登録済み" : "未登録"} / 他のアプリでの⌘C検出: ${status.copy_events}回`;
 }
 setInterval(() => {
-  if (settingsPanel.open) void updateShortcutStatus().catch(showError);
+  if (!settingsPage.hidden && settingsPanel.open) void updateShortcutStatus().catch(showError);
 }, 2000);
 shortcut.addEventListener("change", async () => {
   document.getElementById("custom-shortcut").hidden = shortcut.value !== "custom";
@@ -158,7 +165,7 @@ document.getElementById("save-shortcut").addEventListener("click", async () => {
 document.getElementById("accessibility").addEventListener("click", () => {
   void invoke("open_accessibility_settings").catch(showError);
 });
-await listen("show-settings", () => { settingsPanel.open = true; settingsPanel.scrollIntoView(); });
+await listen("show-settings", () => { showPage(true); settingsPanel.open = true; settingsPanel.scrollIntoView(); document.getElementById("shortcut").focus(); });
 await listen("session-changed", () => { void updateShortcutStatus().catch(showError); });
 await listen("desktop-error", ({ payload }) => showError(payload));
 await listen("translation-interrupted", () => document.getElementById("stop").click());
@@ -168,6 +175,7 @@ async function takeMainText() {
   const text = await invoke("take_main_text");
   if (text === null) return;
   const source = document.getElementById("src");
+  showPage(false);
   source.value = text;
   source.dispatchEvent(new Event("input"));
   document.getElementById("go").click();

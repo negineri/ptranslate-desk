@@ -55,7 +55,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
-          key: macos-universal
+          # mainで保存したキャッシュを、タグのリリースジョブからも復元する。
+          shared-key: macos-universal
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
       - run: node desktop/build.mjs
       - run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
@@ -100,7 +101,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
-          key: macos-universal
+          # mainで保存したキャッシュを、タグのリリースジョブからも復元する。
+          shared-key: macos-universal
       - run: npm ci
         working-directory: desktop
       - name: 更新署名用の秘密を確認
