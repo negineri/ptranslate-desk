@@ -6,14 +6,13 @@
 </picture>
 
 PLaMo 3 Translate (llama.cpp の llama-server) を裏側にした、Web とデスクトップの翻訳アプリ。
-デスクトップ版の名前は「PTranslate Desk」、Web 版は「PTranslate」です。
-DeepL のように、文章を貼って訳す画面と、選んだ文をショートカットで訳す小窓を目指す。
+文章を貼って訳す画面と、選んだ文をショートカットキーで訳す翻訳ポップアップが含まれます。
 
-| 部分 | 場所 | 状態 |
-| --- | --- | --- |
-| サーバー (API と Web の画面を返す) | `server/translator.py`、`server/static/index.html` | 動く。本番 (`https://translate.witenp.com/`) で使っている |
-| デスクトップのクライアント | `desktop/` | macOS の主窓・ショートカット・小窓・メニューバー常駐をモックで実行できる: [起動とビルド](desktop/README.md) |
-| 翻訳エンジンのモック | `tools/mock_plamo.py` | 試験と手元の開発用 |
+| 部分                               | 場所                                               | 状態                                                                                                                                |
+| ---------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| サーバー (API と Web の画面を返す) | `server/translator.py`、`server/static/index.html` | 動く。本番 (`https://translate.witenp.com/`) で使っている                                                                           |
+| デスクトップのクライアント         | `desktop/`                                         | macOS のメインウィンドウ・ショートカット・翻訳ポップアップ・メニューバー常駐をモックで実行できる: [起動とビルド](desktop/README.md) |
+| 翻訳エンジンのモック               | `tools/mock_plamo.py`                              | 試験と手元の開発用                                                                                                                  |
 
 macOSクライアントは `v*` タグでGitHub Releasesにuniversal dmgを配布します。
 アプリの更新は利用者が承認してから適用します。[配布・更新の手順](docs/RELEASING.md) を参照してください。
@@ -36,14 +35,14 @@ docker run --rm -p 8002:8002 -e TR_UPSTREAM_URL=https://llama.example/v1/complet
 `X-Forwarded-User` で渡すこと。待ち受けは前段からしか届かないようにする。`/api/translate` は
 Server-Sent Events なので、前段で応答を溜めない (nginx なら `proxy_buffering off`)。
 
-| 環境変数 | 既定 | 意味 |
-| --- | --- | --- |
-| `TR_UPSTREAM_URL` | (必須) | 翻訳エンジン (llama-server) の `/v1/completions` |
-| `TR_API_KEY` | 空 | 翻訳エンジンに付ける `Authorization: Bearer` |
-| `TR_LISTEN_HOST` / `TR_LISTEN_PORT` | `127.0.0.1` / `8002` (コンテナでは `0.0.0.0`) | 待ち受け |
-| `TR_MAX_CHARS` | 4000 | 1 回の原文の上限 (文字) |
-| `TR_MAX_PROMPT_CHARS` | 12000 | 文脈・前の訳・用語集を合わせた上限 (文字) |
-| `TR_MAX_ACTIVE_PER_USER` | 2 | 1 人が同時に流せる翻訳の数 |
+| 環境変数                            | 既定                                          | 意味                                             |
+| ----------------------------------- | --------------------------------------------- | ------------------------------------------------ |
+| `TR_UPSTREAM_URL`                   | (必須)                                        | 翻訳エンジン (llama-server) の `/v1/completions` |
+| `TR_API_KEY`                        | 空                                            | 翻訳エンジンに付ける `Authorization: Bearer`     |
+| `TR_LISTEN_HOST` / `TR_LISTEN_PORT` | `127.0.0.1` / `8002` (コンテナでは `0.0.0.0`) | 待ち受け                                         |
+| `TR_MAX_CHARS`                      | 4000                                          | 1 回の原文の上限 (文字)                          |
+| `TR_MAX_PROMPT_CHARS`               | 12000                                         | 文脈・前の訳・用語集を合わせた上限 (文字)        |
+| `TR_MAX_ACTIVE_PER_USER`            | 2                                             | 1 人が同時に流せる翻訳の数                       |
 
 ## 翻訳エンジン
 

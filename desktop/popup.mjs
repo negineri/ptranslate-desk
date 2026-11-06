@@ -73,7 +73,7 @@ async function show() {
       }
       $("out").append(chunk.tail);
     }
-    $("status").textContent = truncated ? `${truncated} か所が長すぎて途中で切れました。主窓で段落を分けて訳し直してください` : "訳し終わりました";
+    $("status").textContent = truncated ? `${truncated} か所が長すぎて途中で切れました。メインウィンドウで段落を分けて訳し直してください` : "訳し終わりました";
     $("status").className = truncated ? "hint warn" : "hint ok";
   } catch (error) {
     if (abort.signal.aborted || mine !== sequence) return;

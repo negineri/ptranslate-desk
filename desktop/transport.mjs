@@ -39,6 +39,20 @@ cancelLogin.textContent = "ログインを中止";
 cancelLogin.hidden = true;
 loginButton.after(" ", cancelLogin);
 cancelLogin.addEventListener("click", () => { void invoke("cancel_login").catch(showError); });
+if (/Mac/.test(navigator.platform)) {
+  const keychainHelp = document.createElement("details");
+  keychainHelp.className = "hint";
+  keychainHelp.open = true;
+  keychainHelp.innerHTML = `<summary>キーチェーンの確認が表示されたら</summary>
+    <p>PTranslate Deskは、ログイン状態を保つための認証情報をmacOSのキーチェーンに保存しています。
+    起動時やログインの更新時に、この情報を使う許可を求められることがあります。</p>
+    <p>確認画面に「PTranslate Desk」と「com.witenp.ptranslate-desk」が表示されていることを確認し、
+    キーチェーン「ログイン」のパスワードを入力して「常に許可」を押してください。
+    通常はMacにログインするときのパスワードです。入力する場所はmacOSの確認画面です。</p>
+    <p>「常に許可」で、この認証情報へのアクセスが許可され、以後の確認を省けます。
+    アプリの更新や差し替え後は、再び確認が表示されることがあります。</p>`;
+  document.getElementById("who").closest("p").after(keychainHelp);
+}
 let resolveLogin;
 const login = new Promise((resolve) => { resolveLogin = resolve; });
 
@@ -87,25 +101,58 @@ settingsPanel.innerHTML = `<summary>デスクトップの設定</summary>
   <select id="shortcut">
     <option value="double-copy">⌘C を 0.5 秒以内に 2 回</option>
     <option value="CommandOrControl+Shift+T">⌘⇧T</option>
+    <option value="custom">自分で指定する</option>
   </select>
+  <div id="custom-shortcut" hidden>
+    <label for="shortcut-keys">組み合わせ（例: CommandOrControl+Alt+J）</label>
+    <input id="shortcut-keys" type="text" autocomplete="off" spellcheck="false">
+    <button id="save-shortcut">この組み合わせを使う</button>
+  </div>
   <p class="hint" id="shortcut-status"></p>
+  <p class="hint" id="shortcut-diagnostics"></p>
   <button id="accessibility">アクセシビリティの設定を開く</button>
-  <p class="hint">macOS のシステム設定で「PTranslate Desk」を許可してください。許可後はアプリを再起動してください。
-  主窓を閉じても常駐します。終了するにはメニューバーの「終了」か ⌘Q を使います。</p>`;
+  <p class="hint">macOS のシステム設定で「PTranslate Desk」を許可してください。許可は数秒以内に反映されます。
+  メインウィンドウを閉じても常駐します。終了するにはメニューバーの「終了」か ⌘Q を使います。</p>`;
 document.querySelector("section").append(settingsPanel);
 const shortcut = document.getElementById("shortcut");
 const shortcutStatus = document.getElementById("shortcut-status");
 async function updateShortcutStatus() {
   const status = await invoke("session_status");
-  shortcut.value = status.shortcut;
+  const custom = !["double-copy", "CommandOrControl+Shift+T"].includes(status.shortcut);
+  if (document.activeElement !== shortcut && document.activeElement?.id !== "shortcut-keys") {
+    shortcut.value = custom ? "custom" : status.shortcut;
+    document.getElementById("custom-shortcut").hidden = !custom;
+    if (custom) document.getElementById("shortcut-keys").value = status.shortcut;
+  }
   shortcutStatus.textContent = status.paused ? "ショートカットを一時的に止めています" :
-    status.accessibility ? "ショートカットを使えます" : "選んだ文を取得するにはアクセシビリティの許可が必要です";
+    !status.logged_in ? "ショートカットを使うにはログインしてください" :
+    !status.accessibility ? "選んだ文を取得するにはアクセシビリティの許可が必要です" :
+    status.shortcut === "double-copy" && !status.copy_monitor ? "⌘Cの監視を登録できませんでした" : "ショートカットを使えます";
+  document.getElementById("shortcut-diagnostics").textContent =
+    `アクセシビリティ: ${status.accessibility ? "許可済み" : "未許可"} / ⌘Cの監視: ${status.copy_monitor ? "登録済み" : "未登録"} / 他のアプリでの⌘C検出: ${status.copy_events}回`;
 }
+setInterval(() => {
+  if (settingsPanel.open) void updateShortcutStatus().catch(showError);
+}, 2000);
 shortcut.addEventListener("change", async () => {
+  document.getElementById("custom-shortcut").hidden = shortcut.value !== "custom";
+  if (shortcut.value === "custom") {
+    document.getElementById("shortcut-keys").focus();
+    return;
+  }
   shortcut.disabled = true;
   await settingsStorage.setItem("translator", JSON.stringify({ shortcut: shortcut.value }));
   await updateShortcutStatus().catch(showError);
   shortcut.disabled = false;
+});
+document.getElementById("save-shortcut").addEventListener("click", async () => {
+  const value = document.getElementById("shortcut-keys").value.trim();
+  if (!value.includes("+")) {
+    showError("CommandOrControl+Alt+J のように修飾キーと文字を指定してください");
+    return;
+  }
+  await settingsStorage.setItem("translator", JSON.stringify({ shortcut: value }));
+  await updateShortcutStatus().catch(showError);
 });
 document.getElementById("accessibility").addEventListener("click", () => {
   void invoke("open_accessibility_settings").catch(showError);

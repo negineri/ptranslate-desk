@@ -2,8 +2,19 @@
 use block2::RcBlock;
 use objc2::{rc::Retained, runtime::AnyObject};
 use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{cell::RefCell, ffi::c_void, ptr::NonNull};
 use tauri::AppHandle;
+
+static MONITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
+static COPY_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+pub fn monitor_status() -> (bool, u64) {
+    (
+        MONITOR_ACTIVE.load(Ordering::Relaxed),
+        COPY_EVENTS.load(Ordering::Relaxed),
+    )
+}
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -50,6 +61,16 @@ pub fn copy_selection() -> Result<(), String> {
 }
 
 pub fn install_monitor(app: &AppHandle) {
+    MONITOR_ACTIVE.store(false, Ordering::Relaxed);
+    MONITOR.with(|slot| {
+        if let Some(monitor) = slot.borrow_mut().take() {
+            // 登録した AppKit の監視は、同じメインスレッドで解除する。
+            unsafe { NSEvent::removeMonitor(&monitor) };
+        }
+    });
+    if !trusted() {
+        return;
+    }
     let handle = app.clone();
     let callback = RcBlock::new(move |event: NonNull<NSEvent>| {
         // AppKit はハンドラーの呼び出し中、この NSEvent を生存させる。
@@ -61,9 +82,35 @@ pub fn install_monitor(app: &AppHandle) {
         let copy = event.keyCode() == 8
             && modifiers.contains(NSEventModifierFlags::Command)
             && !modifiers.intersects(other);
+        if copy && !event.isARepeat() {
+            COPY_EVENTS.fetch_add(1, Ordering::Relaxed);
+        }
         crate::resident::copy_key(&handle, copy, event.isARepeat());
     });
     let monitor =
         NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &callback);
+    MONITOR_ACTIVE.store(monitor.is_some(), Ordering::Relaxed);
     MONITOR.with(|slot| *slot.borrow_mut() = monitor);
+}
+
+pub fn watch_permission(app: &AppHandle) {
+    let mut previous = trusted();
+    install_monitor(app);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let current = trusted();
+            if current != previous {
+                let handle = app.clone();
+                if app
+                    .run_on_main_thread(move || install_monitor(&handle))
+                    .is_err()
+                {
+                    break;
+                }
+                previous = current;
+            }
+        }
+    });
 }

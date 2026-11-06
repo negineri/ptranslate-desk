@@ -120,7 +120,7 @@ fn require_main(window: &WebviewWindow) -> Result<(), String> {
     if window.label() == "main" {
         Ok(())
     } else {
-        Err("更新の操作は主窓で行ってください".into())
+        Err("更新の操作はメインウィンドウで行ってください".into())
     }
 }
 

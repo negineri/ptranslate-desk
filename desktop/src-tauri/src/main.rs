@@ -209,7 +209,7 @@ fn start_request(
             .state::<resident::Resident>()
             .accepts_popup(popup_revision)
     {
-        return Err("小窓は閉じています".into());
+        return Err("翻訳ポップアップは閉じています".into());
     }
     session
         .requests
@@ -422,7 +422,7 @@ fn main() {
             {
                 window
                     .eval(include_str!("../../tests/popup-smoke.js"))
-                    .expect("小窓の試験を開始できませんでした");
+                    .expect("翻訳ポップアップの試験を開始できませんでした");
             }
         });
     let app = builder

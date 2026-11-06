@@ -64,6 +64,8 @@ jobs:
         working-directory: desktop
       - run: npm run build -- --target universal-apple-darwin --bundles app
         working-directory: desktop
+      - run: codesign --verify --deep --strict --verbose=2 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app'
+        working-directory: desktop
       - run: lipo 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app/Contents/MacOS/ptranslate-desk' -verify_arch arm64 x86_64
         working-directory: desktop
       # アプリ内の実行権限とシンボリックリンクを保つ。
@@ -133,6 +135,9 @@ jobs:
           args: --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
+      - name: アプリ全体のコード署名を検証
+        run: codesign --verify --deep --strict --verbose=2 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app'
+        working-directory: desktop
       - name: 更新manifestの両アーキテクチャを確認
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
