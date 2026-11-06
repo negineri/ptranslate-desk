@@ -1,5 +1,6 @@
 import { desktopFetch as request } from "./ipc.mjs";
 import "./updates.mjs";
+import "./connection.mjs";
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 

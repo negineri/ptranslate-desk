@@ -211,6 +211,14 @@ ms my ne nl pa pl ru si sk sl sr sw ta te th tl ur uz vi`)。表示名はサー�
 
 ### 6.1 方式
 
+接続先はメインウィンドウの「接続先の設定」で、ログイン前から変更できる。
+サーバーURL（HTTPSのオリジン）、OIDC discovery URL（HTTPS）、公開クライアントのclient IDを指定する。
+ユーザー情報・クエリー・フラグメントをURLに含めず、サーバーURLにはパスを付けない。
+以下の本番サービスの値は既定値であり、独自サーバーでは置き換える。
+「保存して再起動」はログイン処理中には受け付けず、進行中の翻訳を止め、旧接続先からログアウトして
+端末の資格情報を削除・revokeしてから公開設定を `connection.json` に保存し、アプリを再起動する。
+書き込みは一時ファイルから置き換え、不正な保存済み設定では起動を止める。
+
 Authentik (`https://atk01.witenp.com/`) の OAuth2 / OIDC。**公開クライアント (client secret を持たない) の
 Authorization Code + PKCE (S256)**、リダイレクトは **ループバック** (`http://127.0.0.1:<空いているポート>/callback`)。
 
@@ -240,6 +248,8 @@ URL は OIDC の discovery (`https://atk01.witenp.com/application/o/translator-d
 - refresh token は OS の資格情報の保管 (Windows の資格情報マネージャー、macOS のキーチェーン、Linux の Secret Service)
   に置く。ファイルに書かない。access token はメモリだけ
 - ログアウトで消す (Authentik の revoke の URL も呼ぶ)
+- refresh tokenの保存項目はサーバーURL・discovery URL・client IDの組ごとに分離し、別の接続先で再利用しない。
+  既定の接続先では従来の保存項目を維持する。変更した接続先への初回アクセスには保存済みトークンを使わない
 - macOSのメインウィンドウでは、キーチェーンを使う前に、ログイン状態を保つ認証情報へのアクセス確認が
   出る場合があることを案内する。対象がPTranslate Deskと `com.witenp.ptranslate-desk` であることを確認し、
   キーチェーン「ログイン」のパスワード（通常はMacのログインパスワード）をOSの確認画面に入力して
@@ -248,6 +258,8 @@ URL は OIDC の discovery (`https://atk01.witenp.com/application/o/translator-d
 ### 6.4 使える人
 
 Authentik の `tamesareru-members` だけ (Web と同じ)。入っていない人は Authentik の画面で断られる。
+これは既定の本番サービスの制約。独自サーバーでは管理者が自分のAuthentikで利用者・グループとアプリの許可を設定する。
+構築方法は [自分のサーバーで使う](SELF_HOSTING.md) を参照。
 
 ## 7. 配布と更新
 

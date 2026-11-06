@@ -9,6 +9,17 @@
     }
   };
   try {
+    step = "ログイン前の接続先設定";
+    await wait(() => $("connection-form"));
+    if ($("connection-settings").closest("section")) throw new Error("接続先設定がログイン前に操作できない");
+    const connection = await window.__TAURI__.core.invoke("load_connection");
+    if ($("server-url").value !== connection.server_url) throw new Error("接続先の読み込み");
+    let rejected = false;
+    try {
+      await window.__TAURI__.core.invoke("save_connection", { connection: { ...connection, server_url: "http://example.com" } });
+    } catch { rejected = true; }
+    if (!rejected) throw new Error("安全でない接続先を保存できてしまう");
+    step = "ログイン";
     await wait(() => [...document.querySelectorAll("button")].some((b) => b.textContent === "モックにログイン"));
     [...document.querySelectorAll("button")].find((b) => b.textContent === "モックにログイン").click();
     await wait(() => !document.querySelector("section").inert);

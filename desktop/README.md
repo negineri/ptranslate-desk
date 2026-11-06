@@ -5,11 +5,22 @@ Tauri 2 のメインウィンドウをローカルの翻訳モックで試せま
 
 macOS は 13 以降に対応します。Mac では Xcode Command Line Tools (`xcode-select --install`) を使います。
 
-## 本番にログインする
+## サーバーに接続してログインする
+
+### 接続先を選ぶ
+
+ログイン前から操作できる「接続先の設定」でサーバーURL、
+OIDC discovery URL、公開クライアントのclient IDを指定します。
+「保存して再起動」を押すと設定が反映されます。再起動後、設定したサーバーの利用者でログインしてください。
+認証情報は接続先ごとに分離します。
+サーバーURLは `https://translate.example.com` のようにパスを付けず指定します。
+サーバー・認証基盤もこれから作る場合は[最初から構築する手順](../docs/SELF_HOSTING.md)を参照してください。
+
+### ログインとキーチェーン
 
 アプリを起動して「ログイン」を押すか、メニューバーの「ログイン」を選びます。
 OS の既定のブラウザで Authentik にログインし、初回の同意の画面で許可してください。
-`tamesareru-members` に入っていないアカウントは Authentik の画面で断られます。
+利用できるアカウントは、接続先の管理者がAuthentikで設定します。
 ログイン後、メインウィンドウに Authentik の利用者名が表示されます。
 
 macOSでは、ログイン状態を保つための認証情報をキーチェーンに保存します。起動時やログインの更新時に、
@@ -21,8 +32,7 @@ macOSでは、ログイン状態を保つための認証情報をキーチェー
 以後の確認を省くための操作です。アプリの更新や差し替え後は、再び確認されることがあります。
 キーチェーンとMacのログインパスワードの関係は[Appleの説明](https://support.apple.com/ja-jp/guide/keychain-access/kyca2612/mac)も参照してください。
 
-接続先は `https://translate.witenp.com`、認証は公開クライアント `translator-desktop` の
-Authorization Code + PKCE (S256) です。authorize・token・revoke の URL は discovery から取得し、
+認証は設定した公開クライアントのAuthorization Code + PKCE (S256) です。authorize・token・revoke の URL は discovery から取得し、
 scope は `openid profile offline_access` に限定します。`email` は要求しません。
 
 access token は Rust のメモリ、refresh token は macOS のキーチェーン (Windows は資格情報マネージャー、
@@ -115,7 +125,7 @@ npm run build
 現段階は開発用で、Developer ID の署名と公証はしていません。
 タグからの配布はApple Silicon・Intel共通のuniversal dmgです。
 Releaseの作成、更新署名のsecrets、バージョンの合わせ方は [配布手順](../docs/RELEASING.md) を参照してください。
-アプリを単独で起動すると、本番にログインできます。
+アプリを単独で起動すると、設定したサーバーにログインできます。
 
 ビルド済みのアプリをモックとまとめて起動するには、リポジトリのルートで実行します。
 

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod connection;
 #[cfg(target_os = "macos")]
 mod macos;
 mod resident;
@@ -312,12 +313,13 @@ fn main() {
         )
         .manage(resident::Resident::default())
         .manage(updates::Updates::default())
-        .manage(Backend {
-            auth: Arc::new(auth::Auth::new(client)),
-            session: Mutex::new(Session::default()),
-            auth_error: Mutex::new(None),
-        })
-        .setup(|app| {
+        .setup(move |app| {
+            let connection = connection::load(app.handle())?;
+            app.manage(Backend {
+                auth: Arc::new(auth::Auth::with_connection(client.clone(), connection)),
+                session: Mutex::new(Session::default()),
+                auth_error: Mutex::new(None),
+            });
             resident::setup(app.handle())?;
             updates::schedule(app.handle());
             let handle = app.handle().clone();
@@ -371,6 +373,8 @@ fn main() {
         cancel_login,
         start_request,
         stop_request,
+        connection::load_connection,
+        connection::save_connection,
         settings::load_settings,
         settings::save_settings,
         resident::session_status,
@@ -393,6 +397,8 @@ fn main() {
             cancel_login,
             start_request,
             stop_request,
+            connection::load_connection,
+            connection::save_connection,
             settings::load_settings,
             settings::save_settings,
             resident::session_status,
