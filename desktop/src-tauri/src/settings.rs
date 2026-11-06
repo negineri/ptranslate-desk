@@ -38,7 +38,7 @@ pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
         fs::create_dir_all(dir)?;
         let mut file = tempfile::NamedTempFile::new_in(dir)?;
         serde_json::to_writer(&mut file, &settings)?;
-        file.persist(path)?;
+        file.persist(&path)?;
         Ok(())
     };
     save().map_err(|_| "設定を保存できませんでした".into())
