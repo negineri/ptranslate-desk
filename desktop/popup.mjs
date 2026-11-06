@@ -5,12 +5,38 @@ const { listen } = window.__TAURI__.event;
 const $ = (id) => document.getElementById(id);
 let controller = null, revision = null, sequence = 0;
 
+// 訳文の自然な高さを測り、画面に収まる上限は Rust 側で決める。
+let resizePending = false, lastResize = "";
+function scheduleResize() {
+  if (resizePending) return;
+  resizePending = true;
+  requestAnimationFrame(async () => {
+    resizePending = false;
+    if (revision === null) return;
+    const out = $("out");
+    const chrome = document.querySelector("main").getBoundingClientRect().height - out.getBoundingClientRect().height;
+    const style = getComputedStyle(out);
+    const padding = [style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth]
+      .reduce((sum, value) => sum + parseFloat(value), 0);
+    const height = Math.ceil(chrome + Math.max(80, $("translation").getBoundingClientRect().height) + padding);
+    const key = `${revision}:${height}:${window.innerWidth}`;
+    if (key === lastResize) return;
+    lastResize = key;
+    try {
+      await invoke("resize_popup", { revision, height });
+    } catch (error) { lastResize = ""; console.error(error); }
+  });
+}
+const sizeObserver = new ResizeObserver(scheduleResize);
+for (const id of ["translation", "status", "direction"]) sizeObserver.observe($(id));
+new MutationObserver(scheduleResize).observe(document.querySelector("main"), { childList: true, subtree: true, characterData: true });
+
 function stop() {
   sequence++;
   controller?.abort();
   controller = null;
   revision = null;
-  $("out").textContent = "";
+  $("translation").textContent = "";
   $("status").textContent = "";
   $("copy").disabled = true;
 }
@@ -23,7 +49,7 @@ async function show() {
   revision = content.revision;
   const abort = new AbortController();
   controller = abort;
-  $("out").textContent = "";
+  $("translation").textContent = "";
   $("copy").disabled = true;
   $("status").textContent = "訳しています";
   $("status").className = "hint";
@@ -50,9 +76,9 @@ async function show() {
       abort.signal.throwIfAborted();
       if (chunk.text.trim()) {
         const source = chunk.text.trim();
-        $("out").append(chunk.text.match(/^\s*/)[0]);
+        $("translation").append(chunk.text.match(/^\s*/)[0]);
         const node = document.createTextNode("");
-        $("out").append(node);
+        $("translation").append(node);
         const response = await fetch("api/translate", { ...common, text: source, history: previous ? [previous] : [] });
         if (!response.ok) {
           if (response.status >= 500) throw new Error("翻訳サーバーに接続できません");
@@ -64,14 +90,14 @@ async function show() {
           if (abort.signal.aborted) return;
           text += part;
           node.data = text.trimStart();
-          $("copy").disabled = !$("out").textContent.trim();
+          $("copy").disabled = !$("translation").textContent.trim();
         });
         if (finish === "length") truncated++;
         node.data = text.trim();
         previous = { source, target: text.trim() };
-        $("out").append(chunk.text.match(/\s*$/)[0]);
+        $("translation").append(chunk.text.match(/\s*$/)[0]);
       }
-      $("out").append(chunk.tail);
+      $("translation").append(chunk.tail);
     }
     $("status").textContent = truncated ? `${truncated} か所が長すぎて途中で切れました。メインウィンドウで段落を分けて訳し直してください` : "訳し終わりました";
     $("status").className = truncated ? "hint warn" : "hint ok";
@@ -88,7 +114,7 @@ $("close").addEventListener("click", () => { void invoke("desktop_action", { act
 $("open-main").addEventListener("click", () => { void invoke("desktop_action", { action: "open-main" }); });
 $("copy").addEventListener("click", async () => {
   try {
-    await window.__TAURI__.clipboardManager.writeText($("out").textContent);
+    await window.__TAURI__.clipboardManager.writeText($("translation").textContent);
     $("status").textContent = "訳をコピーしました";
   } catch { $("status").textContent = "訳をコピーできませんでした"; }
 });
