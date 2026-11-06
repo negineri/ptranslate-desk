@@ -1,5 +1,37 @@
 // 翻訳の状態を保ったまま、端末の設定へ切り替える。
 const main = document.querySelector("main");
+// Webと共通の見出しを、デスクトップ用のヘッダーへまとめる。
+export const header = document.createElement("header");
+header.id = "app-header";
+const title = main.querySelector("h1");
+const description = main.querySelector("p.sub");
+const who = document.getElementById("who");
+export const updateSlot = document.createElement("div");
+updateSlot.id = "header-updates";
+export const accountSlot = document.createElement("div");
+accountSlot.id = "header-account";
+export const accountMenu = document.createElement("details");
+accountMenu.id = "account-menu";
+accountMenu.hidden = true;
+const accountSummary = document.createElement("summary");
+who.textContent = "アカウント";
+accountSummary.append(who);
+accountMenu.append(accountSummary);
+accountSlot.append(accountMenu);
+title.before(header);
+header.append(title, updateSlot, description, accountSlot);
+description.textContent = "PLaMo 3 Translate · 原文と訳はサーバーに残りません";
+for (const eventName of ["click", "keydown"]) {
+  document.addEventListener(eventName, (event) => {
+    for (const menu of header.querySelectorAll("details[open]")) {
+      if (eventName === "keydown" && event.key === "Escape") {
+        menu.open = false;
+        menu.querySelector("summary").focus();
+      } else if (eventName === "click" && !menu.contains(event.target)) menu.open = false;
+    }
+  });
+}
+
 const translation = document.createElement("div");
 translation.id = "translation-page";
 translation.setAttribute("role", "tabpanel");
@@ -48,6 +80,31 @@ buttons.forEach((button, index) => {
 const style = document.createElement("style");
 style.textContent = `
   [hidden] { display: none !important; }
+  #app-header { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  #app-header h1 { margin: 0; font-size: 1.4rem; white-space: nowrap; }
+  #app-header .sub { flex: 1; margin: 0; font-size: .85rem; }
+  #header-account { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  #app-header details { position: relative; margin: 0; }
+  #app-header summary { list-style: none; cursor: pointer; }
+  #app-header summary::-webkit-details-marker { display: none; }
+  #account-menu > summary { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 7px 14px; background: var(--panel); }
+  #account-menu > summary::after { content: "▾"; font-size: .75rem; color: var(--muted); }
+  #who { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .header-popover { position: absolute; top: calc(100% + 10px); z-index: 10; padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 28px #0003; }
+  #account-menu .header-popover { right: 0; min-width: 150px; }
+  #account-menu .header-popover button { width: 100%; text-align: left; }
+  #update-menu > summary { border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; color: var(--muted); background: var(--panel); font-size: .8rem; white-space: nowrap; }
+  #update-menu .header-popover { left: 0; width: min(340px, calc(100vw - 48px)); display: flex; flex-wrap: wrap; gap: 8px; }
+  #update-status { flex-basis: 100%; }
+  #update-confirm { display: flex; flex-wrap: wrap; gap: 8px; }
+  #app-header summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  @media (max-width: 760px) {
+    #app-header { gap: 12px; position: relative; }
+    #app-header .sub { order: 4; flex-basis: 100%; }
+    #app-header #update-menu { position: static; }
+    #update-menu .header-popover { left: 0; right: auto; }
+  }
+
   .page-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin: 24px 0 20px; }
   .page-tabs button { padding: 8px 4px 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); }
   .page-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }

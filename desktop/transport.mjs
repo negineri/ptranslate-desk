@@ -1,4 +1,4 @@
-import { settingsPage, showPage } from "./settings-view.mjs";
+import { settingsPage, showPage, accountSlot, accountMenu } from "./settings-view.mjs";
 import { desktopFetch as request } from "./ipc.mjs";
 import "./updates.mjs";
 import "./connection.mjs";
@@ -40,11 +40,15 @@ export async function copyText(text) {
 
 const loginButton = document.createElement("button");
 loginButton.textContent = "ログイン";
-document.getElementById("who").after(" ", loginButton);
+loginButton.id = "login-button";
+accountSlot.append(loginButton);
+const accountActions = document.createElement("div");
+accountActions.className = "header-popover";
+accountMenu.append(accountActions);
 const cancelLogin = document.createElement("button");
 cancelLogin.textContent = "ログインを中止";
 cancelLogin.hidden = true;
-loginButton.after(" ", cancelLogin);
+accountSlot.append(cancelLogin);
 cancelLogin.addEventListener("click", () => { void invoke("cancel_login").catch(showError); });
 if (/Mac/.test(navigator.platform)) {
   const keychainHelp = document.createElement("details");
@@ -73,6 +77,8 @@ async function restoreSession() {
     savedSettings = settings ? JSON.stringify(settings) : null;
     loginButton.dataset.loggedIn = "true";
     loginButton.textContent = "ログアウト";
+    accountActions.append(loginButton);
+    accountMenu.hidden = false;
     resolveLogin();
   } else if (!status.logged_in && loginButton.dataset.loggedIn) {
     await pendingSave;

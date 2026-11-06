@@ -9,6 +9,13 @@
     }
   };
   try {
+    step = "ログイン前のヘッダー";
+    await wait(() => $("version-badge")?.textContent.startsWith("v"));
+    if (!$("app-header").contains($("check-update"))) throw new Error("更新操作の配置");
+    $("version-badge").click();
+    if (!$("update-menu").open || !$("check-update").getClientRects().length) throw new Error("更新メニュー");
+    $("version-badge").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    if ($("update-menu").open) throw new Error("更新メニューを閉じる");
     step = "ログイン前の接続先設定";
     await wait(() => $("connection-form"));
     if ($("connection-settings").closest("section")) throw new Error("接続先設定がログイン前に操作できない");
@@ -29,6 +36,12 @@
     [...document.querySelectorAll("button")].find((b) => b.textContent === "モックにログイン").click();
     await wait(() => !document.querySelector("section").inert);
     if ($("target").options.length < 53) throw new Error("言語一覧");
+    step = "ログイン後のユーザーメニュー";
+    if ($("account-menu").hidden || !$("who").textContent || !$("app-header").contains($("who"))) throw new Error(step);
+    $("account-menu").querySelector("summary").click();
+    if (!$("login-button").getClientRects().length || $("login-button").textContent !== "ログアウト") throw new Error(step);
+    $("translation-tab").click();
+    if ($("account-menu").open) throw new Error("ユーザーメニューの外を押して閉じる");
     step = "自動翻訳とストリーミング";
     $("src").value = "Hello Mac";
     $("src").dispatchEvent(new Event("input"));
