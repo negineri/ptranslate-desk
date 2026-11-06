@@ -127,17 +127,20 @@ npm ci
 npm run build
 ```
 
-`src-tauri/target/release/bundle/macos/PTranslate Desk.app` と
-`src-tauri/target/release/bundle/dmg/` 内の dmg が生成されます。
+`src-tauri/target/debug/bundle/macos/PTranslate Desk.app` と
+`src-tauri/target/debug/bundle/dmg/` 内の dmg が生成されます。
+既定ではデバッグビルドになり、バージョンは `0.0.0-dev` です。
+配布用はHEADに `v*` タグを付けたうえで、明示的に `npm run build:release` を実行します。
+配布バージョンはタグから取得し、設定ファイルの書き換えは不要です。
 現段階は開発用で、Developer ID の署名と公証はしていません。
 タグからの配布はApple Silicon・Intel共通のuniversal dmgです。
-Releaseの作成、更新署名のsecrets、バージョンの合わせ方は [配布手順](../docs/RELEASING.md) を参照してください。
+Releaseの作成、更新署名のsecrets、タグからのバージョン取得は [配布手順](../docs/RELEASING.md) を参照してください。
 アプリを単独で起動すると、設定したサーバーにログインできます。
 
 ビルド済みのアプリをモックとまとめて起動するには、リポジトリのルートで実行します。
 
 ```sh
-python3 tools/run_desktop_mock.py --app 'desktop/src-tauri/target/release/bundle/macos/PTranslate Desk.app'
+python3 tools/run_desktop_mock.py --app 'desktop/src-tauri/target/debug/bundle/macos/PTranslate Desk.app'
 ```
 
 開発用の実行ファイルだけを作る場合は、次を実行します。

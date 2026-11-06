@@ -24,7 +24,7 @@ let state = null;
 function render(status) {
   state = status;
   const labels = { idle: "更新を確認", checking: "確認中", up_to_date: "最新", available: "更新あり", installing: "更新中", restart_required: "再起動", error: "確認できません" };
-  $("version-badge").textContent = `v${status.current_version} · ${labels[status.phase] || status.message}`;
+  $("version-badge").textContent = `v${status.current_version} · ${status.current_version === "0.0.0-dev" && status.phase === "idle" ? "開発用" : labels[status.phase] || status.message}`;
   $("update-status").textContent = `v${status.current_version} · ${status.message}`;
   const busy = ["checking", "installing"].includes(status.phase);
   $("check-update").disabled = busy || status.phase === "restart_required";

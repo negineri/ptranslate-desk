@@ -1,11 +1,12 @@
 {
   "name": "ptranslate-desk",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.0.0-dev",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "tauri build",
+    "build": "tauri build --debug",
+    "build:release": "node build-release.mjs",
     "mock": "python3 ../tools/run_desktop_mock.py",
     "test:mac": "python3 ../tools/run_desktop_mock.py --smoke-test"
   },

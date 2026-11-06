@@ -1,6 +1,6 @@
 {
   "productName": "PTranslate Desk",
-  "version": "0.2.2",
+  "version": "0.0.0-dev",
   "identifier": "com.witenp.ptranslate-desk",
   "build": {
     "beforeDevCommand": {

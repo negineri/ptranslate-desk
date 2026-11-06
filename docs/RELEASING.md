@@ -3,25 +3,26 @@
 ## タグとバージョン
 
 `v*` のタグをpushすると、サーバーイメージとmacOSクライアントを同じタグで配布します。
-タグは `v` と `desktop/src-tauri/tauri.conf.json` の `version` をつないだ値にします。
-CIは公開前に次のバージョンが一致することを確認し、不一致なら全ジョブを止めます。
+配布バージョンはビルド対象のHEADに付いたgitタグから取得します。例えば `v0.2.2` ならアプリは `0.2.2` です。
+設定ファイルやnpm・Cargoのバージョンは `0.0.0-dev` のままで、リリースごとの書き換えは不要です。
 
-- `desktop/src-tauri/tauri.conf.json`
-- `desktop/src-tauri/Cargo.toml` と `Cargo.lock` のアプリの項目
-- `desktop/package.json` と `package-lock.json` のアプリの項目
-
-バージョンを更新したら、リポジトリのルートで次を確認します。
+mainへ反映後、配布するコミットへタグを付けてpushします。
 
 ```sh
-python3 tools/check_release_version.py --tag v0.2.0
+git tag v0.2.2
+git push origin v0.2.2
 ```
 
-mainへ反映後、一致するタグを作成してpushします。
+CIはタグが正しいSemVerでHEADを指すことと、追跡ファイルに変更がないことを確認します。
+`tools/check_release_version.py --tag "$RELEASE_TAG" --write-config desktop/src-tauri/gen/release-version.json`
+でバージョンと更新署名の設定をまとめたTauri設定を生成し、Tauriの `--config` へ渡します。
+生成ファイルはgitで管理せず、既定の設定・npm・Cargoのバージョンも書き換えません。
+アプリ内表示・配布ファイル名・更新manifestはいずれもこのバージョンを使います。
 
-```sh
-git tag v0.2.0
-git push origin v0.2.0
-```
+ローカルでは `npm run build` がデバッグビルド（`target/debug/`）となり、バージョンは `0.0.0-dev` です。
+タグの付いたコミットでも通常のビルドは開発用です。明示的に配布ビルドを行う場合だけ、
+HEADへタグを付けた状態で `npm run build:release` を使います。更新署名には後述の鍵が必要です。
+`python3` とgitを利用できる環境が必要です。
 
 `main` とPRではuniversalの `.app` をzipにまとめ、Actionsの成果物として保存します。
 タグでは、試験とサーバーイメージの公開が成功してから `desktop-release` がReleaseを作成します。
@@ -53,7 +54,7 @@ Release作成後にも `latest.json` のバージョン、HTTPS、署名、両�
 既存の鍵を失うと、既に配ったアプリが新しい鍵の更新を受け取れなくなります。
 鍵の変更は、既存の公開鍵を持つアプリからの移行手順を用意して行います。
 
-Release用設定 `desktop/src-tauri/tauri.release.conf.json` でだけ `createUpdaterArtifacts` を有効にします。
+Release用設定 `desktop/src-tauri/tauri.release.conf.json` を基にした生成設定でだけ `createUpdaterArtifacts` を有効にします。
 通常の開発ビルドには秘密鍵は不要です。
 
 ## アプリでの更新

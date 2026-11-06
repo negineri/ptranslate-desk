@@ -11,6 +11,7 @@
   try {
     step = "ログイン前のヘッダー";
     await wait(() => $("version-badge")?.textContent.startsWith("v"));
+    if (!$("version-badge").textContent.includes("0.0.0-dev")) throw new Error("開発版のバージョン");
     if (!$("app-header").contains($("check-update"))) throw new Error("更新操作の配置");
     $("version-badge").click();
     if (!$("update-menu").open || !$("check-update").getClientRects().length) throw new Error("更新メニュー");

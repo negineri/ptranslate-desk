@@ -219,7 +219,8 @@ pub fn restart_after_update(app: AppHandle, window: WebviewWindow) -> Result<(),
 
 pub fn schedule(app: &AppHandle) {
     // モックと開発時は GitHub に接続しない。手動の確認は開発時も利用できる。
-    if cfg!(debug_assertions)
+    if app.package_info().version.pre.as_str() == "dev"
+        || cfg!(debug_assertions)
         || cfg!(feature = "smoke-test")
         || app.state::<crate::Backend>().auth.is_mock()
     {

@@ -63,7 +63,8 @@ jobs:
       - run: python3 tools/run_desktop_mock.py --smoke-test
       - run: npm ci
         working-directory: desktop
-      - run: npm run build -- --target universal-apple-darwin --bundles app
+      # CIでは最適化したビルドも確認し、配布用の依存キャッシュをmainに保存する。
+      - run: npm run tauri -- build --target universal-apple-darwin --bundles app
         working-directory: desktop
       - run: codesign --verify --deep --strict --verbose=2 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app'
         working-directory: desktop
@@ -105,6 +106,10 @@ jobs:
           shared-key: macos-universal
       - run: npm ci
         working-directory: desktop
+      - name: gitタグから配布バージョンを取得
+        run: python3 tools/check_release_version.py --tag "$RELEASE_TAG" --write-config desktop/src-tauri/gen/release-version.json
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
       - name: 更新署名用の秘密を確認
         shell: bash
         env:
@@ -135,7 +140,7 @@ jobs:
             更新用ファイルはTauriの更新署名で検証します。AppleのDeveloper ID署名・公証は未対応です。
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          args: --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
+          args: --target universal-apple-darwin --bundles app,dmg --config src-tauri/gen/release-version.json
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
       - name: アプリ全体のコード署名を検証
