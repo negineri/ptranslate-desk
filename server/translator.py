@@ -38,7 +38,7 @@ def env_int(name: str, default: int) -> int:
 
 LISTEN_HOST = os.environ.get("TR_LISTEN_HOST", "127.0.0.1")
 LISTEN_PORT = env_int("TR_LISTEN_PORT", 8002)
-STATIC_DIR = Path(os.environ.get("TR_STATIC_DIR", Path(__file__).resolve().parent))
+STATIC_DIR = Path(os.environ.get("TR_STATIC_DIR", Path(__file__).resolve().parent / "static"))
 # 翻訳エンジン (PLaMo 3 Translate を動かす llama-server の /v1/completions)。必須
 UPSTREAM_URL = os.environ.get("TR_UPSTREAM_URL", "")
 API_KEY = os.environ.get("TR_API_KEY", "")
