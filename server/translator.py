@@ -334,7 +334,9 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         try:
             if method == "GET" and path in ("/", "/index.html"):
-                return self.serve_index()
+                return self.serve_static("index.html", "text/html; charset=utf-8")
+            if method == "GET" and path == "/translation.mjs":
+                return self.serve_static("translation.mjs", "text/javascript; charset=utf-8")
             if not path.startswith("/api/"):
                 raise HttpError(404, "Not found")
             user = self.user()
@@ -368,10 +370,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.dispatch("POST")
 
-    def serve_index(self) -> None:
-        body = (STATIC_DIR / "index.html").read_bytes()
+    def serve_static(self, filename: str, content_type: str) -> None:
+        body = (STATIC_DIR / filename).read_bytes()
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()

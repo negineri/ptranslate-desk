@@ -160,7 +160,15 @@ class ServerTest(unittest.TestCase):
     def test_index_and_config(self):
         _, resp = self.call("GET", "/", user=None)
         self.assertEqual(resp.status, 200)
-        self.assertIn(b"<title>", resp.read())
+        page = resp.read()
+        self.assertIn(b"<title>", page)
+        self.assertIn(b'from "./translation.mjs"', page)
+        conn, resp = self.call("GET", "/translation.mjs", user=None)
+        with resp:
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.getheader("Content-Type"), "text/javascript; charset=utf-8")
+            self.assertIn(b"export function splitText", resp.read())
+        conn.close()
         _, resp = self.call("GET", "/api/config")
         cfg = json.loads(resp.read())
         self.assertEqual(cfg["user"], "alice")
