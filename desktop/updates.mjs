@@ -1,8 +1,10 @@
+import { settingsPage } from "./settings-view.mjs";
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
-// ログイン前も更新できるよう、翻訳用の section の外に置く。
+// ログイン前も設定タブから更新を確認できる。
 const panel = document.createElement("aside");
+panel.id = "update-settings";
 panel.className = "row";
 panel.style.marginBottom = "16px";
 panel.innerHTML = `<span id="update-status" class="hint" role="status"></span>
@@ -14,7 +16,7 @@ panel.innerHTML = `<span id="update-status" class="hint" role="status"></span>
     <button id="decline-update">やめる</button>
   </span>
   <button id="restart-update" hidden>再起動する</button>`;
-document.querySelector("section").before(panel);
+settingsPage.append(panel);
 const $ = (id) => document.getElementById(id);
 let state = null;
 
