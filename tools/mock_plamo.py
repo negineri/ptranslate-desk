@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +27,13 @@ INPUT_RE = re.compile(
     r"<\|plamo:tag\|>input(?:<\|plamo:key\|>lang<\|plamo:val\|>[a-z()-]+)?<\|plamo:msg\|>"
 )
 LANG_RE = re.compile(r"<\|plamo:tag\|>output<\|plamo:key\|>lang<\|plamo:val\|>([a-z()-]+)")
+
+
+class MockHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # モックも名前の逆引きを待たずに起動する。
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def make_server(port: int = 0, api_key: str = "", delay: float = 0.05, slow: float = 40.0):
@@ -85,7 +93,7 @@ def make_server(port: int = 0, api_key: str = "", delay: float = 0.05, slow: flo
                 with lock:
                     stats["canceled"] += 1
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = MockHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True
     return server, stats
 

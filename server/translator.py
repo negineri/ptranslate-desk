@@ -24,6 +24,7 @@ import os
 import queue
 import re
 import signal
+import socketserver
 import sys
 import threading
 import time
@@ -289,6 +290,14 @@ def upstream_stream(prompt: str, limit: int, events: queue.Queue, cancel: thread
         conn.close()
 
 
+class TranslationHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind の getfqdn による逆引きは不要。
+        # macOS のランナーでは名前解決待ちで起動が遅れることがある。
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "translator"
     protocol_version = "HTTP/1.1"
@@ -466,6 +475,7 @@ class JournalFormatter(logging.Formatter):
 
 
 def main() -> None:
+    started = time.monotonic()
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JournalFormatter("%(message)s"))
     logging.basicConfig(level=logging.INFO, handlers=[handler])
@@ -474,13 +484,19 @@ def main() -> None:
         sys.exit(2)
     if not API_KEY:
         log.warning("TR_API_KEY is empty; requests are sent without Authorization")
-    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
+    server = TranslationHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True
     signal.signal(
         signal.SIGTERM,
         lambda *_: threading.Thread(target=server.shutdown, daemon=True).start(),
     )
-    log.info("listening on %s:%d upstream=%s", LISTEN_HOST, LISTEN_PORT, UPSTREAM_URL)
+    log.info(
+        "listening on %s:%d upstream=%s startup_seconds=%.3f",
+        LISTEN_HOST,
+        server.server_port,
+        UPSTREAM_URL,
+        time.monotonic() - started,
+    )
     server.serve_forever()
 
 
