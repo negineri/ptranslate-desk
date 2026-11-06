@@ -1,0 +1,359 @@
+<!doctype html>
+<!-- ptranslate-desk: Web の画面。サーバー (server/translator.py) が / で返す -->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>翻訳</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6576; --line: #dde1e8;
+    --accent: #2f6fde; --accent-text: #ffffff; --ok: #1f8a4c; --warn: #b26a00; --err: #c43c3c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1d2128; --text: #e7eaf0; --muted: #9aa3b2; --line: #2e343e;
+      --accent: #5b8ff0; --accent-text: #0d1117; --ok: #4cc283; --warn: #e3a33c; --err: #ef6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 16px; font-size: .9rem; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .langs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  button, select, textarea { font: inherit; color: var(--text); background: var(--panel);
+         border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); padding: 8px 20px; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 760px) { .panes { grid-template-columns: 1fr; } }
+  textarea { width: 100%; resize: vertical; }
+  #src { min-height: 320px; }
+  #out { min-height: 320px; border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px;
+         white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+  #out:empty::before { content: "ここに訳が出ます"; color: var(--muted); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  .hint { color: var(--muted); font-size: .85rem; }
+  .spacer { flex: 1; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); }
+  details textarea { min-height: 80px; margin-top: 4px; }
+  details label { display: block; margin-top: 10px; font-size: .9rem; }
+  #status { min-height: 1.4em; }
+  .under { display: flex; align-items: center; gap: 8px; }
+  button.link { border: 0; background: none; color: var(--accent); padding: 0; font-size: .85rem; }
+  label.check { display: inline-flex; align-items: center; gap: 4px; font-size: .9rem; color: var(--muted); cursor: pointer; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+</style>
+</head>
+<body>
+<main>
+  <h1>翻訳</h1>
+  <p class="sub">PLaMo 3 Translate で訳します。原文と訳はサーバーに残りません。<span id="who"></span></p>
+
+  <section>
+    <div class="langs">
+      <select id="source" aria-label="原文の言語"><option value="">自動で判定</option></select>
+      <button id="swap" title="言語を入れ替える" aria-label="言語を入れ替える">⇄</button>
+      <select id="target" aria-label="訳す先の言語"><option value="auto">日本語 ⇄ 英語 (自動)</option></select>
+      <select id="form" aria-label="文体" hidden>
+        <option value="">文体はおまかせ</option>
+        <option value="polite">です・ます</option>
+        <option value="plain">だ・である</option>
+      </select>
+    </div>
+
+    <div class="panes">
+      <div>
+        <textarea id="src" placeholder="訳したい文章を入れる (Ctrl+Enter ですぐ翻訳)" spellcheck="false"></textarea>
+        <div class="hint under"><span><span id="count">0</span> 文字</span><button id="clear" class="link" title="原文と訳を消す">空にする</button></div>
+      </div>
+      <div>
+        <div id="out" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="go" class="primary">翻訳する</button>
+      <button id="stop" hidden>中止</button>
+      <label class="check" title="入力が止まって 1 秒たつと訳す"><input id="auto" type="checkbox" checked> 自動で翻訳</label>
+      <span id="status" class="hint"></span>
+      <span class="spacer"></span>
+      <button id="copy">訳をコピー</button>
+    </div>
+
+    <details>
+      <summary>詳しい設定 (文脈・用語集)</summary>
+      <label for="context">文脈 (訳さない参考の文。何についての文章かなど)</label>
+      <textarea id="context" placeholder="例: プロジェクト管理ツールのヘルプページです。"></textarea>
+      <label for="glossary">用語集 (1 行に 1 つ、「原語 =&gt; 訳語」)</label>
+      <textarea id="glossary" placeholder="管理画面 =&gt; dashboard&#10;オーナー =&gt; assignee"></textarea>
+      <p class="hint">用語集・言語の選択・自動で翻訳するかは、このブラウザに覚えておきます。</p>
+    </details>
+  </section>
+
+  <p class="hint">長い文章は段落ごとに区切って順に訳します (前の段落の訳を手がかりに続けて訳します)。
+    1 つの段落が長すぎると途中で切れることがあり、そのときは段落を分けてください。</p>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const els = { source: $("source"), target: $("target"), form: $("form"), src: $("src"), out: $("out"),
+              go: $("go"), stop: $("stop"), status: $("status"), copy: $("copy"), swap: $("swap"),
+              context: $("context"), glossary: $("glossary"), count: $("count"), who: $("who"),
+              auto: $("auto"), clear: $("clear") };
+let config = { max_chars: 4000, languages: [] };
+let controller = null;   // 走っている翻訳 (新しい翻訳を始めると止める)
+let timer = null;        // 自動で翻訳するまでの待ち
+let lastKey = null;      // 最後に訳し終えた原文と設定 (同じなら自動では訳し直さない)
+// 区切りごとの訳。鍵は設定・その区切りの原文・直前の区切りの原文 (前の訳を手がかりにするため)
+const cache = new Map();
+const CACHE_MAX = 500;
+
+// 1 回に送る区切りの目安 (文字)。PLaMo は長い原文で繰り返しに入るので小さめにする
+const CHUNK_CHARS = 1500;
+// 入力が止まってから自動で訳すまで (ミリ秒)。打っている途中の文で翻訳エンジンを埋めない
+const AUTO_DELAY = 1000;
+
+function setStatus(text, cls = "") { els.status.textContent = text; els.status.className = "hint " + cls; }
+
+function save() {
+  localStorage.setItem("translator", JSON.stringify({
+    source: els.source.value, target: els.target.value, form: els.form.value, glossary: els.glossary.value,
+    auto: els.auto.checked }));
+}
+
+function restore() {
+  try {
+    const s = JSON.parse(localStorage.getItem("translator") || "{}");
+    for (const k of ["source", "target", "form"]) {
+      if (s[k] !== undefined && [...els[k].options].some((o) => o.value === s[k])) els[k].value = s[k];
+    }
+    if (typeof s.glossary === "string") els.glossary.value = s.glossary;
+    if (typeof s.auto === "boolean") els.auto.checked = s.auto;
+  } catch (e) { /* 壊れていたら使わない */ }
+}
+
+function updateForm() { els.form.hidden = resolvedTarget(els.src.value) !== "ja"; }
+function updateCount() { els.count.textContent = els.src.value.length.toLocaleString(); }
+
+// 日本語の文字 (かな・漢字) が多ければ英語へ、そうでなければ日本語へ
+function guessTarget(text) {
+  const sample = text.slice(0, 2000);
+  const ja = (sample.match(/[\u3040-\u30ff\u3400-\u9fff]/g) || []).length;
+  const letters = (sample.match(/[\p{L}]/gu) || []).length || 1;
+  return ja / letters > 0.2 ? "en" : "ja";
+}
+
+function resolvedTarget(text) { return els.target.value === "auto" ? guessTarget(text) : els.target.value; }
+
+function parseGlossary() {
+  return els.glossary.value.split("\n").map((line) => {
+    const m = line.split(/\s*(?:=>|⇒|→)\s*/);
+    return m.length === 2 && m[0].trim() && m[1].trim() ? { source: m[0].trim(), target: m[1].trim() } : null;
+  }).filter(Boolean).slice(0, config.max_glossary || 200);
+}
+
+// 段落 (空行) で区切り、CHUNK_CHARS までまとめる。長い段落は文の終わりで分ける。
+// 区切りの間の空白はそのまま訳に戻すので、段落の形が保たれる
+function splitText(text) {
+  const pieces = [];
+  const re = /(\n\s*\n)/;
+  for (const part of text.split(re)) {
+    if (re.test(part) || part === "") { pieces.push({ sep: part }); continue; }
+    if (part.length <= CHUNK_CHARS) { pieces.push({ text: part }); continue; }
+    let buf = "";
+    for (const s of part.match(/[^。．.!?！？\n]+[。．.!?！？\n]*|[。．.!?！？\n]+/g) || [part]) {
+      if (buf && buf.length + s.length > CHUNK_CHARS) { pieces.push({ text: buf }); buf = ""; }
+      buf += s;
+      while (buf.length > CHUNK_CHARS) { pieces.push({ text: buf.slice(0, CHUNK_CHARS) }); buf = buf.slice(CHUNK_CHARS); }
+    }
+    if (buf) pieces.push({ text: buf });
+  }
+  // 短い段落は区切りごとまとめて 1 回で送る
+  const chunks = [];
+  let cur = null;
+  for (const p of pieces) {
+    if (p.sep !== undefined) { if (cur) cur.tail += p.sep; else chunks.push({ text: "", tail: p.sep }); continue; }
+    if (cur && cur.text.length + cur.tail.length + p.text.length <= CHUNK_CHARS) {
+      cur.text += cur.tail + p.text; cur.tail = "";
+    } else {
+      cur = { text: p.text, tail: "" }; chunks.push(cur);
+    }
+  }
+  return chunks;
+}
+
+async function translateChunk(body, onText, signal) {
+  const res = await fetch("api/translate", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
+  if (res.status === 401) { location.reload(); throw new Error("ログインし直してください"); }
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.error || `エラー (${res.status})`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "", finish = null;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const ev = buf.slice(0, i); buf = buf.slice(i + 2);
+      if (!ev.startsWith("data:")) continue;
+      const data = JSON.parse(ev.slice(5));
+      if (data.t) onText(data.t);
+      if (data.error) throw new Error(data.error);
+      if (data.done) finish = data.finish;
+    }
+  }
+  if (!finish) throw new Error("接続が途中で切れました");
+  return finish;
+}
+
+function settings(text) {
+  const target = resolvedTarget(text);
+  return { target_lang: target, source_lang: els.source.value || null,
+           form: target === "ja" ? (els.form.value || null) : null,
+           context: els.context.value.trim(), glossary: parseGlossary() };
+}
+
+function remember(key, value) {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+}
+
+// auto: 自動で訳すとき (原文と設定が前と同じなら何もしない)
+async function run({ auto = false } = {}) {
+  clearTimeout(timer);
+  const text = els.src.value;
+  if (!text.trim()) {
+    if (controller) controller.abort("superseded");
+    if (!auto) els.src.focus();
+    return;
+  }
+  const common = settings(text);
+  if (common.source_lang && common.source_lang === common.target_lang) {
+    setStatus("原文と訳す先が同じ言語です", "err"); return;
+  }
+  const runKey = JSON.stringify([text, common]);
+  if (auto && runKey === lastKey && !controller) return;
+  save();
+  if (controller) controller.abort("superseded");
+  const mine = new AbortController();
+  controller = mine;
+  const chunks = splitText(text);
+  const todo = chunks.filter((c) => c.text.trim()).length;
+  // 覚えている区切りの訳はすぐ並べ、変わった区切りだけを訳す
+  const live = document.createElement("span");
+  let n = 0, truncated = 0, prev = null, requested = 0;
+  els.stop.hidden = false;
+  try {
+    els.out.textContent = "";
+    els.out.append(live);
+    for (const c of chunks) {
+      if (c.text.trim()) {
+        n++;
+        const source = c.text.trim();
+        const key = JSON.stringify([common, source, prev ? prev.source : null]);
+        const lead = c.text.match(/^\s*/)[0], trail = c.text.match(/\s*$/)[0];
+        live.append(lead);
+        let got = cache.get(key);
+        if (got === undefined) {
+          requested++;
+          setStatus(todo > 1 ? `訳しています (${n} / ${todo})` : "訳しています");
+          const node = document.createTextNode("");
+          live.append(node);
+          let buf = "";
+          const finish = await translateChunk(
+            { ...common, text: source, history: prev ? [prev] : [] },
+            (t) => { buf += t; node.data = buf.replace(/^\s+/, ""); }, mine.signal);
+          if (finish === "length") truncated++;
+          got = buf.trim();
+          node.data = got;
+          remember(key, { text: got, truncated: finish === "length" });
+        } else {
+          live.append(got.text);
+          if (got.truncated) truncated++;
+          got = got.text;
+        }
+        prev = { source, target: got };
+        live.append(trail);
+      }
+      live.append(c.tail);
+    }
+    lastKey = runKey;
+    const what = requested === 0 && todo > 0 ? "訳し終わりました (前の訳を使いました)" : "訳し終わりました";
+    setStatus(truncated ? `${truncated} か所が長すぎて途中で切れました。段落を分けて訳し直してください` : what,
+              truncated ? "warn" : "ok");
+  } catch (e) {
+    if (mine.signal.reason === "superseded") return;   // 新しい翻訳に引き継いだ
+    setStatus(mine.signal.aborted ? "中止しました" : e.message, mine.signal.aborted ? "" : "err");
+  } finally {
+    if (controller === mine) { controller = null; els.stop.hidden = true; }
+  }
+}
+
+function scheduleAuto() {
+  clearTimeout(timer);
+  if (!els.auto.checked) return;
+  if (!els.src.value.trim()) {
+    if (controller) controller.abort("superseded");
+    els.out.textContent = ""; setStatus(""); lastKey = null;
+    return;
+  }
+  timer = setTimeout(() => run({ auto: true }), AUTO_DELAY);
+}
+
+async function init() {
+  const res = await fetch("api/config");
+  if (res.status === 401) { location.reload(); return; }
+  config = await res.json();
+  els.who.textContent = ` (${config.user} でログイン中)`;
+  for (const l of config.languages) {
+    els.source.append(new Option(l.name, l.code));
+    els.target.append(new Option(l.name, l.code));
+  }
+  restore();
+  updateForm();
+}
+
+els.go.addEventListener("click", () => run());
+els.stop.addEventListener("click", () => { clearTimeout(timer); if (controller) controller.abort(); });
+els.src.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); } });
+els.src.addEventListener("input", () => { updateCount(); updateForm(); scheduleAuto(); });
+for (const k of ["source", "target", "form"]) els[k].addEventListener("change", () => { updateForm(); save(); scheduleAuto(); });
+els.glossary.addEventListener("change", () => { save(); scheduleAuto(); });
+els.context.addEventListener("change", scheduleAuto);
+els.auto.addEventListener("change", () => { save(); if (els.auto.checked) scheduleAuto(); else clearTimeout(timer); });
+els.clear.addEventListener("click", () => {
+  clearTimeout(timer);
+  if (controller) controller.abort("superseded");
+  els.src.value = ""; els.out.textContent = ""; lastKey = null;
+  updateCount(); updateForm(); setStatus("");
+  els.src.focus();
+});
+els.copy.addEventListener("click", async () => {
+  await navigator.clipboard.writeText(els.out.textContent);
+  setStatus("訳をコピーしました", "ok");
+});
+els.swap.addEventListener("click", () => {
+  const t = resolvedTarget(els.src.value);
+  const s = els.source.value || (t === "ja" ? "en" : "ja");
+  els.source.value = t;
+  els.target.value = s;
+  if (els.out.textContent.trim()) { els.src.value = els.out.textContent; els.out.textContent = ""; }
+  updateCount(); updateForm(); save(); scheduleAuto();
+});
+init().catch((e) => setStatus("読み込めませんでした: " + e.message, "err"));
+</script>
+</body>
+</html>
