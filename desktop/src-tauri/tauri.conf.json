@@ -1,6 +1,6 @@
 {
   "productName": "PTranslate Desk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "com.witenp.ptranslate-desk",
   "build": {
     "beforeDevCommand": {
@@ -23,7 +23,7 @@
         "label": "popup",
         "title": "PTranslate Desk — 選んだ文を翻訳",
         "url": "popup.html",
-        "width": 460,
+        "width": 600,
         "height": 340,
         "visible": false,
         "alwaysOnTop": true,

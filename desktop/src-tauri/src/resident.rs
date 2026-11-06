@@ -44,6 +44,7 @@ struct Ui {
     paused: bool,
     revision: u64,
     popup: Option<PopupContent>,
+    popup_anchor: Option<PhysicalPosition<f64>>,
     main_text: Option<String>,
 }
 
@@ -61,6 +62,7 @@ impl Default for Resident {
                 paused: false,
                 revision: 0,
                 popup: None,
+                popup_anchor: None,
                 main_text: None,
             }),
             capturing: AtomicBool::new(false),
@@ -236,27 +238,8 @@ pub fn open_popup(app: &AppHandle, text: String) -> Result<(), String> {
     let window = app
         .get_webview_window("popup")
         .ok_or("翻訳ポップアップを開けませんでした")?;
-    if let Ok(cursor) = app.cursor_position() {
-        let mut point = PhysicalPosition::new(cursor.x as i32 + 12, cursor.y as i32 + 12);
-        if let Ok(Some(monitor)) = window.monitor_from_point(cursor.x, cursor.y) {
-            let area = monitor.work_area();
-            let size = window
-                .outer_size()
-                .map_err(|_| "翻訳ポップアップの大きさを取得できませんでした")?;
-            point.x = point.x.clamp(
-                area.position.x,
-                (area.position.x + area.size.width as i32 - size.width as i32).max(area.position.x),
-            );
-            point.y = point.y.clamp(
-                area.position.y,
-                (area.position.y + area.size.height as i32 - size.height as i32)
-                    .max(area.position.y),
-            );
-        }
-        window
-            .set_position(point)
-            .map_err(|_| "翻訳ポップアップの位置を設定できませんでした")?;
-    }
+    resident.ui.lock().unwrap().popup_anchor = app.cursor_position().ok();
+    fit_popup(&window, resident.ui.lock().unwrap().popup_anchor, 280.0)?;
     window
         .show()
         .map_err(|_| "翻訳ポップアップを開けませんでした")?;
@@ -264,6 +247,67 @@ pub fn open_popup(app: &AppHandle, text: String) -> Result<(), String> {
         .set_focus()
         .map_err(|_| "翻訳ポップアップを開けませんでした")?;
     let _ = app.emit_to("popup", "popup-content", ());
+    Ok(())
+}
+
+// 高さが変わっても、開いたときのカーソルと同じ画面を基準にする。
+fn fit_popup(
+    window: &tauri::WebviewWindow,
+    anchor: Option<PhysicalPosition<f64>>,
+    height: f64,
+) -> Result<(), String> {
+    let monitor = anchor
+        .and_then(|p| window.monitor_from_point(p.x, p.y).ok().flatten())
+        .or_else(|| window.current_monitor().ok().flatten())
+        .or_else(|| window.primary_monitor().ok().flatten())
+        .ok_or("画面の大きさを取得できませんでした")?;
+    let area = monitor.work_area();
+    let scale = monitor.scale_factor();
+    let outer = window.outer_size().map_err(|e| e.to_string())?;
+    let inner = window.inner_size().map_err(|e| e.to_string())?;
+    let frame_width = outer.width.saturating_sub(inner.width) as f64;
+    let frame_height = outer.height.saturating_sub(inner.height) as f64;
+    let margin = (12.0 * scale).min(area.size.width.min(area.size.height) as f64 / 4.0);
+    let width = (600.0 * scale).min((area.size.width as f64 - 2.0 * margin - frame_width).max(1.0));
+    let height = (height.max(180.0) * scale)
+        .min((area.size.height as f64 - 2.0 * margin - frame_height).max(1.0));
+    let left = area.position.x as f64 + margin;
+    let top = area.position.y as f64 + margin;
+    let anchor = anchor.unwrap_or(PhysicalPosition::new(left, top));
+    let x = (anchor.x + 12.0 * scale).clamp(
+        left,
+        (area.position.x as f64 + area.size.width as f64 - margin - width - frame_width).max(left),
+    );
+    let y = (anchor.y + 12.0 * scale).clamp(
+        top,
+        (area.position.y as f64 + area.size.height as f64 - margin - height - frame_height)
+            .max(top),
+    );
+    window
+        .set_size(tauri::PhysicalSize::new(
+            width.floor() as u32,
+            height.floor() as u32,
+        ))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_position(PhysicalPosition::new(x.floor() as i32, y.floor() as i32))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn resize_popup(
+    window: tauri::WebviewWindow,
+    resident: State<'_, Resident>,
+    revision: u64,
+    height: f64,
+) -> Result<(), String> {
+    if window.label() != "popup" || !height.is_finite() {
+        return Err("翻訳ポップアップの大きさを変更できませんでした".into());
+    }
+    let ui = resident.ui.lock().unwrap();
+    if ui.popup.as_ref().is_some_and(|p| p.revision == revision) {
+        fit_popup(&window, ui.popup_anchor, height)?;
+    }
     Ok(())
 }
 
