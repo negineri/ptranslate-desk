@@ -7,6 +7,7 @@ mod resident;
 mod settings;
 #[cfg(feature = "smoke-test")]
 mod smoke;
+mod updates;
 
 #[cfg(feature = "smoke-test")]
 #[tauri::command]
@@ -299,6 +300,7 @@ fn main() {
         .expect("HTTP クライアントの作成に失敗しました");
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _, event| {
@@ -309,6 +311,7 @@ fn main() {
                 .build(),
         )
         .manage(resident::Resident::default())
+        .manage(updates::Updates::default())
         .manage(Backend {
             auth: Arc::new(auth::Auth::new(client)),
             session: Mutex::new(Session::default()),
@@ -316,6 +319,7 @@ fn main() {
         })
         .setup(|app| {
             resident::setup(app.handle())?;
+            updates::schedule(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -373,7 +377,11 @@ fn main() {
         resident::popup_content,
         resident::take_main_text,
         resident::desktop_action,
-        resident::open_accessibility_settings
+        resident::open_accessibility_settings,
+        updates::update_status,
+        updates::check_updates,
+        updates::install_update,
+        updates::restart_after_update
     ]);
     #[cfg(feature = "smoke-test")]
     let builder = builder
@@ -392,6 +400,10 @@ fn main() {
             resident::take_main_text,
             resident::desktop_action,
             resident::open_accessibility_settings,
+            updates::update_status,
+            updates::check_updates,
+            updates::install_update,
+            updates::restart_after_update,
             smoke::smoke_snapshot,
             smoke::smoke_popup_report,
             smoke::smoke_action,

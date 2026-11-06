@@ -15,6 +15,9 @@ DeepL のように、文章を貼って訳す画面と、選んだ文をショ�
 | デスクトップのクライアント | `desktop/` | macOS の主窓・ショートカット・小窓・メニューバー常駐をモックで実行できる: [起動とビルド](desktop/README.md) |
 | 翻訳エンジンのモック | `tools/mock_plamo.py` | 試験と手元の開発用 |
 
+macOSクライアントは `v*` タグでGitHub Releasesにuniversal dmgを配布します。
+アプリの更新は利用者が承認してから適用します。[配布・更新の手順](docs/RELEASING.md) を参照してください。
+
 ## サーバーを動かす
 
 ```bash
