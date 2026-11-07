@@ -18,8 +18,9 @@ who.textContent = "アカウント";
 accountSummary.append(who);
 accountMenu.append(accountSummary);
 accountSlot.append(accountMenu);
-title.before(header);
+main.prepend(header);
 header.append(title, updateSlot, description, accountSlot);
+main.querySelector(".web-heading")?.setAttribute("hidden", "");
 description.textContent = "PLaMo 3 Translate · 原文と訳はサーバーに残りません";
 for (const eventName of ["click", "keydown"]) {
   document.addEventListener(eventName, (event) => {
@@ -82,6 +83,7 @@ buttons.forEach((button, index) => {
 const style = document.createElement("style");
 style.textContent = `
   [hidden] { display: none !important; }
+  [data-web-only] { display: none !important; }
   main { padding-top: 16px; padding-bottom: 16px; }
   #app-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   #app-header h1 { margin: 0; font-size: 1.25rem; white-space: nowrap; }

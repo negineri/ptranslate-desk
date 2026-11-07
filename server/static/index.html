@@ -58,11 +58,24 @@
   button.link { border: 0; background: none; color: var(--accent); padding: 0; font-size: .85rem; }
   label.check { display: inline-flex; align-items: center; gap: 4px; font-size: .9rem; color: var(--muted); cursor: pointer; }
   .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+  .web-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .web-actions { flex-shrink: 0; }
+  @media (max-width: 480px) { .web-heading { flex-wrap: wrap; margin-bottom: 8px; } }
+  dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto;
+           color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+  dialog::backdrop { background: #0006; }
+  dialog h2 { margin: 0 0 12px; font-size: 1.2rem; }
+  .connection-value { display: flex; gap: 8px; margin: 4px 0 12px; }
+  .connection-value input { width: 100%; min-width: 0; }
+  .connection-value button { flex-shrink: 0; }
 </style>
 </head>
 <body>
 <main>
-  <h1><img class="brand-mark" src="./logo.png" width="32" height="32" alt="">PTranslate</h1>
+  <header class="web-heading">
+    <h1><img class="brand-mark" src="./logo.png" width="32" height="32" alt="">PTranslate</h1>
+    <div class="web-actions" data-web-only><button id="show-client-connection" disabled>クライアントの接続設定</button></div>
+  </header>
   <p class="sub">PLaMo 3 Translate で訳します。原文と訳はサーバーに残りません。<span id="who"></span></p>
 
   <section>
@@ -109,6 +122,18 @@
   <p class="hint">長い文章は段落ごとに区切って順に訳します (前の段落の訳を手がかりに続けて訳します)。
     1 つの段落が長すぎると途中で切れることがあり、そのときは段落を分けてください。</p>
 </main>
+<dialog id="client-connection-dialog" aria-labelledby="client-connection-title">
+  <h2 id="client-connection-title">クライアントの接続設定</h2>
+  <p class="hint">PTranslate Deskの「設定 → 接続先の設定」に入力してください。</p>
+  <label for="client-server-url">サーバーURL</label>
+  <div class="connection-value"><input id="client-server-url" type="text" readonly><button data-copy-connection="client-server-url">コピー</button></div>
+  <label for="client-discovery-url">OIDC discovery URL</label>
+  <div class="connection-value"><input id="client-discovery-url" type="text" readonly><button data-copy-connection="client-discovery-url">コピー</button></div>
+  <label for="client-client-id">client ID</label>
+  <div class="connection-value"><input id="client-client-id" type="text" readonly><button data-copy-connection="client-client-id">コピー</button></div>
+  <p id="client-connection-status" class="hint" role="status"></p>
+  <form method="dialog"><button>閉じる</button></form>
+</dialog>
 
 <script type="module">
 import { guessTarget, parseGlossary, splitText, translateChunk } from "./translation.mjs";
@@ -264,6 +289,14 @@ async function init() {
   const res = await fetch("api/config");
   if (res.status === 401) { location.reload(); return; }
   config = await res.json();
+  const connection = config.desktop_connection || {};
+  $("client-server-url").value = connection.server_url || location.origin;
+  $("client-discovery-url").value = connection.discovery_url || "";
+  $("client-client-id").value = connection.client_id || "translator-desktop";
+  for (const button of document.querySelectorAll("[data-copy-connection]")) {
+    button.disabled = !$(button.dataset.copyConnection).value;
+  }
+  $("show-client-connection").disabled = false;
   els.who.textContent = ` (${config.user} でログイン中)`;
   for (const l of config.languages) {
     els.source.append(new Option(l.name, l.code));
@@ -300,6 +333,21 @@ els.swap.addEventListener("click", () => {
   if (els.out.textContent.trim()) { els.src.value = els.out.textContent; els.out.textContent = ""; }
   updateCount(); updateForm(); save(); scheduleAuto();
 });
+$("show-client-connection").addEventListener("click", () => {
+  $("client-connection-status").textContent = $("client-discovery-url").value ? "" :
+    "認証先が未設定です。管理者にOIDC discovery URLを確認してください。";
+  $("client-connection-dialog").showModal();
+});
+for (const button of document.querySelectorAll("[data-copy-connection]")) {
+  button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($(button.dataset.copyConnection).value);
+      $("client-connection-status").textContent = "コピーしました";
+    } catch {
+      $("client-connection-status").textContent = "コピーできませんでした。入力欄の文字列を選んでコピーしてください。";
+    }
+  });
+}
 init().catch((e) => setStatus("読み込めませんでした: " + e.message, "err"));
 </script>
 </body>

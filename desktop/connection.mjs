@@ -20,6 +20,12 @@ panel.innerHTML = `<summary>接続先の設定</summary>
     <input id="client-id" type="text" required maxlength="256" autocomplete="off" spellcheck="false">
     <p class="hint">保存すると現在の接続先からログアウトし、アプリを再起動します。新しい接続先でログインし直してください。</p>
     <button id="save-connection" type="submit">保存して再起動</button>
+    <dialog id="connection-confirm" aria-labelledby="connection-confirm-title">
+      <h2 id="connection-confirm-title">接続先の変更</h2>
+      <p>現在の接続先からログアウトして接続先を変更します。保存後にアプリを再起動してよろしいですか？</p>
+      <button id="confirm-connection" type="button">保存して再起動する</button>
+      <button id="cancel-connection" type="button" autofocus>キャンセル</button>
+    </dialog>
     <p id="connection-status" class="hint" role="status"></p>
   </form>`;
 panel.open = true;
@@ -35,11 +41,23 @@ try {
   showPage(true);
   panel.open = true;
 }
-panel.querySelector("form").addEventListener("submit", async (event) => {
+const confirmation = panel.querySelector("#connection-confirm");
+const button = panel.querySelector("#save-connection");
+panel.querySelector("#cancel-connection").addEventListener("click", () => {
+  confirmation.close();
+  button.focus();
+});
+panel.querySelector("form").addEventListener("submit", (event) => {
   event.preventDefault();
-  if (!window.confirm("現在の接続先からログアウトして接続先を変更します。保存後にアプリを再起動してよろしいですか？")) return;
-  const button = panel.querySelector("#save-connection");
+  if (button.disabled) return;
+  confirmation.showModal();
+  panel.querySelector("#cancel-connection").focus();
+});
+panel.querySelector("#confirm-connection").addEventListener("click", async () => {
+  if (button.disabled || !panel.querySelector("form").reportValidity()) return;
+  confirmation.close();
   button.disabled = true;
+  status.className = "hint";
   status.textContent = "接続先を保存しています…";
   try {
     await invoke("save_connection", { connection: {

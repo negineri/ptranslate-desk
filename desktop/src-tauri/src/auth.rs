@@ -18,9 +18,6 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-pub const SERVER: &str = "https://translate.witenp.com";
-pub const DISCOVERY: &str =
-    "https://atk01.witenp.com/application/o/translator-desktop/.well-known/openid-configuration";
 pub const CLIENT_ID: &str = "translator-desktop";
 const SCOPE: &str = "openid profile offline_access";
 const LOGIN_REQUIRED: &str = "ログインし直してください";
