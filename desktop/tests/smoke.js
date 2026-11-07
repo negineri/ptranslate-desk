@@ -32,6 +32,21 @@
       await window.__TAURI__.core.invoke("save_connection", { connection: { ...connection, server_url: "http://example.com" } });
     } catch { rejected = true; }
     if (!rejected) throw new Error("安全でない接続先を保存できてしまう");
+    step = "接続先の保存ボタンと確認";
+    $("server-url").value = "http://translate.example.com";
+    $("discovery-url").value = "https://auth.example.com/.well-known/openid-configuration";
+    $("save-connection").click();
+    if ($("connection-confirm").hidden) throw new Error("保存の確認が表示されない");
+    $("cancel-connection").click();
+    if (!$("connection-confirm").hidden || $("connection-status").textContent) throw new Error("保存のキャンセル");
+    $("save-connection").click();
+    $("confirm-connection").click();
+    await wait(() => $("connection-status").classList.contains("err"));
+    if (!$("connection-status").textContent.includes("HTTPS")) throw new Error("保存ボタンから検証処理に進めない");
+    if ($("save-connection").disabled || !$("connection-confirm").hidden) throw new Error("保存失敗後の再操作");
+    if ((await window.__TAURI__.core.invoke("load_connection")).server_url) throw new Error("不正な接続先が保存された");
+    $("server-url").value = connection.server_url;
+    $("discovery-url").value = connection.discovery_url;
     step = "ログイン";
     await wait(() => [...document.querySelectorAll("button")].some((b) => b.textContent === "モックにログイン"));
     [...document.querySelectorAll("button")].find((b) => b.textContent === "モックにログイン").click();
