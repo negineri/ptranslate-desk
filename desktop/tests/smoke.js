@@ -18,10 +18,9 @@
     $("version-badge").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     if ($("update-menu").open) throw new Error("更新メニューを閉じる");
     step = "ログイン前の接続先設定";
-    await wait(() => $("connection-form"));
+    await wait(() => $("connection-form") && $("desktop-settings"));
     if ($("connection-settings").closest("section")) throw new Error("接続先設定がログイン前に操作できない");
-    if (!$("settings-page").hidden || $("translation-page").hidden) throw new Error("初期タブ");
-    $("settings-tab").click();
+    if ($("settings-page").hidden || !$("translation-page").hidden) throw new Error("未ログイン時の初期タブ");
     if ($("settings-page").hidden || !$("translation-page").hidden || $("settings-page").closest("[inert]")) throw new Error("ログイン前の設定タブ");
     if (!$("settings-page").contains($("connection-form"))) throw new Error("接続先の配置");
     $("translation-tab").click();

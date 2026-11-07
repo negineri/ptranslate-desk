@@ -67,6 +67,8 @@ export function showPage(settings = false) {
     button.tabIndex = selected ? 0 : -1;
   }
 }
+// 認証状態の復元中も、接続先を確認できる設定タブを初期表示する。
+showPage(true);
 buttons.forEach((button, index) => {
   button.addEventListener("click", () => showPage(index === 1));
   button.addEventListener("keydown", (event) => {
