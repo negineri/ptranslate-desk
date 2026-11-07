@@ -123,7 +123,11 @@ class SigningSecurityTest(unittest.TestCase):
                 package.validate_archive(archive)
 
     def test_manifest_requires_signed_version_and_exact_publish_files(self):
-        with tempfile.TemporaryDirectory() as temp:
+        # 暗号学的な検証は別の公開テストベクトルで試す。
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            patch.object(package, "verify_update_signature"),
+        ):
             directory = Path(temp)
             output = directory / "output"
             output.mkdir()
@@ -151,6 +155,38 @@ class SigningSecurityTest(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 package.manifest(directory, "v1.2.3")
+
+    def test_update_signature_verifies_payload_version_and_public_key(self):
+        # Rustのupdater試験と同じ公開テストベクトル。秘密鍵は含まない。
+        public = b"untrusted comment: minisign public key: A49EF4746FA6E6D7\nRWTX5qZvdPSepDGWg2bz8n6ArQnBMwgQK1geVosorcbLzcunD+KJ+cYe"
+        signature = b"untrusted comment: signature from tauri secret key\nRUTX5qZvdPSepPF2zsjvP/L/TQtBLRnWRvaq+4omK1UEugtQp/USrGiI1v762sDy3id3aor7bRC9ETyeot6lMHHrWoZ5hjUM1Qc=\ntrusted comment: timestamp:1791649051\tfile:payload\tversion:2.0.0\nDDq2CLOEl5cQmC2eJRHlnZPVViOZsu1CjpPKQoei4A/XBfkDqGO0B+QMrcrHgEQ5qV3mne75tdFWhJpqUXh9AA=="
+        encoded_key = base64.b64encode(public).decode()
+        encoded_signature = base64.b64encode(signature).decode()
+        with tempfile.TemporaryDirectory() as temp:
+            archive = Path(temp) / "payload"
+            archive.write_bytes(b"test")
+            package.verify_update_signature(archive, encoded_signature, encoded_key, "2.0.0")
+            archive.write_bytes(b"tampered")
+            with self.assertRaises(ValueError):
+                package.verify_update_signature(archive, encoded_signature, encoded_key, "2.0.0")
+            archive.write_bytes(b"test")
+            with self.assertRaises(ValueError):
+                package.verify_update_signature(archive, encoded_signature, encoded_key, "3.0.0")
+            tampered = base64.b64encode(
+                signature.replace(b"version:2.0.0", b"version:3.0.0")
+            ).decode()
+            with self.assertRaises(ValueError):
+                package.verify_update_signature(archive, tampered, encoded_key, "3.0.0")
+            lines = public.splitlines()
+            wrong_key = bytearray(base64.b64decode(lines[1]))
+            wrong_key[-1] ^= 1
+            encoded_wrong_key = base64.b64encode(
+                lines[0] + b"\n" + base64.b64encode(wrong_key)
+            ).decode()
+            with self.assertRaises(ValueError):
+                package.verify_update_signature(
+                    archive, encoded_signature, encoded_wrong_key, "2.0.0"
+                )
 
     def test_failed_environment_registration_keeps_repository_secrets(self):
         with tempfile.TemporaryDirectory() as temp:

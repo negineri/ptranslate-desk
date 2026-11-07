@@ -53,7 +53,7 @@
   "plugins": {
     "updater": {
       "requireSignedVersion": true,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc5OUMwRUMxMDlGRDAwQUEKUldTcUFQMEp3UTZjZVgydUNmblcxRHB1RDgyRDViRnFYS1VzeFc3Z2Q1MUlTR3psczA0VmFpQm0K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIxODYxNDY3RjM3MjFDRDAKUldUUUhITHpaeFNHc1IvTnlXKyt4MGJvbDdMVk04SkZ3aklYMndvOC9YdmNvdHM4d2RHcmVHckkK",
       "endpoints": [
         "https://github.com/negineri/ptranslate-desk/releases/latest/download/latest.json"
       ]

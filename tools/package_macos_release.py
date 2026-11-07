@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import hashlib
 from datetime import datetime, timezone
 import json
 import os
@@ -12,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import tempfile
 from urllib.parse import quote
 import zipfile
 
@@ -126,6 +128,56 @@ def sign_update(directory, version):
     )
 
 
+def verify_update_signature(archive, signature, public_key, version):
+    """更新データと版を、アプリに埋め込む公開鍵で検証する。秘密鍵は扱わない。"""
+    try:
+        public = base64.b64decode(
+            base64.b64decode(public_key, validate=True).splitlines()[1], validate=True
+        )
+        lines = base64.b64decode(signature.strip(), validate=True).splitlines()
+        signed = base64.b64decode(lines[1], validate=True)
+        trusted = base64.b64decode(lines[3], validate=True)
+        if (
+            len(public) != 42
+            or public[:2] != b"Ed"
+            or len(signed) != 74
+            or signed[:2] not in (b"ED", b"Ed")
+            or len(trusted) != 64
+            or len(lines) != 4
+            or not lines[2].startswith(b"trusted comment: ")
+            or not lines[2].endswith(f"\tversion:{version}".encode())
+            or public[2:10] != signed[2:10]
+        ):
+            raise ValueError("更新署名の鍵または版が一致しません")
+        comment = lines[2][len(b"trusted comment: ") :]
+        content = archive.read_bytes()
+        message = hashlib.blake2b(content).digest() if signed[:2] == b"ED" else content
+        with tempfile.TemporaryDirectory(prefix="ptranslate-verify-") as temp:
+            directory = Path(temp)
+            key = directory / "public.der"
+            key.write_bytes(bytes.fromhex("302a300506032b6570032100") + public[10:])
+            for data, sig in ((message, signed[10:]), (signed[10:] + comment, trusted)):
+                (directory / "message").write_bytes(data)
+                (directory / "signature").write_bytes(sig)
+                run(
+                    "openssl",
+                    "pkeyutl",
+                    "-verify",
+                    "-pubin",
+                    "-inkey",
+                    str(key),
+                    "-keyform",
+                    "DER",
+                    "-rawin",
+                    "-in",
+                    str(directory / "message"),
+                    "-sigfile",
+                    str(directory / "signature"),
+                )
+    except (ValueError, IndexError):
+        raise ValueError("更新データ・版の署名がアプリの公開鍵と一致しません") from None
+
+
 def manifest(directory, tag):
     version = version_from_tag(tag)
     output = directory / "output"
@@ -135,6 +187,10 @@ def manifest(directory, tag):
     lines = decoded.splitlines()
     if len(lines) != 4 or not lines[2].endswith(f"\tversion:{version}"):
         raise ValueError("更新署名に配布バージョンがありません")
+    config = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_text())
+    verify_update_signature(
+        output / filename, signature, config["plugins"]["updater"]["pubkey"], version
+    )
     entry = {
         "signature": signature,
         "url": f"https://github.com/negineri/ptranslate-desk/releases/download/{quote(tag, safe='')}/{quote(filename, safe='')}",
