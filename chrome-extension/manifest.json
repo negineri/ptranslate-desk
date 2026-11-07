@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PTranslate for Chrome",
-  "description": "PLaMo 3 Translate の PTranslate サーバーで、ページの選んだ文を翻訳します。",
+  "description": "PLaMo 3 Translate の PTranslate サーバーで、ページの選んだ文やページ全体を翻訳します。",
   "version": "0.0.0",
   "minimum_chrome_version": "120",
   "icons": {
@@ -32,6 +32,10 @@
     "translate-selection": {
       "suggested_key": { "default": "Alt+Shift+T" },
       "description": "選んだ文を翻訳"
+    },
+    "translate-page": {
+      "suggested_key": { "default": "Alt+Shift+P" },
+      "description": "このページを翻訳"
     }
   },
   "web_accessible_resources": [

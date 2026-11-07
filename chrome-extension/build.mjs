@@ -15,7 +15,7 @@ await rm(dist, { recursive: true, force: true });
 await mkdir(new URL("icons/", dist), { recursive: true });
 const pages = ["popup.html", "action.html", "options.html"];
 const scripts = ["background.mjs", "relay.mjs", "transport.mjs", "settings.mjs", "translate.mjs",
-  "popup.mjs", "action.mjs", "options.mjs"];
+  "popup.mjs", "action.mjs", "options.mjs", "page-task.mjs", "page-content.js"];
 await Promise.all([
   copyFile(new URL("manifest.json", here), new URL("manifest.json", dist)),
   ...pages.map(async (name) => {

@@ -62,6 +62,15 @@ async function init() {
   }
 }
 
+$("translate-page").addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const res = tab?.id === undefined ? null : await chrome.runtime.sendMessage({ type: "translate-page", tabId: tab.id });
+  if (res?.ok) window.close();
+  else {
+    $("page-status").textContent = res?.message || "このページは翻訳できません";
+    $("page-status").className = "hint err";
+  }
+});
 $("go").addEventListener("click", () => void run());
 $("stop").addEventListener("click", () => controller?.abort());
 $("src").addEventListener("keydown", (e) => {

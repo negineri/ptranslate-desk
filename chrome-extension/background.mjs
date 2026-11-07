@@ -1,35 +1,70 @@
+import { runPageTask } from "./page-task.mjs";
 import { isExtensionPage, relay } from "./relay.mjs";
 import { loadSettings, originPattern } from "./settings.mjs";
 
 const MENU_ID = "translate-selection";
+const PAGE_MENU_ID = "translate-page";
 const EXTENSION_ROOT = chrome.runtime.getURL("");
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({ id: MENU_ID, title: "PTranslate で翻訳", contexts: ["selection"] });
+  chrome.contextMenus.create({ id: PAGE_MENU_ID, title: "PTranslate でこのページを翻訳", contexts: ["page"] });
   chrome.storage.session.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
 });
 
-// 拡張の画面からの API 呼び出し (transport.mjs)
+const apiDeps = {
+  fetch: (...args) => fetch(...args),
+  server: async () => (await loadSettings()).server,
+  hasPermission: (server) => chrome.permissions.contains({ origins: [originPattern(server)] }),
+  settings: loadSettings,
+};
+
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== "api" || !isExtensionPage(port.sender, EXTENSION_ROOT)) {
-    port.disconnect();
-    return;
+  const sender = port.sender;
+  // 拡張の画面からの API 呼び出し (transport.mjs)
+  if (port.name === "api" && isExtensionPage(sender, EXTENSION_ROOT)) return relay(port, apiDeps);
+  // ページ全体の翻訳 (page-content.js)。拡張が注入した、タブの一番上の枠の content script だけ受ける
+  if (port.name === "page-translate" && sender?.id === chrome.runtime.id && sender.tab && sender.frameId === 0) {
+    return runPageTask(port, apiDeps);
   }
-  relay(port, {
-    fetch: (...args) => fetch(...args),
-    server: async () => (await loadSettings()).server,
-    hasPermission: (server) => chrome.permissions.contains({ origins: [originPattern(server)] }),
-  });
+  port.disconnect();
+});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (sender.id !== chrome.runtime.id) return;
+  // ツールバーの画面の「このページを翻訳」
+  if (msg?.type === "translate-page" && isExtensionPage(sender, EXTENSION_ROOT) && Number.isInteger(msg.tabId)) {
+    translatePage(msg.tabId).then(sendResponse);
+    return true;
+  }
+  // ページのバーの「Web版を開いてログイン」「拡張の設定」
+  if (msg?.type === "open" && sender.tab) {
+    if (msg.what === "options") void chrome.runtime.openOptionsPage();
+    if (msg.what === "login") {
+      void loadSettings().then(({ server }) => server && chrome.tabs.create({ url: `${server}/`, index: sender.tab.index + 1 }));
+    }
+  }
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId !== MENU_ID) return;
-  void translateSelection(tab, info.selectionText || "", info.frameId);
+  if (info.menuItemId === MENU_ID) void translateSelection(tab, info.selectionText || "", info.frameId);
+  if (info.menuItemId === PAGE_MENU_ID && tab?.id !== undefined) void translatePage(tab.id);
 });
 
 chrome.commands.onCommand.addListener((command, tab) => {
   if (command === MENU_ID) void translateSelection(tab, "");
+  if (command === PAGE_MENU_ID && tab?.id !== undefined) void translatePage(tab.id);
 });
+
+// ページ全体を訳す。もう一度呼ぶと、訳した後なら進み具合のバーを出し直す
+async function translatePage(tabId) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["page-content.js"] });
+    return { ok: true };
+  } catch {
+    return { ok: false, message: "このページは翻訳できません (ブラウザーの画面・ストア・PDF など)" };
+  }
+}
 
 // ページで選ばれている文を読む (改行を保つため、メニューの selectionText より優先する)
 function readSelection() {

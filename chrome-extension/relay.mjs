@@ -49,53 +49,86 @@ export function relay(port, deps) {
   });
 
   async function run({ route, body } = {}) {
-    const method = ROUTES[route];
-    if (!method) throw new RelayError("route", "不明な API です");
-    const server = await deps.server();
-    if (!server) throw new RelayError("no-server", "接続先が未設定です。拡張の設定でサーバーURLを入れてください");
-    if (!(await deps.hasPermission(server))) {
-      throw new RelayError("no-permission", "サーバーへの接続が許可されていません。拡張の設定で保存し直してください");
+    const res = await apiFetch(route, body, deps, abort);
+    post({ type: "head", status: res.status });
+    if (!res.body) return post({ type: "end" });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { value, done: finished } = await reader.read();
+      if (finished) break;
+      const text = decoder.decode(value, { stream: true });
+      if (text) post({ type: "chunk", text });
     }
-    let timer;
-    const timeoutMs = deps.timeoutMs ?? READ_TIMEOUT_MS;
-    const arm = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => abort.abort(new RelayError("timeout", "翻訳サーバーの応答がありません")), timeoutMs);
-    };
-    arm();
-    try {
-      const res = await deps.fetch(`${server}/${route}`, {
-        method,
-        headers: method === "POST" ? { "Content-Type": "application/json" } : {},
-        body: method === "POST" ? body : undefined,
-        credentials: "include",
-        // 認証プロキシのログイン画面への転送は追わず、ログインしていないとして扱う
-        redirect: "manual",
-        cache: "no-store",
-        signal: abort.signal,
-      });
-      // 転送 (opaqueredirect) はログインが要る印
-      const status = res.type === "opaqueredirect" ? 401 : res.status;
-      post({ type: "head", status });
-      if (!res.body || res.type === "opaqueredirect") return post({ type: "end" });
-      const reader = res.body.getReader();
-      abort.signal.addEventListener("abort", () => reader.cancel(abort.signal.reason).catch(() => {}), { once: true });
-      const decoder = new TextDecoder();
-      for (;;) {
-        arm();
-        const { value, done: finished } = await reader.read();
-        if (finished) break;
-        const text = decoder.decode(value, { stream: true });
-        if (text) post({ type: "chunk", text });
-      }
-      const rest = decoder.decode();
-      if (rest) post({ type: "chunk", text: rest });
-      post({ type: "end" });
-    } catch (e) {
-      if (abort.signal.reason instanceof RelayError) throw abort.signal.reason;
-      throw e;
-    } finally {
-      clearTimeout(timer);
-    }
+    const rest = decoder.decode();
+    if (rest) post({ type: "chunk", text: rest });
+    post({ type: "end" });
   }
+}
+
+// background から API を 1 回呼ぶ。返す body は読むたびに時間切れを延ばし、abort で止まる。
+// 失敗は RelayError (route・no-server・no-permission・timeout) か、接続の失敗 (そのほかの例外)
+export async function apiFetch(route, body, deps, abort) {
+  const method = ROUTES[route];
+  if (!method) throw new RelayError("route", "不明な API です");
+  const server = await deps.server();
+  if (!server) throw new RelayError("no-server", "接続先が未設定です。拡張の設定でサーバーURLを入れてください");
+  if (!(await deps.hasPermission(server))) {
+    throw new RelayError("no-permission", "サーバーへの接続が許可されていません。拡張の設定で保存し直してください");
+  }
+  let timer;
+  const timeoutMs = deps.timeoutMs ?? READ_TIMEOUT_MS;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => abort.abort(new RelayError("timeout", "翻訳サーバーの応答がありません")), timeoutMs);
+  };
+  const reason = (e) => (abort.signal.reason instanceof RelayError ? abort.signal.reason : e);
+  arm();
+  let res;
+  try {
+    res = await deps.fetch(`${server}/${route}`, {
+      method,
+      headers: method === "POST" ? { "Content-Type": "application/json" } : {},
+      body: method === "POST" ? body : undefined,
+      credentials: "include",
+      // 認証プロキシのログイン画面への転送は追わず、ログインしていないとして扱う
+      redirect: "manual",
+      cache: "no-store",
+      signal: abort.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    throw reason(e);
+  }
+  // ここからは読み取りを待つあいだだけ時間を測る (読まずに捨てる応答で時計を残さない)
+  clearTimeout(timer);
+  // 転送 (opaqueredirect) はログインが要る印
+  const status = res.type === "opaqueredirect" ? 401 : res.status;
+  if (!res.body || res.type === "opaqueredirect") {
+    clearTimeout(timer);
+    return { status, body: null };
+  }
+  const reader = res.body.getReader();
+  abort.signal.addEventListener("abort", () => reader.cancel(abort.signal.reason).catch(() => {}), { once: true });
+  const stream = new ReadableStream({
+    async pull(controller) {
+      arm();
+      try {
+        const { value, done } = await reader.read();
+        if (abort.signal.aborted) throw abort.signal.reason;
+        if (done) {
+          clearTimeout(timer);
+          controller.close();
+        } else controller.enqueue(value);
+      } catch (e) {
+        clearTimeout(timer);
+        controller.error(reason(e));
+      }
+    },
+    cancel(why) {
+      clearTimeout(timer);
+      return reader.cancel(why);
+    },
+  }, { highWaterMark: 0 });
+  return { status, body: stream };
 }

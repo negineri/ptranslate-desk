@@ -14,6 +14,7 @@
   #out { min-height: 110px; max-height: 260px; overflow-y: auto; margin-top: 8px; }
   .row { margin-top: 8px; }
   #setup p { margin: 0 0 10px; }
+  .page-row { margin: 0 0 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
 </style>
 </head>
 <body><main>
@@ -23,6 +24,7 @@
     <button id="setup-options" class="primary">拡張の設定を開く</button>
   </div>
   <div id="translator" hidden>
+    <div class="row page-row"><button id="translate-page" class="primary">このページを翻訳</button><span id="page-status" class="hint" role="status"></span></div>
     <div class="langs">
       <select id="target" aria-label="訳す先の言語"><option value="auto">日本語 ⇄ 英語 (自動)</option></select>
     </div>
@@ -36,7 +38,6 @@
       <button id="login" hidden>ログイン</button>
       <button id="copy" disabled>訳をコピー</button>
     </div>
-    <p class="hint">ページで文を選んで右クリック →「PTranslate で翻訳」でも訳せます。<span id="shortcut"></span></p>
-  </div>
+    <p class="hint">ページで文を選んで右クリック →「PTranslate で翻訳」でも訳せます。<span id="shortcut"></span></p>  </div>
 </main><script type="module" src="./action.mjs"></script></body>
 </html>
