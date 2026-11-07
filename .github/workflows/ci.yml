@@ -63,6 +63,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: desktop/src-tauri
+          # 既存の通常ビルド用キーを維持し、配布ビルドと共有する。
+          shared-key: desktop-windows
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
       - run: node desktop/build.mjs
       - run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
@@ -194,6 +196,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: desktop/src-tauri
+          shared-key: desktop-windows
           save-if: "false"
       - run: npm ci
         working-directory: desktop
