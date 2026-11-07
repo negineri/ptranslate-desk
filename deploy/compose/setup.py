@@ -9,7 +9,7 @@ compose の setup サービスとして、同じネットワークの中から P
 2. 利用を許すグループ (既定は translate-users) を作り、管理者を入れる
 3. OIDC クライアントを 2 つ作るか、正しい設定に直す
    - ptranslate-web: Web 用 (oauth2-proxy)。client secret あり
-   - ptranslate-desktop: PTranslate Desk 用。公開クライアント (PKCE)、ループバックのリダイレクト
+   - translator-desktop: PTranslate Desk 用。公開クライアント (PKCE)、ループバックのリダイレクト
 4. Web 用の client secret を作り、.env の WEB_CLIENT_SECRET に書く (既に書いてあれば作らない)
 5. 管理者を作ったときは、パスキーを登録するためのログイン用 URL (1 時間有効) を出す
 
@@ -30,7 +30,7 @@ import urllib.request
 from pathlib import Path
 
 WEB_CLIENT_ID = "ptranslate-web"
-DESKTOP_CLIENT_ID = "ptranslate-desktop"
+DESKTOP_CLIENT_ID = "translator-desktop"
 
 
 class Api:

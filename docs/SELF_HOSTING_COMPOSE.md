@@ -78,7 +78,7 @@ docker compose run --rm setup
 2. グループ `translate-users` を作り、管理者を入れる
 3. OIDCクライアントを2つ作る。どちらもグループ `translate-users` だけに許可する
    - `ptranslate-web`: Web用（oauth2-proxy）。client secretを作り、`.env` の `WEB_CLIENT_SECRET` に書く
-   - `ptranslate-desktop`: PTranslate Desk用。公開クライアント（PKCE）、リダイレクトは `http://127.0.0.1/callback`
+   - `translator-desktop`: PTranslate Desk用。公開クライアント（PKCE）、リダイレクトは `http://127.0.0.1/callback`
      （ポートを書かないループバックは任意のポートに一致します）
 4. 管理者がパスキーを登録するためのURL（1時間有効）を出す
 
@@ -119,7 +119,7 @@ Pocket IDの管理画面（`https://<PT_DOMAIN>:8443/`）で利用者を作り�
 | --- | --- |
 | サーバーURL | `https://<PT_DOMAIN>` |
 | OIDC discovery URL | `https://<PT_DOMAIN>:8443/.well-known/openid-configuration` |
-| client ID | `ptranslate-desktop` |
+| client ID | `translator-desktop` |
 
 Macもtailnetに入っている必要があります。ログインするとブラウザーでPocket IDが開くので、パスキーでログインします。
 

@@ -170,7 +170,7 @@ configs:
             insecureSkipNonce: false
             # PTranslate Desk の access token の aud はデスクトップ用の client ID
             extraAudiences:
-              - ptranslate-desktop
+              - translator-desktop
 
 volumes:
   tailscale-state:
