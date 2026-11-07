@@ -11,6 +11,8 @@ Claude Code は [CLAUDE.md](CLAUDE.md) からこのファイルを読む。
 - `tools/mock_plamo.py`: 翻訳エンジンのモック。試験はこれを相手にする。本物の翻訳エンジンには試験でつながない
 - `docs/SPEC.md`: デスクトップのクライアントの仕様
 - 本番のデプロイの設定 (nginx、oauth2-proxy、Authentik、VM) は別の非公開のリポジトリにある。ここには置かない
+- `deploy/compose/`: 自分で立てる人向けの構成 (Tailscale + Pocket ID、[docs/SELF_HOSTING_COMPOSE.md](docs/SELF_HOSTING_COMPOSE.md))。
+  本番の設定ではない。サーバーのイメージのタグは、そのタグの版が出てから上げる
 
 ## 変更を出す前に
 

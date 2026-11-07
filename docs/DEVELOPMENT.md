@@ -11,6 +11,8 @@
 | Web画面 | `server/static/` | ビルド不要のHTMLと、区切り・SSEなどの翻訳モジュール |
 | デスクトップ | `desktop/` | Tauri 2。Web画面と翻訳モジュールを共有 |
 | 翻訳エンジンのモック | `tools/mock_plamo.py` | 実エンジンに接続せず、試験と開発に使う |
+| 翻訳エンジンの計測 | `tools/bench.py` | 実エンジンの速さを測る（[かんたん構築ガイド](SELF_HOSTING_COMPOSE.md#必要な性能)）。試験では使わない |
+| かんたん構築 | `deploy/compose/` | Tailscale + Pocket IDのcompose.ymlと、Pocket IDの初期設定（`setup.py`） |
 | デスクトップのモック起動 | `tools/run_desktop_mock.py` | モック・サーバー・アプリをまとめて起動 |
 | 仕様 | [SPEC.md](SPEC.md) | API、画面、認証などの規則 |
 
@@ -54,10 +56,10 @@ python3 tools/run_desktop_mock.py
 
 サーバー自体は認証しません。公開時は前段の認証プロキシが検証した利用者名を
 `X-Forwarded-User` で渡し、APIの待ち受けを外部に直接公開しないでください。
-`/api/translate` はSSEで応答するため、nginxなどのプロキシでbufferingを無効にします。
-
 `TR_USERINFO_URL` を設定した場合だけ、`X-Forwarded-User` が無いBearerのリクエストの利用者名を
 IdPのuserinfoから引きます（[SPEC 5章](SPEC.md#5-サーバーの-api)）。
+`/api/translate` はSSEで応答するため、nginxなどのプロキシでbufferingを無効にします。
+
 Dockerfileを変更した場合は、リポジトリのルートからビルドします。
 
 ```sh
