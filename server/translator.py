@@ -65,6 +65,10 @@ HEARTBEAT_SECONDS = env_int("TR_HEARTBEAT_SECONDS", 15)
 USERINFO_URL = os.environ.get("TR_USERINFO_URL", "")
 # userinfo の結果を覚えておく秒数の上限 (token の期限が先に来ればそこまで)
 USERINFO_CACHE_SECONDS = env_int("TR_USERINFO_CACHE_SECONDS", 300)
+# デスクトップへ入力する公開設定。内部の接続先や要求のヘッダーからは推測しない。
+PUBLIC_SERVER_URL = os.environ.get("TR_PUBLIC_SERVER_URL", "")
+DESKTOP_DISCOVERY_URL = os.environ.get("TR_DESKTOP_DISCOVERY_URL", "")
+DESKTOP_CLIENT_ID = os.environ.get("TR_DESKTOP_CLIENT_ID", "translator-desktop")
 
 # PLaMo 3 Translate の対応言語 (モデルカードの Supported Languages の順)
 LANGUAGES = [
@@ -433,6 +437,11 @@ class Handler(BaseHTTPRequestHandler):
                         "languages": [{"code": c, "name": n} for c, n in LANGUAGES],
                         "max_chars": MAX_CHARS,
                         "max_glossary": MAX_GLOSSARY,
+                        "desktop_connection": {
+                            "server_url": PUBLIC_SERVER_URL,
+                            "discovery_url": DESKTOP_DISCOVERY_URL,
+                            "client_id": DESKTOP_CLIENT_ID,
+                        },
                     },
                 )
             if method == "POST" and path == "/api/translate":

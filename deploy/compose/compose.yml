@@ -64,6 +64,9 @@ services:
       # Pocket ID の access token にはユーザー名が入らないので、PTranslate Desk (Bearer) の利用者名は
       # userinfo から引く。Web (Cookie) は oauth2-proxy が ID token のユーザー名を渡す
       TR_USERINFO_URL: http://pocket-id:1411/api/oidc/userinfo
+      TR_PUBLIC_SERVER_URL: https://${PT_DOMAIN}
+      TR_DESKTOP_DISCOVERY_URL: https://${PT_DOMAIN}:8443/.well-known/openid-configuration
+      TR_DESKTOP_CLIENT_ID: translator-desktop
     depends_on:
       - llama-server
     restart: unless-stopped

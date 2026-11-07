@@ -194,6 +194,32 @@ class ServerTest(unittest.TestCase):
         _, resp = self.call("POST", "/api/translate", req(), user="Bad User")
         self.assertEqual(resp.status, 401)
 
+    def test_config_exposes_only_explicit_public_desktop_settings(self):
+        for discovery in ("", "https://auth.example.com/.well-known/openid-configuration"):
+            with (
+                self.subTest(discovery=discovery),
+                patch.multiple(
+                    tr,
+                    PUBLIC_SERVER_URL="https://translate.example.com",
+                    DESKTOP_DISCOVERY_URL=discovery,
+                    DESKTOP_CLIENT_ID="translator-desktop",
+                    USERINFO_URL="http://internal.invalid/userinfo",
+                ),
+            ):
+                conn, response = self.call("GET", "/api/config")
+                with response:
+                    config = json.loads(response.read())
+                conn.close()
+                self.assertEqual(
+                    config["desktop_connection"],
+                    {
+                        "server_url": "https://translate.example.com",
+                        "discovery_url": discovery,
+                        "client_id": "translator-desktop",
+                    },
+                )
+                self.assertNotIn("internal.invalid", json.dumps(config))
+
     def test_requires_json(self):
         _, resp = self.call("POST", "/api/translate", req(), ctype="text/plain")
         self.assertEqual(resp.status, 415)

@@ -190,6 +190,9 @@ Pythonサービスとコンテナはどちらか一方を使います。
 | `TR_HEARTBEAT_SECONDS` | 15 | SSEのハートビート間隔（秒） |
 | `TR_USERINFO_URL` | 空 | IdPのuserinfo。`X-Forwarded-User` が無く前段が検証したBearerだけがあるとき、ここから `preferred_username` を引く（access tokenにユーザー名が入らないIdP向け。[かんたん構築ガイド](SELF_HOSTING_COMPOSE.md)） |
 | `TR_USERINFO_CACHE_SECONDS` | 300 | userinfoの結果を覚えておく秒数の上限（tokenの期限が先ならそこまで） |
+| `TR_PUBLIC_SERVER_URL` | 空 | クライアント向けに表示する公開サーバーURL。空ならWebの閲覧中のオリジンを使う |
+| `TR_DESKTOP_DISCOVERY_URL` | 空 | クライアント向けに表示する外部から到達できるHTTPSのOIDC discovery URL |
+| `TR_DESKTOP_CLIENT_ID` | `translator-desktop` | デスクトップの公開クライアントのID |
 | `TR_STATIC_DIR` | `server/static/`（コンテナでは `/app/static`） | Webの静的ファイルの配置先 |
 
 

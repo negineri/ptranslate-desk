@@ -149,13 +149,24 @@ Web 版の名前は PTranslate。
     "..."
   ],
   "max_chars": 4000,
-  "max_glossary": 200
+  "max_glossary": 200,
+  "desktop_connection": {
+    "server_url": "https://translate.example.com",
+    "discovery_url": "https://auth.example.com/.well-known/openid-configuration",
+    "client_id": "translator-desktop"
+  }
 }
 ```
 
 起動時とログインの直後に読み、言語の一覧と上限を使う。言語は 53 個 (コードは
 `ja en zh-hans zh-hant ko ar az be bg bn ca ceb de es et eu fa fr gu he hi hr hu hy id it jv ka kk km lt lv ml mr
 ms my ne nl pa pl ru si sk sl sr sw ta te th tl ur uz vi`)。表示名はサーバーが返すものを使う。
+
+`desktop_connection` はWeb版の「クライアントの接続設定」ボタンで表示する公開設定。
+`TR_PUBLIC_SERVER_URL`、`TR_DESKTOP_DISCOVERY_URL`、`TR_DESKTOP_CLIENT_ID` から返す。
+URLの既定値は空欄、client IDは `translator-desktop`。Web版はサーバーURLが空欄なら閲覧中のオリジンを表示する。
+認証先が空欄のときは管理者への確認を案内し、内部のuserinfo URLや要求のヘッダーから推測しない。
+既存の `/api/config` と同じ認証を必要とし、秘密鍵やトークンは含めない。
 
 ### 5.2 `POST /api/translate`
 
