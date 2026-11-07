@@ -254,7 +254,8 @@ URL は OIDC の discovery (`https://atk01.witenp.com/application/o/translator-d
 
 - refresh token は OS の資格情報の保管 (Windows の資格情報マネージャー、macOS のキーチェーン、Linux の Secret Service)
   に置く。ファイルに書かない。access token はメモリだけ
-- ログアウトで消す (Authentik の revoke の URL も呼ぶ)
+- ログアウトで消す (discovery に `revocation_endpoint` があれば revoke も呼ぶ。Pocket ID のように無い IdP では
+  端末から消すだけで、サーバー側の refresh token は有効期限まで残る)
 - refresh tokenの保存項目はサーバーURL・discovery URL・client IDの組ごとに分離し、別の接続先で再利用しない。
   既定の接続先では従来の保存項目を維持する。変更した接続先への初回アクセスには保存済みトークンを使わない
 - macOSのメインウィンドウでは、キーチェーンを使う前に、ログイン状態を保つ認証情報へのアクセス確認が
