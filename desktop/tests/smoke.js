@@ -33,17 +33,20 @@
     } catch { rejected = true; }
     if (!rejected) throw new Error("安全でない接続先を保存できてしまう");
     step = "接続先の保存ボタンと確認";
+    $("settings-tab").click();
     $("server-url").value = "http://translate.example.com";
     $("discovery-url").value = "https://auth.example.com/.well-known/openid-configuration";
     $("save-connection").click();
-    if ($("connection-confirm").hidden) throw new Error("保存の確認が表示されない");
+    if (!$("connection-confirm").matches(":modal")) throw new Error("保存の確認がモーダルで表示されない");
+    await wait(() => document.activeElement === $("cancel-connection"));
     $("cancel-connection").click();
-    if (!$("connection-confirm").hidden || $("connection-status").textContent) throw new Error("保存のキャンセル");
+    if ($("connection-confirm").open || $("connection-status").textContent) throw new Error("保存のキャンセル");
+    if (document.activeElement !== $("save-connection")) throw new Error("キャンセル後のフォーカス");
     $("save-connection").click();
     $("confirm-connection").click();
     await wait(() => $("connection-status").classList.contains("err"));
     if (!$("connection-status").textContent.includes("HTTPS")) throw new Error("保存ボタンから検証処理に進めない");
-    if ($("save-connection").disabled || !$("connection-confirm").hidden) throw new Error("保存失敗後の再操作");
+    if ($("save-connection").disabled || $("connection-confirm").open) throw new Error("保存失敗後の再操作");
     if ((await window.__TAURI__.core.invoke("load_connection")).server_url) throw new Error("不正な接続先が保存された");
     $("server-url").value = connection.server_url;
     $("discovery-url").value = connection.discovery_url;
