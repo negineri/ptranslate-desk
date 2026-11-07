@@ -160,11 +160,15 @@ def cleanup(directory, certificate):
         if os.environ.get("GITHUB_ACTIONS") == "true"
         else ["security", "remove-trusted-cert"]
     )
-    run(*trust_scope, str(certificate))
-    run("security", "list-keychains", "-d", "user", "-s", *json.loads(state.read_text()))
-    keychain = directory / "signing.keychain-db"
-    if keychain.exists():
-        run("security", "delete-keychain", str(keychain))
+    try:
+        run(*trust_scope, str(certificate))
+    finally:
+        try:
+            run("security", "list-keychains", "-d", "user", "-s", *json.loads(state.read_text()))
+        finally:
+            keychain = directory / "signing.keychain-db"
+            if keychain.exists():
+                run("security", "delete-keychain", str(keychain))
 
 
 def verify(app, certificate, identifier=IDENTIFIER):
