@@ -24,7 +24,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--smoke-test", action="store_true", help="主窓の自動試験を行う")
+    parser.add_argument(
+        "--smoke-test", action="store_true", help="メインウィンドウの自動試験を行う"
+    )
     parser.add_argument("--app", type=Path, help="ビルド済みの macOS の .app を起動する")
     args = parser.parse_args()
     if args.app:
@@ -105,7 +107,7 @@ def main() -> int:
                     print("設定の保存と原文・訳文を保存しないこと: PASS", flush=True)
                 return result
             except subprocess.TimeoutExpired:
-                raise RuntimeError("主窓の試験がタイムアウトしました") from None
+                raise RuntimeError("メインウィンドウの試験がタイムアウトしました") from None
     finally:
         for process in (app, server):
             if process is not None and process.poll() is None:

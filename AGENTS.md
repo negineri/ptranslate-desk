@@ -26,7 +26,7 @@ Claude Code は [CLAUDE.md](CLAUDE.md) からこのファイルを読む。
    (`parseGlossary`)、SSE の読み取り (`translateChunk`) を、Web とデスクトップで同じものを使えるよう別の
    モジュール (`shared/` など) に分ける。Web はビルドなしで読めること。区切りの試験 (同じ原文で同じ区切りに
    なる、SPEC 10 章の 4) を足す
-2. **デスクトップのクライアント:** `desktop/` に Tauri 2 で作る。SPEC の 3〜8 章を満たす。最初は主窓と
+2. **デスクトップのクライアント:** `desktop/` に Tauri 2 で作る。SPEC の 3〜8 章を満たす。最初はメインウィンドウと
    認証 (SPEC 6 章) から。試験はモックを相手にする (SPEC 11 章)。認証の試験もローカルの OIDC モックで行う。
    本番の確認は利用者に明示された範囲で行う
 3. **CI:** デスクトップのビルド (Windows・macOS・Linux) と、`v*` のタグでの GitHub Releases への配布を
