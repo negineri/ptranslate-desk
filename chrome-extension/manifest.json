@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "PTranslate for Chrome",
+  "description": "PLaMo 3 Translate の PTranslate サーバーで、ページの選んだ文を翻訳します。",
+  "version": "0.0.0",
+  "minimum_chrome_version": "120",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "PTranslate",
+    "default_popup": "action.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "background": {
+    "service_worker": "background.mjs",
+    "type": "module"
+  },
+  "permissions": ["activeTab", "contextMenus", "scripting", "storage"],
+  "optional_host_permissions": ["https://*/*", "http://127.0.0.1/*", "http://localhost/*"],
+  "commands": {
+    "translate-selection": {
+      "suggested_key": { "default": "Alt+Shift+T" },
+      "description": "選んだ文を翻訳"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["popup.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

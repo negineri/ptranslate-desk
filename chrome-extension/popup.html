@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- 選んだ文の訳。ページの上の枠 (iframe) か、別の小さいウィンドウで開く -->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PTranslate — 選んだ文を翻訳</title>
+<!-- shared-style -->
+<style>
+  html, body { height: 100%; overflow: hidden; }
+  body { font-size: 14px; }
+  main { padding: 12px; height: 100%; display: flex; flex-direction: column; max-width: none; }
+  .heading, #status, .row { flex-shrink: 0; }
+  .heading { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  #direction { flex: 1; font-size: .85rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #out { min-height: 0; flex: 1; overflow-y: auto; background: var(--panel); }
+  #translation:empty::before { content: "ここに訳が出ます"; color: var(--muted); }
+  #status { margin-top: 6px; }
+  .row { justify-content: flex-end; margin-top: 6px; }
+</style>
+</head>
+<body><main>
+  <div class="heading"><img class="brand-mark" src="./logo.png" width="20" height="20" alt=""><span id="direction">選んだ文を翻訳</span><button id="close" aria-label="閉じる">閉じる</button></div>
+  <div id="out" aria-live="polite"><div id="translation"></div></div>
+  <div id="status" class="hint" role="status"></div>
+  <div class="row">
+    <button id="login" hidden>Web版を開いてログイン</button>
+    <button id="options" hidden>拡張の設定</button>
+    <button id="copy" disabled>コピー</button>
+  </div>
+</main><script type="module" src="./popup.mjs"></script></body>
+</html>

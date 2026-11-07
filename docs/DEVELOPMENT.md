@@ -10,10 +10,12 @@
 | サーバー | `server/translator.py` | Pythonの標準ライブラリだけで動くAPI |
 | Web画面 | `server/static/` | ビルド不要のHTMLと、区切り・SSEなどの翻訳モジュール |
 | デスクトップ | `desktop/` | Tauri 2。Web画面と翻訳モジュールを共有 |
+| Chrome拡張 | `chrome-extension/` | Manifest V3。Web版のログインを使い、翻訳モジュールを共有（[説明](../chrome-extension/README.md)） |
 | 翻訳エンジンのモック | `tools/mock_plamo.py` | 実エンジンに接続せず、試験と開発に使う |
 | 翻訳エンジンの計測 | `tools/bench.py` | 実エンジンの速さを測る（[かんたん構築ガイド](SELF_HOSTING_COMPOSE.md#必要な性能)）。試験では使わない |
 | かんたん構築 | `deploy/compose/` | Tailscale + Pocket IDのcompose.ymlと、Pocket IDの初期設定（`setup.py`） |
 | デスクトップのモック起動 | `tools/run_desktop_mock.py` | モック・サーバー・アプリをまとめて起動 |
+| Chrome拡張のモック起動 | `tools/run_extension_mock.py` | モック・サーバー・認証プロキシの代わり（開発用の利用者名を付ける）をまとめて起動 |
 | 仕様 | [SPEC.md](SPEC.md) | API、画面、認証などの規則 |
 
 ## 開発環境
@@ -82,6 +84,8 @@ docker build -t ptranslate-server:dev .
 ruff format --check server tools
 python3 -m unittest discover -s server/tests -v
 node --test server/tests/test_translation.mjs
+node chrome-extension/build.mjs
+node --test chrome-extension/tests/
 node desktop/build.mjs
 cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
 cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
