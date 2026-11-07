@@ -132,22 +132,6 @@ def import_identity(directory, certificate, data, password):
     identities = run("security", "find-identity", "-p", "codesigning", str(keychain))
     if identity not in identities:
         raise ValueError("秘密鍵が公開証明書と一致しません")
-    # ビルド用のMacに限り、コード署名用途で信頼する。利用者のMacには追加しない。
-    trust_scope = (
-        ["sudo", "security", "add-trusted-cert", "-d"]
-        if os.environ.get("GITHUB_ACTIONS") == "true"
-        else ["security", "add-trusted-cert"]
-    )
-    run(
-        *trust_scope,
-        "-r",
-        "trustRoot",
-        "-p",
-        "codeSign",
-        "-k",
-        str(keychain),
-        str(certificate),
-    )
     return identity
 
 
@@ -155,20 +139,12 @@ def cleanup(directory, certificate):
     state = directory / "keychains.json"
     if not state.exists():
         return
-    trust_scope = (
-        ["sudo", "security", "remove-trusted-cert", "-d"]
-        if os.environ.get("GITHUB_ACTIONS") == "true"
-        else ["security", "remove-trusted-cert"]
-    )
     try:
-        run(*trust_scope, str(certificate))
+        run("security", "list-keychains", "-d", "user", "-s", *json.loads(state.read_text()))
     finally:
-        try:
-            run("security", "list-keychains", "-d", "user", "-s", *json.loads(state.read_text()))
-        finally:
-            keychain = directory / "signing.keychain-db"
-            if keychain.exists():
-                run("security", "delete-keychain", str(keychain))
+        keychain = directory / "signing.keychain-db"
+        if keychain.exists():
+            run("security", "delete-keychain", str(keychain))
 
 
 def verify(app, certificate, identifier=IDENTIFIER):
