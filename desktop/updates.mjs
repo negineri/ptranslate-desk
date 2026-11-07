@@ -38,7 +38,7 @@ function render(status) {
 function showError(error) { panel.open = true; $("update-status").textContent = String(error); }
 $("check-update").addEventListener("click", () => { void invoke("check_updates").catch(showError); });
 $("offer-update").addEventListener("click", () => {
-  $("update-question").textContent = `バージョン ${state.version} をダウンロードしてインストールしますか？`;
+  $("update-question").textContent = `バージョン ${state.version} をダウンロードしてインストールしますか？${/Win/.test(navigator.platform) ? "インストール時にアプリを終了し、完了後に起動し直します。" : ""}`;
   $("update-confirm").hidden = false;
   $("offer-update").hidden = true;
 });

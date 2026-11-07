@@ -278,7 +278,11 @@ Authentik の `tamesareru-members` だけ (Web と同じ)。入っていない�
 - 更新: Tauri の updater。更新の情報 (JSON) と配布物は、このリポジトリ (公開) の GitHub Releases に置く。
   起動時と 1 日 1 回確かめ、利用者が承認してから入れる
 - 更新用の秘密鍵とパスワードはActions secrets、公開鍵は `tauri.conf.json` に置く。
-  `latest.json` はApple SiliconとIntelの両方に同じ署名付きuniversal更新ファイルを割り当てる
+  `latest.json` はApple SiliconとIntelの両方に同じ署名付きuniversal更新ファイルを割り当てる。
+  Windows x64には `windows-x86_64` として更新署名付きNSISインストーラーを割り当てる。
+  3プラットフォームの配布物・更新署名を検証し、共通のReleaseとして一度に公開する。
+- Windowsコード署名は当面付けない。READMEとReleaseの説明に未署名であることとSmartScreenの警告が出る場合があることを書く。
+  Tauriの更新署名は省略しない。Windowsでは利用者の承認後、インストール時にアプリを終了し、完了後に起動し直す
 - `v*` タグと `tauri.conf.json` の `version` を一致させ、サーバーイメージと同じタグで配布する。
   mainとPRはActionsの成果物だけを作る。手順は [RELEASING.md](RELEASING.md) を参照
 

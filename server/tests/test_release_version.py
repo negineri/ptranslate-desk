@@ -17,6 +17,27 @@ spec.loader.exec_module(release)
 
 
 class ReleaseVersionTest(unittest.TestCase):
+    def test_windows_manifest_requires_https_signature_and_explicit_platform(self):
+        entry = {
+            "url": "https://example.invalid/update",
+            "signature": base64.b64encode(b"public-signature").decode(),
+        }
+        manifest = {
+            "version": "1.0.0",
+            "platforms": {name: entry.copy() for name in ("darwin-aarch64", "darwin-x86_64")},
+        }
+        with self.assertRaisesRegex(ValueError, "Windows"):
+            release.check_manifest(manifest, "1.0.0", require_windows=True)
+        manifest["platforms"]["windows-x86_64"] = entry.copy()
+        release.check_manifest(manifest, "1.0.0", require_windows=True)
+        manifest["platforms"]["windows-x86_64"]["url"] = "http://example.invalid/update"
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            release.check_manifest(manifest, "1.0.0", require_windows=True)
+        manifest["platforms"]["windows-x86_64"]["url"] = entry["url"]
+        manifest["platforms"]["windows-x86_64"]["signature"] = ""
+        with self.assertRaisesRegex(ValueError, "署名"):
+            release.check_manifest(manifest, "1.0.0", require_windows=True)
+
     def test_universal_manifest_requires_both_platforms_and_signature(self):
         entry = {
             "url": "https://example.invalid/app.tar.gz",

@@ -89,7 +89,7 @@ def make_server(port: int = 0, api_key: str = "", delay: float = 0.05, slow: flo
                 done = {"choices": [{"text": "", "finish_reason": finish}]}
                 self.wfile.write(f"data: {json.dumps(done)}\n\ndata: [DONE]\n\n".encode())
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 with lock:
                     stats["canceled"] += 1
 

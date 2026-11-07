@@ -7,6 +7,7 @@ import io
 import json
 from pathlib import Path
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,75 @@ with patch.object(sys, "path", [str(TOOLS), *sys.path]):
 
 
 class SigningSecurityTest(unittest.TestCase):
+    def windows_installer(self, directory, version="1.2.3", subsystem=2):
+        source = directory / "input"
+        source.mkdir()
+        data = bytearray(256)
+        data[:2] = b"MZ"
+        struct.pack_into("<I", data, 60, 64)
+        data[64:68] = b"PE\0\0"
+        struct.pack_into("<H", data, 68, 0x14C)
+        struct.pack_into("<H", data, 88, 0x10B)
+        struct.pack_into("<H", data, 156, subsystem)
+        installer = source / f"PTranslate Desk_{version}_x64-setup.exe"
+        installer.write_bytes(data)
+        return source, installer
+
+    def test_windows_installer_rejects_wrong_version_console_and_extra_files(self):
+        for invalid in ("version", "console", "extra", "header", "offset"):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp)
+                source, installer = self.windows_installer(
+                    directory, subsystem=3 if invalid == "console" else 2
+                )
+                if invalid == "extra":
+                    (source / "private.key").write_bytes(b"dummy")
+                if invalid == "header":
+                    installer.write_bytes(b"invalid" * 30)
+                if invalid == "offset":
+                    data = bytearray(installer.read_bytes())
+                    struct.pack_into("<I", data, 60, 9999)
+                    installer.write_bytes(data)
+                with self.assertRaises(ValueError):
+                    package.prepare_windows(
+                        directory, source, "9.9.9" if invalid == "version" else "1.2.3"
+                    )
+
+    def test_windows_manifest_requires_installer_and_verified_version_signature(self):
+        for version in ("1.2.3", "1.2.3-beta.1", "1.2.3+build.1"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp)
+                source, installer = self.windows_installer(directory, version)
+                package.prepare_windows(directory, source, version)
+                output = directory / "output"
+                name = package.windows_filename(version)
+                self.assertEqual((output / name).read_bytes(), installer.read_bytes())
+                self.assertNotIn("+", name)
+                self.assertNotIn(" ", name)
+                mac = f"{package.artifact_stem(version)}.app.tar.gz"
+                (output / mac).write_bytes(b"dummy")
+                (output / f"{package.artifact_stem(version)}.dmg").write_bytes(b"dummy")
+                signature = base64.b64encode(
+                    f"untrusted comment: dummy\nvalue\ntrusted comment: timestamp:0\tversion:{version}\nvalue\n".encode()
+                ).decode()
+                (output / (mac + ".sig")).write_text(signature)
+                with patch.object(package, "verify_update_signature") as verify_signature:
+                    with self.assertRaises(OSError):
+                        package.manifest(directory, "v" + version, require_windows=True)
+                    (output / (name + ".sig")).write_text(signature)
+                    package.manifest(directory, "v" + version, require_windows=True)
+                    self.assertEqual(verify_signature.call_args.args[0], output / name)
+                    self.assertEqual(verify_signature.call_args.args[-1], version)
+                value = json.loads((output / "latest.json").read_text(encoding="utf-8"))
+                entry = value["platforms"]["windows-x86_64"]
+                self.assertTrue(entry["url"].endswith("/" + name))
+                self.assertEqual(entry["signature"], signature)
+                with patch.object(
+                    package, "verify_update_signature", side_effect=ValueError("改ざん")
+                ):
+                    with self.assertRaises(ValueError):
+                        package.manifest(directory, "v" + version, require_windows=True)
+
     def test_import_failure_removes_p12(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
@@ -172,6 +242,8 @@ class SigningSecurityTest(unittest.TestCase):
                 with (
                     patch.object(package, "verify"),
                     patch.object(package, "run", side_effect=command),
+                    # ファイル名の試験なので、Windowsでは権限が必要なリンク作成も代替する。
+                    patch.object(Path, "symlink_to"),
                 ):
                     package.package(directory, version)
                 output = directory / "output"
