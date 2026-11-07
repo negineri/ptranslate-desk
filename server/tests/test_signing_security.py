@@ -131,9 +131,9 @@ class SigningSecurityTest(unittest.TestCase):
             directory = Path(temp)
             output = directory / "output"
             output.mkdir()
-            name = "PTranslate Desk_1.2.3_universal.app.tar.gz"
+            name = "PTranslate.Desk_1.2.3_universal.app.tar.gz"
             (output / name).write_bytes(b"dummy")
-            (output / "PTranslate Desk_1.2.3_universal.dmg").write_bytes(b"dummy")
+            (output / "PTranslate.Desk_1.2.3_universal.dmg").write_bytes(b"dummy")
             sig = output / (name + ".sig")
             sig.write_text(
                 base64.b64encode(
@@ -155,6 +155,45 @@ class SigningSecurityTest(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 package.manifest(directory, "v1.2.3")
+
+    def test_packaged_names_survive_github_upload_without_changing_manifest_urls(self):
+        from urllib.parse import unquote, urlsplit
+
+        for version in ("1.2.3", "1.2.3-beta.1", "1.2.3+build.1"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp)
+                (directory / package.APP).mkdir()
+                (directory / package.APP / "payload").write_bytes(b"dummy")
+
+                def command(*args):
+                    if args[0] == "/usr/bin/hdiutil":
+                        Path(args[-1]).write_bytes(b"dummy dmg")
+
+                with (
+                    patch.object(package, "verify"),
+                    patch.object(package, "run", side_effect=command),
+                ):
+                    package.package(directory, version)
+                output = directory / "output"
+                archive = next(output.glob("*.app.tar.gz"))
+                self.assertNotIn(" ", archive.name)
+                self.assertNotIn("+", archive.name)
+                (output / (archive.name + ".sig")).write_text(
+                    base64.b64encode(
+                        f"untrusted comment: dummy\nvalue\ntrusted comment: timestamp:0\tversion:{version}\nvalue\n".encode()
+                    ).decode()
+                )
+                with patch.object(package, "verify_update_signature"):
+                    package.manifest(directory, "v" + version)
+                value = json.loads((output / "latest.json").read_text())
+                # GitHubの公開時に空白や+が置換されても、参照する名前が変わらない。
+                published_names = {
+                    p.name.replace(" ", ".").replace("+", ".") for p in output.iterdir()
+                }
+                for entry in value["platforms"].values():
+                    filename = unquote(urlsplit(entry["url"]).path.rsplit("/", 1)[1])
+                    self.assertIn(filename, published_names)
+                    self.assertEqual(filename, archive.name)
 
     def test_update_signature_verifies_payload_version_and_public_key(self):
         # Rustのupdater試験と同じ公開テストベクトル。秘密鍵は含まない。

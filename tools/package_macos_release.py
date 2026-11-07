@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import plistlib
+import re
 import shutil
 import stat
 import subprocess
@@ -83,12 +84,18 @@ def prepare(directory, archive, version):
     )
 
 
+def artifact_stem(version):
+    # GitHubがアップロード時に行う名前の置換と揃え、manifestと実名のずれを防ぐ。
+    safe_version = re.sub(r"[^A-Za-z0-9_.-]", ".", version)
+    return f"PTranslate.Desk_{safe_version}_universal"
+
+
 def package(directory, version):
     app = directory / APP
     verify(app, PUBLIC / "certificate.pem")
     output = directory / "output"
     output.mkdir(exist_ok=False)
-    stem = f"PTranslate Desk_{version}_universal"
+    stem = artifact_stem(version)
     # Tauri updaterと同じく、アーカイブの最上位に .app を置く。
     with tarfile.open(output / f"{stem}.app.tar.gz", "w:gz") as archive:
         archive.add(app, arcname=APP)
@@ -114,7 +121,7 @@ def sign_update(directory, version):
         "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
     ):
         raise ValueError("更新署名用のActions secretsを設定してください")
-    archive = directory / "output" / f"PTranslate Desk_{version}_universal.app.tar.gz"
+    archive = directory / "output" / f"{artifact_stem(version)}.app.tar.gz"
     # アプリのpackage.jsonのscriptsやビルドフックを経由しない。
     run(
         "node",
@@ -181,7 +188,7 @@ def verify_update_signature(archive, signature, public_key, version):
 def manifest(directory, tag):
     version = version_from_tag(tag)
     output = directory / "output"
-    filename = f"PTranslate Desk_{version}_universal.app.tar.gz"
+    filename = f"{artifact_stem(version)}.app.tar.gz"
     signature = (output / (filename + ".sig")).read_text().strip()
     decoded = base64.b64decode(signature, validate=True).decode()
     lines = decoded.splitlines()
@@ -207,7 +214,7 @@ def manifest(directory, tag):
         filename,
         filename + ".sig",
         "latest.json",
-        f"PTranslate Desk_{version}_universal.dmg",
+        f"{artifact_stem(version)}.dmg",
     }
     if {p.name for p in output.iterdir()} != expected:
         raise ValueError("公開するファイルの一覧が一致しません")
