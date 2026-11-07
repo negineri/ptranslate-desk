@@ -62,6 +62,7 @@ jobs:
       - run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
       - run: python3 tools/run_desktop_mock.py --smoke-test
       - run: python3 tools/macos_signing.py self-test
+        timeout-minutes: 5
       - run: npm ci
         working-directory: desktop
       # CIでは最適化したビルドも確認し、配布用の依存キャッシュをmainに保存する。

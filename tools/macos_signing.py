@@ -18,7 +18,11 @@ IDENTIFIER = "com.witenp.ptranslate-desk"
 
 
 def run(*args, env=None):
-    result = subprocess.run(args, env=env, text=True, capture_output=True)
+    print(f"実行: {args[0]} {args[1] if len(args) > 1 else ''}", flush=True)
+    try:
+        result = subprocess.run(args, env=env, text=True, capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"{args[0]} の実行が60秒を超えました") from None
     if result.returncode:
         raise ValueError(f"{args[0]}: {result.stderr.strip()}")
     return result.stdout
@@ -156,7 +160,7 @@ def cleanup(directory, certificate):
         if os.environ.get("GITHUB_ACTIONS") == "true"
         else ["security", "remove-trusted-cert"]
     )
-    subprocess.run([*trust_scope, str(certificate)], capture_output=True)
+    run(*trust_scope, str(certificate))
     run("security", "list-keychains", "-d", "user", "-s", *json.loads(state.read_text()))
     keychain = directory / "signing.keychain-db"
     if keychain.exists():
