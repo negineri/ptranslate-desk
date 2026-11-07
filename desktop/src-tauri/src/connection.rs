@@ -16,8 +16,8 @@ pub struct Connection {
 impl Default for Connection {
     fn default() -> Self {
         Self {
-            server_url: crate::auth::SERVER.into(),
-            discovery_url: crate::auth::DISCOVERY.into(),
+            server_url: String::new(),
+            discovery_url: String::new(),
             client_id: crate::auth::CLIENT_ID.into(),
         }
     }
@@ -57,7 +57,10 @@ impl Connection {
 
     pub fn vault_account(&self) -> String {
         // 既存利用者のキーチェーン項目を維持。他の接続先は3項目すべてで分離する。
-        if self == &Self::default() {
+        if self.server_url == crate::auth::SERVER
+            && self.discovery_url == crate::auth::DISCOVERY
+            && self.client_id == crate::auth::CLIENT_ID
+        {
             return crate::auth::CLIENT_ID.into();
         }
         let encoded = serde_json::to_vec(self).expect("接続先を直列化できませんでした");
@@ -168,7 +171,15 @@ mod tests {
     }
     #[test]
     fn isolates_credentials_by_server_issuer_and_client() {
-        let default = Connection::default();
+        let default = Connection {
+            server_url: crate::auth::SERVER.into(),
+            discovery_url: crate::auth::DISCOVERY.into(),
+            client_id: crate::auth::CLIENT_ID.into(),
+        };
+        assert_ne!(
+            Connection::default().vault_account(),
+            default.vault_account()
+        );
         assert_eq!(default.vault_account(), crate::auth::CLIENT_ID);
         assert_eq!(
             default.clone().validated().unwrap().vault_account(),

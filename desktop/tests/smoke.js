@@ -25,6 +25,7 @@
     if (!$("settings-page").contains($("connection-form"))) throw new Error("接続先の配置");
     $("translation-tab").click();
     const connection = await window.__TAURI__.core.invoke("load_connection");
+    if (connection.server_url || connection.discovery_url || connection.client_id !== "translator-desktop") throw new Error("接続先の初期値");
     if ($("server-url").value !== connection.server_url) throw new Error("接続先の読み込み");
     let rejected = false;
     try {
