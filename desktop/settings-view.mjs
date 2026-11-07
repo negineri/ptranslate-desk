@@ -18,8 +18,9 @@ who.textContent = "アカウント";
 accountSummary.append(who);
 accountMenu.append(accountSummary);
 accountSlot.append(accountMenu);
-title.before(header);
+main.prepend(header);
 header.append(title, updateSlot, description, accountSlot);
+main.querySelector(".web-heading")?.setAttribute("hidden", "");
 description.textContent = "PLaMo 3 Translate · 原文と訳はサーバーに残りません";
 for (const eventName of ["click", "keydown"]) {
   document.addEventListener(eventName, (event) => {
