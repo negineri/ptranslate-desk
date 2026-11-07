@@ -113,7 +113,7 @@ Pocket IDの管理画面（`https://<PT_DOMAIN>:8443/`）で利用者を作り�
 ## 6. PTranslate Deskをつなぐ
 
 [READMEのmacOSインストール手順](../README.md#インストールmacos)でアプリを入れ、「接続先の設定」に次を入れます。
-`revocation_endpoint` を持たないIdP（Pocket ID）に対応したv0.2.6以降が必要です。
+`revocation_endpoint` を持たないIdP（Pocket ID）に対応したv0.3.0以降が必要です。
 
 | 項目 | 値 |
 | --- | --- |
@@ -206,7 +206,7 @@ GGUFを手でダウンロードしてボリュームに置き、`-m` で指定�
 | `https://<PT_DOMAIN>/` が開けない | 端末がtailnetに入っているか、`PT_DOMAIN` が `tailscale status` の名前と同じか、HTTPS Certificatesが有効か |
 | ログイン後に「不明なエラーが発生しました」 | 利用者がグループ `translate-users` に入っているか |
 | oauth2-proxyが再起動を繰り返す | `.env` の `WEB_CLIENT_SECRET` が空でないか（`docker compose run --rm setup` を先に流す） |
-| デスクトップで「ログインしていません」 | サーバーのイメージがv0.2.6以降か（`TR_USERINFO_URL` に対応）、利用者名が英小文字か |
+| デスクトップで「ログインしていません」 | サーバーのイメージがv0.3.0以降か（`TR_USERINFO_URL` に対応）、利用者名が英小文字か |
 | 訳が遅い・止まる | `docker compose logs llama-server`、メモリの空き、`LLAMA_PARALLEL` を下げる |
 
 ## 選ばなかった方法

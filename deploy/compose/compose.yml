@@ -58,7 +58,7 @@ services:
     restart: unless-stopped
 
   ptranslate:
-    image: ghcr.io/negineri/ptranslate-desk/server:0.2.6
+    image: ghcr.io/negineri/ptranslate-desk/server:0.3.0
     environment:
       TR_UPSTREAM_URL: http://llama-server:8080/v1/completions
       # Pocket ID の access token にはユーザー名が入らないので、PTranslate Desk (Bearer) の利用者名は
