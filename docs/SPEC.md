@@ -132,6 +132,11 @@ Web 版の名前は PTranslate。
 すべて `https://translate.witenp.com` の下。今の Web の画面が使っているものと同じで、クライアントのために
 変えるのは認証 (6 章) だけ。
 
+サーバーは利用者を、前段の認証プロキシが検証して付ける `X-Forwarded-User` で区別する。
+`TR_USERINFO_URL` を設定したサーバーでは、`X-Forwarded-User` が無く前段が検証した Bearer だけがあるとき、
+その token で IdP の userinfo を呼び、`preferred_username` を利用者名にする (access token にユーザー名が
+入らない Pocket ID 向け)。結果は token の期限までか 5 分のうち短いほど覚える。userinfo につながらなければ 502。
+
 ### 5.1 `GET /api/config`
 
 ```json

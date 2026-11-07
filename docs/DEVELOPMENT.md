@@ -56,6 +56,8 @@ python3 tools/run_desktop_mock.py
 `X-Forwarded-User` で渡し、APIの待ち受けを外部に直接公開しないでください。
 `/api/translate` はSSEで応答するため、nginxなどのプロキシでbufferingを無効にします。
 
+`TR_USERINFO_URL` を設定した場合だけ、`X-Forwarded-User` が無いBearerのリクエストの利用者名を
+IdPのuserinfoから引きます（[SPEC 5章](SPEC.md#5-サーバーの-api)）。
 Dockerfileを変更した場合は、リポジトリのルートからビルドします。
 
 ```sh
