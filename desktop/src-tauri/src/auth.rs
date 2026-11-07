@@ -68,7 +68,9 @@ struct Discovery {
     issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
-    revocation_endpoint: String,
+    // RFC 7009 の revoke を持たない IdP (Pocket ID など) もある。無ければログアウトは端末から消すだけ。
+    #[serde(default)]
+    revocation_endpoint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -189,8 +191,10 @@ impl Auth {
             &discovery.issuer,
             &discovery.authorization_endpoint,
             &discovery.token_endpoint,
-            &discovery.revocation_endpoint,
-        ] {
+        ]
+        .into_iter()
+        .chain(&discovery.revocation_endpoint)
+        {
             validate_endpoint(endpoint)?;
         }
         let issuer = Url::parse(&discovery.issuer).map_err(|_| "ログインの設定が不正です")?;
@@ -407,9 +411,12 @@ impl Auth {
         cleared?;
         if let Some(refresh) = refresh {
             let discovery = self.discovery(&mut credentials).await?;
+            let Some(revocation_endpoint) = &discovery.revocation_endpoint else {
+                return Ok(());
+            };
             let response = self
                 .client
-                .post(&discovery.revocation_endpoint)
+                .post(revocation_endpoint)
                 .form(&[
                     ("client_id", self.client_id.as_str()),
                     ("token", refresh.as_str()),

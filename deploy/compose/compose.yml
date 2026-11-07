@@ -1,0 +1,178 @@
+# PTranslate を 1 台で動かす構成 (Tailscale + Pocket ID)。手順は docs/SELF_HOSTING_COMPOSE.md。
+#
+#   ブラウザー / PTranslate Desk ──(tailnet、HTTPS)──▶ tailscale
+#       https://<PT_DOMAIN>/       ──▶ oauth2-proxy ──▶ ptranslate ──▶ llama-server
+#       https://<PT_DOMAIN>:8443/  ──▶ pocket-id (ログイン)
+#
+# 外に開けるポートはありません。証明書は Tailscale が発行します (*.ts.net)。
+# 値は同じディレクトリの .env から読みます (.env.example を写して埋める)。
+name: ptranslate
+
+services:
+  tailscale:
+    image: tailscale/tailscale:v1.104.4
+    hostname: ${TS_HOSTNAME:-ptranslate}
+    environment:
+      TS_HOSTNAME: ${TS_HOSTNAME:-ptranslate}
+      # 空なら、初回の起動時にログイン URL をログに出す (docker compose logs tailscale)
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_USERSPACE: "true"
+    configs:
+      - source: tailscale-serve
+        target: /config/serve.json
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    restart: unless-stopped
+
+  pocket-id:
+    image: ghcr.io/pocket-id/pocket-id:v2.19.2
+    environment:
+      APP_URL: https://${PT_DOMAIN:?PT_DOMAIN を .env に書いてください}:8443
+      ENCRYPTION_KEY: ${POCKET_ID_ENCRYPTION_KEY:?POCKET_ID_ENCRYPTION_KEY を .env に書いてください}
+      TRUST_PROXY: "true"
+      ANALYTICS_DISABLED: "true"
+    volumes:
+      - pocket-id-data:/app/data
+    healthcheck:
+      test: ["CMD", "/app/pocket-id", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.6
+    command: ["--config=/etc/oauth2-proxy.cfg", "--alpha-config=/etc/oauth2-proxy.yaml"]
+    environment:
+      OAUTH2_PROXY_COOKIE_SECRET: ${COOKIE_SECRET:?COOKIE_SECRET を .env に書いてください}
+    configs:
+      - source: oauth2-proxy-cfg
+        target: /etc/oauth2-proxy.cfg
+      - source: oauth2-proxy-alpha
+        target: /etc/oauth2-proxy.yaml
+    depends_on:
+      - pocket-id
+      - ptranslate
+    restart: unless-stopped
+
+  ptranslate:
+    image: ghcr.io/negineri/ptranslate-desk/server:0.3.0
+    environment:
+      TR_UPSTREAM_URL: http://llama-server:8080/v1/completions
+      # Pocket ID の access token にはユーザー名が入らないので、PTranslate Desk (Bearer) の利用者名は
+      # userinfo から引く。Web (Cookie) は oauth2-proxy が ID token のユーザー名を渡す
+      TR_USERINFO_URL: http://pocket-id:1411/api/oidc/userinfo
+    depends_on:
+      - llama-server
+    restart: unless-stopped
+
+  # Pocket ID の初期設定 (docs/SELF_HOSTING_COMPOSE.md の 3)。docker compose run --rm setup で流す
+  setup:
+    image: python:3.13-slim
+    profiles: ["setup"]
+    command: ["python3", "-I", "/setup.py"]
+    environment:
+      POCKET_ID_API_KEY: ${POCKET_ID_API_KEY:-}
+    volumes:
+      - ./setup.py:/setup.py:ro
+      - ./.env:/work/.env
+    depends_on:
+      pocket-id:
+        condition: service_healthy
+
+  llama-server:
+    # CPU 版。GPU を使うときは llama.cpp の server-cuda / server-vulkan などに替え、
+    # デバイスを渡して -ngl を足す (docs/SELF_HOSTING_COMPOSE.md)
+    image: ghcr.io/ggml-org/llama.cpp:server-b11804
+    command:
+      - -hf
+      - pfnet/plamo-3-translate-2b-GGUF:Q4_K_M
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      # 1 本あたり 16K (原文と訳の合計)。-c は -np 本に分けられる
+      - -c
+      - "${LLAMA_CTX:-32768}"
+      - -np
+      - "${LLAMA_PARALLEL:-2}"
+    volumes:
+      - llama-cache:/root/.cache
+    restart: unless-stopped
+
+configs:
+  # Tailscale の serve。443 が翻訳、8443 がログイン。$${TS_CERT_DOMAIN} は tailscale が埋める
+  tailscale-serve:
+    content: |
+      {
+        "TCP": {"443": {"HTTPS": true}, "8443": {"HTTPS": true}},
+        "Web": {
+          "$${TS_CERT_DOMAIN}:443": {"Handlers": {"/": {"Proxy": "http://oauth2-proxy:4180"}}},
+          "$${TS_CERT_DOMAIN}:8443": {"Handlers": {"/": {"Proxy": "http://pocket-id:1411"}}}
+        }
+      }
+
+  oauth2-proxy-cfg:
+    content: |
+      # 利用者はメールアドレスではなく Pocket ID のグループで絞る (ptranslate-web の許可グループ)
+      email_domains = ["*"]
+      redirect_url = "https://${PT_DOMAIN}/oauth2/callback"
+      cookie_secure = true
+      cookie_samesite = "lax"
+      session_cookie_minimal = true
+      skip_provider_button = true
+      # 画面は API の 401 で読み直してログインし直す。/api/ はログイン画面へ転送せず 401 を返す
+      api_routes = ["^/api/"]
+      # PTranslate Desk は Bearer の JWT (access token) で API を呼ぶ。署名・issuer・aud・期限を確かめる
+      skip_jwt_bearer_tokens = true
+      bearer_token_login_fallback = false
+      request_logging = false
+      auth_logging = false
+
+  oauth2-proxy-alpha:
+    content: |
+      server:
+        bindAddress: 0.0.0.0:4180
+      upstreamConfig:
+        upstreams:
+          - id: ptranslate
+            path: /
+            uri: http://ptranslate:8002
+            # 訳は Server-Sent Events で流れる。長い原文でも切らない
+            timeout: 600s
+            flushInterval: 100ms
+            passHostHeader: true
+      injectRequestHeaders:
+        # 利用者が送った同名のヘッダーは消してから、検証したユーザー名を入れる
+        - name: X-Forwarded-User
+          values:
+            - claimSource:
+                claim: preferred_username
+      providers:
+        - id: pocket-id
+          provider: oidc
+          clientID: ptranslate-web
+          clientSecret: ${WEB_CLIENT_SECRET:-not-set-yet}
+          scope: openid profile
+          code_challenge_method: S256
+          # ブラウザーは tailnet の名前で、oauth2-proxy はコンテナの中から Pocket ID を呼ぶ
+          loginURL: https://${PT_DOMAIN}:8443/authorize
+          redeemURL: http://pocket-id:1411/api/oidc/token
+          profileURL: http://pocket-id:1411/api/oidc/userinfo
+          oidcConfig:
+            issuerURL: https://${PT_DOMAIN}:8443
+            skipDiscovery: true
+            jwksURL: http://pocket-id:1411/.well-known/jwks.json
+            emailClaim: preferred_username
+            userIDClaim: preferred_username
+            insecureSkipNonce: false
+            # PTranslate Desk の access token の aud はデスクトップ用の client ID
+            extraAudiences:
+              - ptranslate-desktop
+
+volumes:
+  tailscale-state:
+  pocket-id-data:
+  llama-cache:

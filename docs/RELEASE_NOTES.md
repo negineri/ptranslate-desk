@@ -1,6 +1,15 @@
-このReleaseはWindows対応を含むベータ版です。通常の自動更新対象にはならないため、Assetsから手動で取得してください。
-クリーンな端末での導入・削除、WebView2未導入環境、Windows更新インストーラーの適用と再起動・設定維持は未確認です。
-クリップボード復元と再起動後のログイン維持も実機では未確認です。
+このReleaseは、Windows版の追加と、Pocket IDなどAuthentik以外のIdPへの対応を含みます。
+
+## Pocket IDとかんたん構築
+
+- **Pocket IDでログインできるようにしました。** discoveryに `revocation_endpoint` が無いIdPでも、
+  デスクトップ版がログインできます。その場合のログアウトは端末から認証情報を消すだけで、
+  サーバー側のrefresh tokenは有効期限まで残ります
+- **サーバー:** `TR_USERINFO_URL` を追加しました。access tokenにユーザー名が入らないIdP（Pocket ID）でも、
+  デスクトップ版からの要求の利用者名をIdPのuserinfoから引きます。設定しなければ従来と同じです
+- **かんたん構築:** IdPもリバースプロキシも無い環境向けに、Tailscale + Pocket IDで1台に立てる
+  Docker Composeの構成と手順（docs/SELF_HOSTING_COMPOSE.md）を追加しました。外に開けるポートは不要です
+- 翻訳エンジンの速さを測る `tools/bench.py` と、訳の繰り返しと揺れの調査記録（docs/REPEAT_INVESTIGATION.md）を追加しました
 
 ## Windows
 
@@ -17,6 +26,9 @@ Assetsの `_x64-setup.exe` で終わるファイルをダウンロードして�
 
 自動更新は利用者が承認した後に適用します。更新ファイルはコード署名とは別のTauri更新署名で検証します。
 インストール時にアプリを終了し、完了後に起動し直します。
+
+Windows版は初めての配布です。クリーンな端末での導入・削除、WebView2未導入環境、Windows更新インストーラーの適用と
+再起動・設定維持、クリップボード復元、再起動後のログイン維持は、実機ではまだ確認していません。
 
 ## macOS
 

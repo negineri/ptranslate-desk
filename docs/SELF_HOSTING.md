@@ -2,6 +2,8 @@
 
 この手順では、翻訳エンジン、PTranslateのAPI/Web、Authentik、oauth2-proxy、nginxを用意し、
 Web版とmacOS版の両方から利用します。例のドメイン・利用者・秘密は自分のものに置き換えてください。
+IdPもリバースプロキシも無く、tailnetの中だけで使うなら、Docker Compose 1つで立てる
+[かんたん構築ガイド](SELF_HOSTING_COMPOSE.md)のほうが手早く済みます。
 
 ## 構成と用意するもの
 
@@ -186,6 +188,8 @@ Pythonサービスとコンテナはどちらか一方を使います。
 | `TR_MAX_ACTIVE_PER_USER`            | 2                                             | 1 人が同時に流せる翻訳の数                       |
 | `TR_UPSTREAM_TIMEOUT` | 600 | 翻訳エンジンとの通信タイムアウト（秒） |
 | `TR_HEARTBEAT_SECONDS` | 15 | SSEのハートビート間隔（秒） |
+| `TR_USERINFO_URL` | 空 | IdPのuserinfo。`X-Forwarded-User` が無く前段が検証したBearerだけがあるとき、ここから `preferred_username` を引く（access tokenにユーザー名が入らないIdP向け。[かんたん構築ガイド](SELF_HOSTING_COMPOSE.md)） |
+| `TR_USERINFO_CACHE_SECONDS` | 300 | userinfoの結果を覚えておく秒数の上限（tokenの期限が先ならそこまで） |
 | `TR_STATIC_DIR` | `server/static/`（コンテナでは `/app/static`） | Webの静的ファイルの配置先 |
 
 

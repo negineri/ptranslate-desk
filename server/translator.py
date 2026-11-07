@@ -10,6 +10,8 @@
 - 待っている間も 15 秒ごとにコメント行を送る (Cloudflare は 100 秒応答の無い接続を切る)
 - 利用者は前段の認証プロキシ (oauth2-proxy など) が付ける X-Forwarded-User で区別する。
   認証は持たないので、待ち受けは前段からしか届かない場所 (127.0.0.1 など) にする。
+  TR_USERINFO_URL を設定したときは、X-Forwarded-User が無く前段が検証した Bearer だけがあれば、
+  IdP の userinfo から preferred_username を引く (access token にユーザー名が入らない IdP 向け)
   原文と訳はログにも残さない
 
 Python の標準ライブラリだけを使う。
@@ -17,6 +19,8 @@ Python の標準ライブラリだけを使う。
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import http.client
 import json
 import logging
@@ -56,6 +60,11 @@ MAX_ACTIVE_PER_USER = env_int("TR_MAX_ACTIVE_PER_USER", 2)
 UPSTREAM_TIMEOUT = env_int("TR_UPSTREAM_TIMEOUT", 600)
 # 待っている間に送るコメント行の間隔 (Cloudflare は 100 秒応答の無い接続を切る)
 HEARTBEAT_SECONDS = env_int("TR_HEARTBEAT_SECONDS", 15)
+# IdP の userinfo (OIDC)。前段が X-Forwarded-User を付けず Bearer だけを通したとき、ここで利用者名を引く。
+# Pocket ID のように access token にユーザー名が入らない IdP 向け。空なら使わない
+USERINFO_URL = os.environ.get("TR_USERINFO_URL", "")
+# userinfo の結果を覚えておく秒数の上限 (token の期限が先に来ればそこまで)
+USERINFO_CACHE_SECONDS = env_int("TR_USERINFO_CACHE_SECONDS", 300)
 
 # PLaMo 3 Translate の対応言語 (モデルカードの Supported Languages の順)
 LANGUAGES = [
@@ -127,6 +136,8 @@ STOP = ["<|plamo:tag|>", "<|plamo:bos|>"]
 log = logging.getLogger("translator")
 active_lock = threading.Lock()
 active: dict[str, int] = {}
+userinfo_lock = threading.Lock()
+userinfo_cache: dict[str, tuple[str, float]] = {}  # token の SHA-256 → (利用者名, 期限 (monotonic))
 
 
 class HttpError(Exception):
@@ -134,6 +145,63 @@ class HttpError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+def token_expiry(token: str) -> float | None:
+    """JWT の exp (UNIX 時刻)。署名は前段と userinfo が確かめるので、ここでは覚えておく期間にだけ使う。"""
+    try:
+        payload = token.split(".")[1]
+        exp = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))["exp"]
+        return float(exp)
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+
+
+def user_from_userinfo(token: str) -> str:
+    """Bearer の token で IdP の userinfo を呼び、preferred_username を返す。結果はしばらく覚える。"""
+    key = hashlib.sha256(token.encode()).hexdigest()
+    now = time.monotonic()
+    with userinfo_lock:
+        hit = userinfo_cache.get(key)
+        if hit and hit[1] > now:
+            return hit[0]
+    url = urllib.parse.urlsplit(USERINFO_URL)
+    conn_cls = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
+    conn = conn_cls(url.hostname, url.port, timeout=15)
+    try:
+        conn.request(
+            "GET",
+            url.path or "/",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        )
+        resp = conn.getresponse()
+        body = resp.read(65536)
+    except (OSError, http.client.HTTPException) as e:
+        log.warning("userinfo failed: %s", e)
+        raise HttpError(502, "認証サーバーに接続できませんでした")
+    finally:
+        conn.close()
+    if resp.status != 200:
+        raise HttpError(401, "ログインしていません")
+    try:
+        user = json.loads(body).get("preferred_username") or ""
+    except (ValueError, AttributeError):
+        user = ""
+    if not isinstance(user, str) or not USER_RE.match(user):
+        raise HttpError(401, "ログインしていません")
+    ttl = USERINFO_CACHE_SECONDS
+    exp = token_expiry(token)
+    if exp is not None:
+        ttl = min(ttl, exp - time.time())
+    if ttl > 0:
+        with userinfo_lock:
+            if len(userinfo_cache) >= 1024:
+                for stale in [k for k, (_, until) in userinfo_cache.items() if until <= now]:
+                    del userinfo_cache[stale]
+                if len(userinfo_cache) >= 1024:
+                    userinfo_cache.clear()
+            userinfo_cache[key] = (user, now + ttl)
+    return user
 
 
 def text_field(body: dict, name: str, label: str, limit: int, required: bool = False) -> str:
@@ -307,6 +375,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def user(self) -> str:
         user = self.headers.get("X-Forwarded-User", "")
+        if not user and USERINFO_URL:
+            scheme, _, token = self.headers.get("Authorization", "").partition(" ")
+            if scheme.lower() == "bearer" and token.strip():
+                return user_from_userinfo(token.strip())
         if not USER_RE.match(user):
             raise HttpError(401, "ログインしていません")
         return user

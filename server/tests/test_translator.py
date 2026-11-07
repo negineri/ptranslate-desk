@@ -5,6 +5,7 @@ python3 -m unittest discover -s server/tests -v
 
 from __future__ import annotations
 
+import base64
 import http.client
 import importlib.util
 import json
@@ -12,6 +13,7 @@ import sys
 import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -253,6 +255,95 @@ class ServerTest(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertGreater(self.stats["canceled"], before)
+
+
+def jwt(exp: float) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).rstrip(b"=")
+    return f"e30.{payload.decode()}.sig"
+
+
+class UserinfoTest(unittest.TestCase):
+    """X-Forwarded-User が無く Bearer だけがあるときに、IdP の userinfo から利用者名を引く。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.calls = []
+        cls.good = jwt(time.time() + 600)
+        users = {cls.good: "bob", "opaque": "carol", "bad-name": "Bad User"}
+        calls = cls.calls
+
+        class Userinfo(BaseHTTPRequestHandler):
+            def do_GET(self):
+                token = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                calls.append(token)
+                user = users.get(token) or ("dave" if token.startswith("expired.") else None)
+                body = json.dumps({"sub": "x", "preferred_username": user}).encode()
+                self.send_response(200 if user else 401)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        cls.idp = ThreadingHTTPServer(("127.0.0.1", 0), Userinfo)
+        threading.Thread(target=cls.idp.serve_forever, daemon=True).start()
+        cls.app = tr.TranslationHTTPServer(("127.0.0.1", 0), tr.Handler)
+        cls.app.daemon_threads = True
+        threading.Thread(target=cls.app.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.app.shutdown()
+        cls.idp.shutdown()
+
+    def setUp(self):
+        url = f"http://127.0.0.1:{self.idp.server_address[1]}/api/oidc/userinfo"
+        patcher = patch.multiple(tr, USERINFO_URL=url, userinfo_cache={})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.calls.clear()
+
+    def config(self, headers):
+        conn = http.client.HTTPConnection("127.0.0.1", self.app.server_address[1], timeout=30)
+        conn.request("GET", "/api/config", headers=headers)
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        conn.close()
+        return resp.status, body
+
+    def test_bearer_without_user_header_uses_userinfo_and_caches(self):
+        for _ in range(2):
+            status, body = self.config({"Authorization": f"Bearer {self.good}"})
+            self.assertEqual((status, body.get("user")), (200, "bob"))
+        self.assertEqual(self.calls, [self.good])
+        # JWT でない token も、上限の秒数まで覚える
+        for _ in range(2):
+            self.assertEqual(self.config({"Authorization": "Bearer opaque"})[1]["user"], "carol")
+        self.assertEqual(self.calls, [self.good, "opaque"])
+
+    def test_user_header_wins_and_bad_tokens_are_rejected(self):
+        status, body = self.config({"X-Forwarded-User": "alice", "Authorization": "Bearer opaque"})
+        self.assertEqual((status, body.get("user")), (200, "alice"))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.config({"Authorization": "Bearer unknown"})[0], 401)
+        self.assertEqual(self.config({"Authorization": "Bearer bad-name"})[0], 401)
+        self.assertEqual(self.config({"Authorization": "Basic opaque"})[0], 401)
+        # 不正な X-Forwarded-User は userinfo に頼らず断る
+        status, _ = self.config({"X-Forwarded-User": "Bad User", "Authorization": "Bearer opaque"})
+        self.assertEqual(status, 401)
+
+    def test_expired_tokens_are_not_cached_and_userinfo_is_off_by_default(self):
+        token = "expired." + jwt(time.time() - 10).split(".", 1)[1]
+        for _ in range(2):
+            self.assertEqual(self.config({"Authorization": f"Bearer {token}"})[1]["user"], "dave")
+        self.assertEqual(len(self.calls), 2)
+        with patch.object(tr, "USERINFO_URL", ""):
+            self.assertEqual(self.config({"Authorization": "Bearer opaque"})[0], 401)
+
+    def test_unreachable_userinfo_is_a_gateway_error(self):
+        with patch.object(tr, "USERINFO_URL", "http://127.0.0.1:9/userinfo"):
+            self.assertEqual(self.config({"Authorization": "Bearer opaque"})[0], 502)
 
 
 if __name__ == "__main__":

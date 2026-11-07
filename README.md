@@ -10,8 +10,8 @@
 PLaMo 3 Translate (llama.cpp の llama-server) を裏側にした、Web とデスクトップの翻訳アプリ。
 文章を貼って訳す画面と、選んだ文をショートカットキーで訳す翻訳ポップアップが含まれます。
 
-利用するには、翻訳サーバーと接続先のAuthentikアカウントが必要です。
-サーバーを自分で用意する場合は[構築ガイド](docs/SELF_HOSTING.md)、
+利用するには、翻訳サーバーと、そのサーバーがログインに使うOIDCのIdP（Pocket ID、Authentikなど）の
+アカウントが必要です。サーバーを自分で用意する場合は[サーバーを自分で用意する](#サーバーを自分で用意する)、
 コードの変更や試験を行う場合は[開発ガイド](docs/DEVELOPMENT.md)を参照してください。
 
 ## 対応環境
@@ -23,7 +23,7 @@ PLaMo 3 Translate (llama.cpp の llama-server) を裏側にした、Web とデ�
 | Web版（PTranslate）               | JavaScriptとストリーミング受信（Fetch API）に対応したブラウザー | インストール不要。構築したサーバーのURLをブラウザーで開く                  |
 
 Linux向けデスクトップ版は未配布で、ショートカットによる選択文の取得も未実装です。
-サーバー管理者がAuthentikで利用者と利用権限を管理します。
+サーバー管理者がIdPで利用者と利用権限を管理します。
 
 ## インストール（Windows）
 
@@ -34,7 +34,7 @@ Linux向けデスクトップ版は未配布で、ショートカットによる
    配布元が上記リポジトリであることと、取得したバージョンを確認してください。
    組織の端末で実行が制限される場合は管理者へ確認してください。
 3. インストール後、PTranslate Deskを起動し、「接続先の設定」を保存・再起動します。
-   「ログイン」から既定のブラウザで接続先のAuthentikにログインします。
+   「ログイン」から既定のブラウザで接続先のIdPにログインします。
 4. ほかのアプリで文を選び、**Ctrl+Cを0.5秒以内に2回**押すと翻訳ポップアップを表示します。
    設定で**Ctrl+Shift+T**などの組み合わせにも切り替えられます。
 
@@ -55,7 +55,7 @@ Windowsではインストール時にアプリを終了し、完了後に起動�
    起動がブロックされた場合は、「システム設定 → プライバシーとセキュリティ」で
    PTranslate Deskの「このまま開く」を選びます。
 4. 「接続先の設定」に利用するサーバーと認証の設定を入力して、保存・再起動します。
-   「ログイン」を押し、接続先のAuthentikにログインします。初回は同意画面で許可します。
+   「ログイン」を押し、接続先のIdPにログインします。初回は同意画面で許可します。
 5. キーチェーンの確認が出たら、アプリ名が「PTranslate Desk」、保存先が
    `com.witenp.ptranslate-desk` であることを確認します。キーチェーン「ログイン」のパスワード
    （通常はMacのログインパスワード）をmacOSの確認画面に入力し、**「常に許可」** を押します。
@@ -72,24 +72,42 @@ Windowsではインストール時にアプリを終了し、完了後に起動�
 デスクトップの「接続先の設定」はログイン前から操作できます。管理者から次の3項目を受け取って入力し、
 「保存して再起動」を押してください。再起動後、設定したサーバーにログインします。
 
-| 項目               | 設定例                                                                                       |
-| ------------------ | -------------------------------------------------------------------------------------------- |
-| サーバーURL        | `https://translate.example.com`（パスなし）                                                  |
-| OIDC discovery URL | `https://auth.example.com/application/o/translator-desktop/.well-known/openid-configuration` |
-| client ID          | `translator-desktop`（公開クライアント、client secretなし）                                  |
+| 項目               | 設定例（Pocket IDの構成）                                                  | 設定例（Authentikの構成）                                                                    |
+| ------------------ | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| サーバーURL        | `https://ptranslate.example.ts.net`（パスなし）                            | `https://translate.example.com`（パスなし）                                                  |
+| OIDC discovery URL | `https://ptranslate.example.ts.net:8443/.well-known/openid-configuration` | `https://auth.example.com/application/o/translator-desktop/.well-known/openid-configuration` |
+| client ID          | `ptranslate-desktop`                                                       | `translator-desktop`                                                                         |
+
+client IDは公開クライアント（client secretなし、PKCE）のものです。
 
 接続先にはHTTPSが必要です。更新用の資格情報は接続先ごとにOSの資格情報の保管へ保存します。
 
 ## Web版を使う
 
-管理者から受け取ったサーバーURLをブラウザーで開き、Authentikにログインします。
+管理者から受け取ったサーバーURLをブラウザーで開き、IdPにログインします。
 原文を入力し、言語や文体を選んで翻訳します。アプリのインストールは不要です。
 
 ## サーバーを自分で用意する
 
-[構築ガイド](docs/SELF_HOSTING.md)に、翻訳エンジンとサーバーの導入、認証・HTTPSの設定、
-デスクトップの接続、動作確認と保守までの手順をまとめています。
-Macとは別のLinuxサーバーに構築することもできます。
+Linuxのサーバー1台で動きます。GPUは要りません。構成は2通りあります。
+
+| 構成 | 向いている場合 | 手順 |
+| --- | --- | --- |
+| Docker Compose 1つ（Tailscale + Pocket ID） | IdPもリバースプロキシも無い。家族や自分だけで使う | [かんたん構築ガイド](docs/SELF_HOSTING_COMPOSE.md) |
+| 個別に組む（nginx + oauth2-proxy + Authentik など） | ドメインを公開して使う。既にIdPやリバースプロキシがある | [構築ガイド](docs/SELF_HOSTING.md) |
+
+かんたん構築では外に開けるポートが無く、tailnetに入った端末だけから使えます。証明書はTailscaleが発行します。
+
+翻訳モデル（PLaMo 3 Translate 2B、Q4_K_M）は1.7 GBで、翻訳エンジンのメモリは1.5 GiBほどです。CPUだけでも動きます。
+1,500文字ほどの日本語を英語に訳す時間の目安です（[測定の詳細](docs/SELF_HOSTING_COMPOSE.md#必要な性能)）。
+
+| 機械 | 1本 | 同時に4本（1本あたり） |
+| --- | --- | --- |
+| 4 vCPUのVM（AVX2） | 50秒 | 152秒 |
+| Ryzen AI Max+ 395のCPU | 13秒 | 24秒 |
+| Ryzen AI Max+ 395のGPU（Radeon 8060S） | 7秒 | 9秒 |
+
+訳は届いた分から画面に出ます（4 vCPUでも10秒ほどで出始めます）。
 
 ## 開発者向けドキュメント
 
@@ -97,6 +115,7 @@ Macとは別のLinuxサーバーに構築することもできます。
 - [デスクトップの開発手順](desktop/README.md)
 - [仕様](docs/SPEC.md)
 - [Releaseの作成と更新署名](docs/RELEASING.md)
+- [訳の繰り返しと揺れの調査](docs/REPEAT_INVESTIGATION.md)
 
 ## ライセンス
 

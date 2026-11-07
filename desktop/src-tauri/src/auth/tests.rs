@@ -34,6 +34,7 @@ struct Model {
     html_403: bool,
     reject_refresh: bool,
     bad_request: bool,
+    no_revocation: bool,
 }
 fn jwt() -> Secret {
     let payload = URL_SAFE_NO_PAD.encode(json!({"preferred_username": random_secret().unwrap().as_str(), "aud": CLIENT_ID, "exp": 1}).to_string());
@@ -75,6 +76,7 @@ impl Fixture {
             html_403: false,
             reject_refresh: false,
             bad_request: false,
+            no_revocation: false,
         }));
         let shared = state.clone();
         let base = url.clone();
@@ -118,14 +120,20 @@ impl Fixture {
                         let mut model = shared.lock().unwrap();
                         let path = first[1];
                         if path == "/discovery" {
+                            let mut discovery = json!({"issuer": base,
+                                "authorization_endpoint": format!("{base}/custom-authorize"),
+                                "token_endpoint": format!("{base}/custom-token"),
+                                "revocation_endpoint": format!("{base}/custom-revoke")});
+                            if model.no_revocation {
+                                discovery
+                                    .as_object_mut()
+                                    .unwrap()
+                                    .remove("revocation_endpoint");
+                            }
                             (
                                 200,
                                 "application/json",
-                                json!({"issuer": base,
-                                "authorization_endpoint": format!("{base}/custom-authorize"),
-                                "token_endpoint": format!("{base}/custom-token"),
-                                "revocation_endpoint": format!("{base}/custom-revoke")})
-                                .to_string(),
+                                discovery.to_string(),
                                 String::new(),
                             )
                         } else if path.starts_with("/custom-authorize?") {
@@ -321,6 +329,24 @@ async fn login_restore_rotation_and_revoke_use_discovery_and_secure_storage() {
     assert!(fixture.vault.load().unwrap().is_none());
     let model = fixture.state.lock().unwrap();
     assert_eq!(model.revokes, 1);
+    assert!(!model.bad_request);
+}
+
+#[tokio::test]
+async fn discovery_without_revocation_logs_out_locally() {
+    let fixture = Fixture::new().await;
+    fixture.state.lock().unwrap().no_revocation = true;
+    let auth = fixture.auth();
+    fixture.login(&auth).await;
+    assert!(auth.verify().await.unwrap().verified);
+    let restored = fixture.auth();
+    restored.restore().await.unwrap();
+    assert!(restored.is_authenticated());
+    restored.logout().await.unwrap();
+    assert!(!restored.is_authenticated());
+    assert!(fixture.vault.load().unwrap().is_none());
+    let model = fixture.state.lock().unwrap();
+    assert_eq!(model.revokes, 0);
     assert!(!model.bad_request);
 }
 
