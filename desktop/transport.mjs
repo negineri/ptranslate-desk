@@ -2,6 +2,7 @@ import { settingsPage, showPage, accountSlot, accountMenu } from "./settings-vie
 import { desktopFetch as request } from "./ipc.mjs";
 import "./updates.mjs";
 import "./connection.mjs";
+import { modeReady } from "./local-view.mjs";
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -65,10 +66,12 @@ if (/Mac/.test(navigator.platform)) {
   settingsPage.append(keychainHelp);
 }
 let resolveLogin;
+let localMode = false;
 const login = new Promise((resolve) => { resolveLogin = resolve; });
 
 async function restoreSession() {
   const status = await invoke("session_status");
+  localMode = status.local;
   loginButton.disabled = status.logging_in;
   cancelLogin.hidden = !status.logging_in;
   if (!loginButton.dataset.loggedIn) loginButton.textContent = status.mock ? "モックにログイン" : "ログイン";
@@ -76,7 +79,7 @@ async function restoreSession() {
     const settings = await invoke("load_settings").catch(showError);
     savedSettings = settings ? JSON.stringify(settings) : null;
     loginButton.dataset.loggedIn = "true";
-    loginButton.textContent = "ログアウト";
+    loginButton.textContent = localMode ? "サーバーモードに切り替え" : "ログアウト";
     accountActions.append(loginButton);
     accountMenu.hidden = false;
     resolveLogin();
@@ -94,12 +97,18 @@ loginButton.addEventListener("click", async () => {
   cancelLogin.hidden = !loggingIn;
   try {
     await pendingSave;
+    if (localMode) {
+      const { device, auto_release, idle_minutes } = await invoke("local_status");
+      await invoke("save_local_settings", { settings: { enabled: false, device, auto_release, idle_minutes } });
+      return;
+    }
     await invoke(loggingIn ? "login" : "logout");
     await restoreSession();
   } catch (error) { showError(error); }
   finally { loginButton.disabled = false; cancelLogin.hidden = true; }
 });
 
+await modeReady;
 await listen("session-changed", () => { void restoreSession().catch(showError); });
 await listen("login-started", () => { loginButton.disabled = true; cancelLogin.hidden = false; });
 await invoke("restore_session").catch(showError);

@@ -1,0 +1,7 @@
+{
+  "productName": "PTranslate Desk Local Prototype",
+  "identifier": "com.witenp.ptranslate-desk.local-prototype",
+  "plugins": {
+    "updater": { "endpoints": [] }
+  }
+}

@@ -9,6 +9,25 @@
     }
   };
   try {
+    step = "初回のモード選択";
+    await wait(() => $("mode-welcome") && !$("mode-welcome").hidden);
+    if (!$("welcome-local").disabled) {
+      $("welcome-local").click();
+      await wait(() => !$("local-options").hidden);
+      $("local-download").click();
+      if (!$("local-download-confirm").matches(":modal")) throw new Error("モデル取得の確認");
+      $("local-decline-download").click();
+      if ($("local-download-confirm").open) throw new Error("モデル取得のキャンセル");
+      let rejectedDownload = false;
+      try {
+        await window.__TAURI__.core.invoke("download_local_resources", { confirmed: false, progress: new window.__TAURI__.core.Channel() });
+      } catch (e) { rejectedDownload = String(e).includes("確認"); }
+      if (!rejectedDownload) throw new Error("確認なしで取得できてしまう");
+      if (!$("local-setup").hidden) throw new Error("モデル取得前にデバイス・メモリ設定が表示される");
+      if ($("local-auto-release").checked) throw new Error("自動解放の初期値");
+      $("mode-server").click();
+    } else $("welcome-server").click();
+    await wait(() => $("mode-welcome").hidden && !$("connection-settings").hidden);
     step = "ログイン前のヘッダー";
     await wait(() => $("version-badge")?.textContent.startsWith("v"));
     if (!$("version-badge").textContent.includes("0.0.0-dev")) throw new Error("開発版のバージョン");

@@ -19,11 +19,11 @@ panel.innerHTML = `<summary>接続先の設定</summary>
     <label for="client-id">client ID（公開クライアント）</label>
     <input id="client-id" type="text" required maxlength="256" autocomplete="off" spellcheck="false">
     <p class="hint">保存すると現在の接続先からログアウトし、アプリを再起動します。新しい接続先でログインし直してください。</p>
-    <button id="save-connection" type="submit">保存して再起動</button>
+    <button id="save-connection" type="submit" class="primary">保存して再起動</button>
     <dialog id="connection-confirm" aria-labelledby="connection-confirm-title">
       <h2 id="connection-confirm-title">接続先の変更</h2>
       <p>現在の接続先からログアウトして接続先を変更します。保存後にアプリを再起動してよろしいですか？</p>
-      <button id="confirm-connection" type="button">保存して再起動する</button>
+      <button id="confirm-connection" type="button" class="primary">保存して再起動する</button>
       <button id="cancel-connection" type="button" autofocus>キャンセル</button>
     </dialog>
     <p id="connection-status" class="hint" role="status"></p>

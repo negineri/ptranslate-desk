@@ -48,7 +48,7 @@ settingsPage.id = "settings-page";
 settingsPage.hidden = true;
 settingsPage.setAttribute("role", "tabpanel");
 settingsPage.setAttribute("aria-labelledby", "settings-tab");
-settingsPage.innerHTML = `<div class="settings-heading"><h2>設定</h2><p class="hint">この端末で使う接続先やショートカットを管理します。</p></div>`;
+settingsPage.innerHTML = `<div class="settings-heading"><h2>設定</h2><p class="hint">翻訳モードや接続先、ショートカットを管理します。</p></div>`;
 main.append(settingsPage);
 
 const tabs = document.createElement("div");
@@ -118,6 +118,7 @@ style.textContent = `
   #settings-page { max-width: 760px; margin: 0 auto; }
   #translation-page section { padding: 12px; margin-bottom: 12px; }
   #translation-page > .hint { margin: 8px 0 0; }
+  #translation-page .under { margin-top: 8px; }
   #settings-page > details, #settings-page > aside { padding: 16px; margin: 0 0 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
   #settings-page summary { color: var(--text); font-weight: 600; }
   #desktop-settings > label { display: block; margin: 16px 0 8px; }
