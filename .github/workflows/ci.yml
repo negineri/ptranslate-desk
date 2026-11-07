@@ -41,6 +41,39 @@ jobs:
       - run: python -m unittest discover -s server/tests -v
       - run: node --test server/tests/test_translation.mjs
 
+  desktop-windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: desktop/src-tauri
+      - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
+      - run: node desktop/build.mjs
+      - run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
+      - run: python tools/run_desktop_mock.py --smoke-test
+      - run: npm ci
+        working-directory: desktop
+      - run: npm run build -- --ci -- --locked
+        working-directory: desktop
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-installer
+          path: desktop/src-tauri/target/debug/bundle/nsis/*.exe
+          if-no-files-found: error
+
   desktop-macos:
     needs: version
     runs-on: macos-latest

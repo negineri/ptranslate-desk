@@ -1,9 +1,41 @@
-# PTranslate Desk (macOS)
+# PTranslate Desk (macOS / Windows)
 
 Tauri 2 のメインウィンドウをローカルの翻訳モックで試せます。Rust、Node.js、各 OS の
 [Tauri の開発に必要なツール](https://v2.tauri.app/start/prerequisites/)を用意してください。Ubuntu では追加で `libdbus-1-dev` が必要です。
 
 macOS は 13 以降に対応します。Mac では Xcode Command Line Tools (`xcode-select --install`) を使います。
+
+Windows は 10 / 11 (x64) 向けです。開発には Rust の MSVC ツールチェーン、Visual Studio Build Tools の
+「C++ によるデスクトップ開発」、WebView2 Runtime を用意します。
+
+## Windows で使う
+
+主窓、ブラウザでのログイン、ストリーミング翻訳、設定、翻訳ポップアップは macOS と共通です。
+refresh token は Windows の資格情報マネージャーに保存します。
+
+ほかのアプリで文を選び、Ctrl+C を 0.5 秒以内に 2 回押すと、マウスの近くに翻訳ポップアップを出します。
+設定で Ctrl+Shift+T や任意の組み合わせに変更できます。組み合わせを離すと Ctrl+C を送り、
+選んだ文を取得した後にクリップボードの文字列を戻します。管理者権限で動くアプリにはコピー操作を送れない場合があります。
+macOS のアクセシビリティ許可は不要です。主窓を閉じても通知領域に常駐し、トレイの「終了」で終了します。
+
+PowerShell でリポジトリのルートからモックを起動します。本番サーバーには接続しません。
+
+```powershell
+python tools/run_desktop_mock.py
+```
+
+Windows の NSIS インストーラーを作るには `desktop/` で実行します。
+
+```powershell
+npm ci
+npm run build
+```
+
+`src-tauri/target/debug/bundle/nsis/` にインストーラーを生成します。
+Windows 用の設定は Tauri が `tauri.windows.conf.json` から自動で読み込みます。
+コード署名は未設定です。CI でも Windows の単体試験、モックでの主窓・ポップアップ試験、
+インストーラーの作成を行い、成果物 `windows-installer` に保存します。
+Windows の GitHub Releases への配布と更新用マニフェストへの登録は未対応です。
 
 ## サーバーに接続してログインする
 
@@ -86,7 +118,7 @@ macOSのキーチェーンの説明があります。画面上部にバージョ
 「設定」「ログアウト」「終了」があります。未ログイン時はアイコンも変わります。
 メインウィンドウを閉じた後は、メニューバーか Dock のアイコンから開けます。
 
-ショートカットによる選択文の取得は、現在 macOS 向けに実装しています。
+ショートカットによる選択文の取得は、macOS と Windows 向けに実装しています。
 
 ## 個別に起動する
 
@@ -171,5 +203,5 @@ OS の実際のキー監視と、ほかのアプリへのコピーキー送信�
 
 ## これから実装するもの
 
-自動起動、履歴、Windows・Linux でのショートカットによる選択文の取得は未実装です。
+自動起動、履歴、Linux でのショートカットによる選択文の取得は未実装です。
 仕様は [SPEC](../docs/SPEC.md) を参照してください。

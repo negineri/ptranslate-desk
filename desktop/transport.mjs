@@ -108,12 +108,14 @@ await restoreSession().catch(showError);
 export async function desktopFetch(...args) { await login; return request(...args); }
 
 const settingsPanel = document.createElement("details");
+const isMac = /Mac/.test(navigator.platform);
+const copyKey = isMac ? "⌘C" : "Ctrl+C";
 settingsPanel.id = "desktop-settings";
 settingsPanel.innerHTML = `<summary>デスクトップの設定</summary>
   <label for="shortcut">選んだ文を翻訳するショートカット</label>
   <select id="shortcut">
-    <option value="double-copy">⌘C を 0.5 秒以内に 2 回</option>
-    <option value="CommandOrControl+Shift+T">⌘⇧T</option>
+    <option value="double-copy">${copyKey} を 0.5 秒以内に 2 回</option>
+    <option value="CommandOrControl+Shift+T">${isMac ? "⌘⇧T" : "Ctrl+Shift+T"}</option>
     <option value="custom">自分で指定する</option>
   </select>
   <div id="custom-shortcut" hidden>
@@ -123,9 +125,8 @@ settingsPanel.innerHTML = `<summary>デスクトップの設定</summary>
   </div>
   <p class="hint" id="shortcut-status"></p>
   <p class="hint" id="shortcut-diagnostics"></p>
-  <button id="accessibility">アクセシビリティの設定を開く</button>
-  <p class="hint">macOS のシステム設定で「PTranslate Desk」を許可してください。許可は数秒以内に反映されます。
-  メインウィンドウを閉じても常駐します。終了するにはメニューバーの「終了」か ⌘Q を使います。</p>`;
+  <button id="accessibility" ${isMac ? "" : "hidden"}>アクセシビリティの設定を開く</button>
+  <p class="hint">${isMac ? 'macOS のシステム設定で「PTranslate Desk」を許可してください。許可は数秒以内に反映されます。メインウィンドウを閉じても常駐します。終了するにはメニューバーの「終了」か ⌘Q を使います。' : 'メインウィンドウを閉じても通知領域に常駐します。終了するにはトレイの「終了」を使います。組み合わせのショートカットは、キーを離すと選んだ文をコピーします。管理者権限で動くアプリからは取得できない場合があります。'}</p>`;
 settingsPanel.open = true;
 document.getElementById("connection-settings").after(settingsPanel);
 const shortcut = document.getElementById("shortcut");
@@ -140,10 +141,10 @@ async function updateShortcutStatus() {
   }
   shortcutStatus.textContent = status.paused ? "ショートカットを一時的に止めています" :
     !status.logged_in ? "ショートカットを使うにはログインしてください" :
-    !status.accessibility ? "選んだ文を取得するにはアクセシビリティの許可が必要です" :
-    status.shortcut === "double-copy" && !status.copy_monitor ? "⌘Cの監視を登録できませんでした" : "ショートカットを使えます";
+    !status.accessibility ? (isMac ? "選んだ文を取得するにはアクセシビリティの許可が必要です" : "このOSでは選んだ文の取得に対応していません") :
+    status.shortcut === "double-copy" && !status.copy_monitor ? `${copyKey}の監視を登録できませんでした` : "ショートカットを使えます";
   document.getElementById("shortcut-diagnostics").textContent =
-    `アクセシビリティ: ${status.accessibility ? "許可済み" : "未許可"} / ⌘Cの監視: ${status.copy_monitor ? "登録済み" : "未登録"} / 他のアプリでの⌘C検出: ${status.copy_events}回`;
+    `${isMac ? `アクセシビリティ: ${status.accessibility ? "許可済み" : "未許可"} / ` : ""}${copyKey}の監視: ${status.copy_monitor ? "登録済み" : "未登録"} / 他のアプリでの${copyKey}検出: ${status.copy_events}回`;
 }
 setInterval(() => {
   if (!settingsPage.hidden && settingsPanel.open) void updateShortcutStatus().catch(showError);

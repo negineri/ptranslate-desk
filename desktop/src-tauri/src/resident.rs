@@ -99,7 +99,9 @@ pub struct Status {
 pub fn session_status(app: AppHandle) -> Status {
     #[cfg(target_os = "macos")]
     let (copy_monitor, copy_events) = crate::macos::monitor_status();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    let (copy_monitor, copy_events) = crate::windows::monitor_status();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let (copy_monitor, copy_events) = (false, 0);
     let resident = app.state::<Resident>();
     let ui = resident.ui.lock().unwrap();
@@ -126,7 +128,11 @@ fn accessibility() -> bool {
     {
         crate::macos::trusted()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         false
     }
@@ -368,12 +374,13 @@ async fn capture_text(app: &AppHandle, copy: bool) -> Result<String, String> {
             .read_text()
             .map_err(|_| "クリップボードに文字列がありません".into());
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        return Err("選んだ文の自動取得は、現在 macOS で利用できます".into());
+        return Err("選んだ文の自動取得は、現在 macOS と Windows で利用できます".into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
+        #[cfg(target_os = "macos")]
         if !crate::macos::trusted() {
             return Err(
                 "選んだ文を取得するには、設定からアクセシビリティを許可してください".into(),
@@ -385,7 +392,10 @@ async fn capture_text(app: &AppHandle, copy: bool) -> Result<String, String> {
             .write_text(marker.clone())
             .map_err(|_| "クリップボードを使えませんでした")?;
         let result = async {
+            #[cfg(target_os = "macos")]
             crate::macos::copy_selection()?;
+            #[cfg(target_os = "windows")]
+            crate::windows::copy_selection().await?;
             for _ in 0..20 {
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 if let Ok(text) = app.clipboard().read_text() {
@@ -476,6 +486,8 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(target_os = "macos")]
     crate::macos::watch_permission(app);
+    #[cfg(target_os = "windows")]
+    crate::windows::install_monitor(app);
     Ok(())
 }
 

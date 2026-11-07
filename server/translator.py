@@ -368,7 +368,7 @@ class Handler(BaseHTTPRequestHandler):
             raise HttpError(404, "Not found")
         except HttpError as e:
             self.send_json(e.status, {"error": e.message})
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
         except Exception:
             log.exception("request %s %s failed", method, path)
@@ -442,7 +442,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self.sse({"error": value})
                     break
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             finish = "canceled"
         finally:
             cancel.set()

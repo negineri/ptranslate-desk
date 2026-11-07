@@ -1,4 +1,7 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(feature = "smoke-test")),
+    windows_subsystem = "windows"
+)]
 
 mod auth;
 mod connection;
@@ -9,12 +12,14 @@ mod settings;
 #[cfg(feature = "smoke-test")]
 mod smoke;
 mod updates;
+#[cfg(target_os = "windows")]
+mod windows;
 
 #[cfg(feature = "smoke-test")]
 #[tauri::command]
 fn smoke_result(app: tauri::AppHandle, passed: bool, step: String) {
     println!(
-        "Mac WebView smoke test: {}",
+        "デスクトップ WebView 試験: {}",
         if passed { "PASS" } else { "FAIL" }
     );
     println!("確認項目: {step}");
@@ -436,10 +441,10 @@ fn main() {
     let app = builder
         .build(tauri::generate_context!())
         .expect("翻訳アプリを起動できませんでした");
-    app.run(|app, event| {
+    app.run(|_app, _event| {
         #[cfg(target_os = "macos")]
-        if let tauri::RunEvent::Reopen { .. } = event {
-            resident::show_main(app);
+        if let tauri::RunEvent::Reopen { .. } = _event {
+            resident::show_main(_app);
         }
     });
 }
