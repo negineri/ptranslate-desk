@@ -63,6 +63,20 @@ npmはロックファイルの整合性を検証し、`--ignore-scripts` で署�
 Release用設定 `desktop/src-tauri/tauri.release.conf.json` を基にした生成設定でだけ `createUpdaterArtifacts` を有効にします。
 通常の開発ビルドには秘密鍵は不要です。
 
+## 更新署名鍵のバックアップと切り替え
+
+更新署名鍵はmacOSコード署名証明書とは別に保管します。
+更新署名鍵・パスワード・公開鍵をまとめ、ローカルの暗号化用GPG副鍵宛てのバックアップ
+`~/.local/share/code-signing/ptranslate-desk-updater-backup.tar.gpg` に保存します。
+GPGの復号と元データの一致、生成した鍵での署名と公開鍵による検証を確認してからCIへ登録します。
+Secretsから値は読み戻せないため、この暗号化ファイルを別の保管先にもバックアップしてください。
+復元時は一時ディレクトリを本人だけが読める権限にし、使用後の秘密鍵・パスワード・復号したtarを残さないでください。
+公開鍵は `desktop/src-tauri/tauri.conf.json` の `plugins.updater.pubkey` と一致させます。
+
+v0.2.5では更新署名鍵を切り替えます。v0.2.3以前は旧公開鍵を持つため、DMGからの手動インストールが一度必要です。
+macOSコード署名の証明書・Bundle IDは変更しません。署名専用ジョブではOpenSSL 3のEd25519検証を使い、
+更新データとバージョンの署名がアプリの公開鍵で検証できることを確認してから公開します。
+
 ## アプリでの更新
 
 配布用アプリは起動時と24時間ごとに、GitHub Releasesの `latest.json` を確認します。

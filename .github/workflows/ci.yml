@@ -183,6 +183,11 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: 更新署名の検証に使うOpenSSLを選ぶ
+        run: |
+          updater_openssl_prefix="$(brew --prefix openssl@3)"
+          test -x "$updater_openssl_prefix/bin/openssl"
+          echo "$updater_openssl_prefix/bin" >> "$GITHUB_PATH"
       - name: 更新manifestを検査
         run: python3 tools/package_macos_release.py manifest --directory "$RUNNER_TEMP/ptranslate-release" --tag "$RELEASE_TAG"
         env:
