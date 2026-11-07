@@ -61,6 +61,8 @@ jobs:
       - run: node desktop/build.mjs
       - run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
       - run: python3 tools/run_desktop_mock.py --smoke-test
+      - run: python3 tools/macos_signing.py self-test
+        timeout-minutes: 5
       - run: npm ci
         working-directory: desktop
       # CIでは最適化したビルドも確認し、配布用の依存キャッシュをmainに保存する。
@@ -106,6 +108,11 @@ jobs:
           shared-key: macos-universal
       - run: npm ci
         working-directory: desktop
+      - name: 固定のコード署名証明書を読み込む
+        run: python3 tools/macos_signing.py import --directory "$RUNNER_TEMP/ptranslate-signing"
+        env:
+          MACOS_SIGNING_CERTIFICATE: ${{ secrets.MACOS_SIGNING_CERTIFICATE }}
+          MACOS_SIGNING_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
       - name: gitタグから配布バージョンを取得
         run: python3 tools/check_release_version.py --tag "$RELEASE_TAG" --write-config desktop/src-tauri/gen/release-version.json
         env:
@@ -120,7 +127,7 @@ jobs:
             echo "::error::更新署名用のActions secretsを設定してください"
             exit 1
           fi
-      - name: universal dmgと署名付き更新ファイルをReleaseに公開
+      - name: universal dmgと署名付き更新ファイルを下書きに保存
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -137,15 +144,16 @@ jobs:
             「システム設定 → プライバシーとセキュリティ → このまま開く」を選んでください。
 
             dmgを開き、PTranslate Deskをアプリケーションフォルダに入れてください。
+            アプリは更新をまたいで同じ自己署名証明書を使います。
+            旧版からこの署名へ切り替える最初の1回は、アクセシビリティの許可を再登録してください。
             更新用ファイルはTauriの更新署名で検証します。AppleのDeveloper ID署名・公証は未対応です。
-          releaseDraft: false
+          releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: --target universal-apple-darwin --bundles app,dmg --config src-tauri/gen/release-version.json
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
-      - name: アプリ全体のコード署名を検証
-        run: codesign --verify --deep --strict --verbose=2 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app'
-        working-directory: desktop
+      - name: アプリの署名と固定の識別条件を検証
+        run: python3 tools/macos_signing.py verify --app 'desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app'
       - name: 更新manifestの両アーキテクチャを確認
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -153,6 +161,15 @@ jobs:
         run: |
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir "$RUNNER_TEMP/ptranslate-manifest"
           python3 tools/check_release_version.py --tag "$RELEASE_TAG" --manifest "$RUNNER_TEMP/ptranslate-manifest/latest.json"
+
+      - name: 検証済みのReleaseを公開
+        run: gh release edit "$RELEASE_TAG" --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+      - name: 署名用キーチェーンを削除
+        if: always()
+        run: python3 tools/macos_signing.py cleanup --directory "$RUNNER_TEMP/ptranslate-signing"
 
   image:
     needs: server
