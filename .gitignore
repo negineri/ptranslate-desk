@@ -7,3 +7,5 @@ dist/
 
 /desktop/src-tauri/gen/
 /desktop/macos-app.zip
+
+/desktop/release-app.zip

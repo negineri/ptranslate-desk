@@ -13,8 +13,10 @@ jobs:
   version:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
       - run: python3 tools/check_release_version.py --tag "$RELEASE_TAG"
@@ -25,11 +27,13 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - run: pip install ruff==0.17.3
@@ -41,18 +45,20 @@ jobs:
     needs: version
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: desktop/src-tauri
           # mainで保存したキャッシュを、タグのリリースジョブからも復元する。
@@ -75,101 +81,124 @@ jobs:
       # アプリ内の実行権限とシンボリックリンクを保つ。
       - run: ditto -c -k --sequesterRsrc --keepParent 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app' macos-app.zip
         working-directory: desktop
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-app
           path: desktop/macos-app.zip
           if-no-files-found: error
 
-  desktop-release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  desktop-release-build:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [desktop-macos, image]
     runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: mainに含まれる配布タグを確認
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          python3 tools/check_release_version.py --tag "$RELEASE_TAG" --write-config desktop/src-tauri/gen/release-version.json
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: desktop/src-tauri
+          shared-key: macos-universal
+          save-if: "false"
+      - run: npm ci
+        working-directory: desktop
+      # 秘密鍵なしでビルドする。更新アーカイブは署名後に作る。
+      - run: npm run tauri -- build --ci --target universal-apple-darwin --bundles app --config src-tauri/gen/release-version.json --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked
+        working-directory: desktop
+      - run: ditto -c -k --keepParent 'src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app' release-app.zip
+        working-directory: desktop
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-app
+          path: desktop/release-app.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: desktop-release-build
+    runs-on: macos-latest
+    environment: release-signing
     permissions:
       contents: write
     concurrency:
       group: desktop-release-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
-      - uses: actions/setup-node@v4
+      - name: mainに含まれる配布タグを再確認
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          python3 tools/check_release_version.py --tag "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: desktop/src-tauri
-          # mainで保存したキャッシュを、タグのリリースジョブからも復元する。
-          shared-key: macos-universal
-      - run: npm ci
+      # 署名ジョブはCargo・共有キャッシュ・npm lifecycle scriptを使わない。
+      - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: desktop
-      - name: 固定のコード署名証明書を読み込む
-        run: python3 tools/macos_signing.py import --directory "$RUNNER_TEMP/ptranslate-signing"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-app
+          path: ${{ runner.temp }}/release-input
+      - name: ビルド成果物を検査して展開
+        run: python3 tools/package_macos_release.py prepare --directory "$RUNNER_TEMP/ptranslate-release" --archive "$RUNNER_TEMP/release-input/release-app.zip" --tag "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - name: アプリへ署名して鍵を削除
+        run: python3 tools/macos_signing.py sign --directory "$RUNNER_TEMP/ptranslate-signing" --app "$RUNNER_TEMP/ptranslate-release/PTranslate Desk.app"
         env:
           MACOS_SIGNING_CERTIFICATE: ${{ secrets.MACOS_SIGNING_CERTIFICATE }}
           MACOS_SIGNING_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
-      - name: gitタグから配布バージョンを取得
-        run: python3 tools/check_release_version.py --tag "$RELEASE_TAG" --write-config desktop/src-tauri/gen/release-version.json
+      - name: dmgと更新アーカイブを作成
+        run: python3 tools/package_macos_release.py package --directory "$RUNNER_TEMP/ptranslate-release" --tag "$RELEASE_TAG"
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-      - name: 更新署名用の秘密を確認
-        shell: bash
+      - name: 更新アーカイブだけに署名
+        run: python3 tools/package_macos_release.py sign-update --directory "$RUNNER_TEMP/ptranslate-release" --tag "$RELEASE_TAG"
         env:
+          RELEASE_TAG: ${{ github.ref_name }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" || -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
-            echo "::error::更新署名用のActions secretsを設定してください"
-            exit 1
-          fi
-      - name: universal dmgと署名付き更新ファイルを下書きに保存
-        uses: tauri-apps/tauri-action@v1
+      - name: 更新manifestを検査
+        run: python3 tools/package_macos_release.py manifest --directory "$RUNNER_TEMP/ptranslate-release" --tag "$RELEASE_TAG"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: desktop
-          tagName: ${{ github.ref_name }}
-          releaseName: PTranslate Desk ${{ github.ref_name }}
-          releaseBody: |
-            macOS 13以降向けのuniversal版です。Apple SiliconとIntelの両方で使えます。
-
-            AppleのDeveloper ID署名・公証は未対応です。起動がブロックされた場合は、
-            「システム設定 → プライバシーとセキュリティ → このまま開く」を選んでください。
-
-            dmgを開き、PTranslate Deskをアプリケーションフォルダに入れてください。
-            アプリは更新をまたいで同じ自己署名証明書を使います。
-            旧版からこの署名へ切り替える最初の1回は、アクセシビリティの許可を再登録してください。
-            更新用ファイルはTauriの更新署名で検証します。AppleのDeveloper ID署名・公証は未対応です。
-          releaseDraft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          args: --target universal-apple-darwin --bundles app,dmg --config src-tauri/gen/release-version.json
-          uploadUpdaterJson: true
-          uploadUpdaterSignatures: true
-      - name: アプリの署名と固定の識別条件を検証
-        run: python3 tools/macos_signing.py verify --app 'desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/PTranslate Desk.app'
-      - name: 更新manifestの両アーキテクチャを確認
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir "$RUNNER_TEMP/ptranslate-manifest"
-          python3 tools/check_release_version.py --tag "$RELEASE_TAG" --manifest "$RUNNER_TEMP/ptranslate-manifest/latest.json"
-
-      - name: 検証済みのReleaseを公開
-        run: gh release edit "$RELEASE_TAG" --draft=false
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
-      - name: 署名用キーチェーンを削除
+      - name: 署名用一時ファイルを削除
         if: always()
         run: python3 tools/macos_signing.py cleanup --directory "$RUNNER_TEMP/ptranslate-signing"
+      - name: 検証済みのReleaseを公開
+        run: |
+          args=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --verify-tag --draft --title "PTranslate Desk $RELEASE_TAG" --notes-file docs/RELEASE_NOTES.md "${args[@]}" "$RUNNER_TEMP/ptranslate-release/output/"*
+          gh release edit "$RELEASE_TAG" --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
 
   image:
     needs: server
@@ -178,9 +207,11 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/metadata-action@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}/server
@@ -189,13 +220,13 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
       - if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       # PR と main ではビルドだけ。v* のタグで GHCR に出す
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}

@@ -25,7 +25,9 @@ HEADへタグを付けた状態で `npm run build:release` を使います。更
 `python3` とgitを利用できる環境が必要です。
 
 `main` とPRではuniversalの `.app` をzipにまとめ、Actionsの成果物として保存します。
-タグでは、試験とサーバーイメージの公開が成功してから `desktop-release` がReleaseを作成します。
+タグでは、試験とサーバーイメージの公開が成功してから `desktop-release-build` が秘密鍵なしで配布用アプリをビルドします。
+別の新しいランナーの `desktop-release` が署名・パッケージ作成・公開を担当します。
+両ジョブでタグのコミットがmainに含まれることを確認します。
 `-beta.1` などを含むタグはGitHubのprereleaseとして公開し、通常の更新対象にはしません。
 
 ## Release の内容
@@ -42,14 +44,18 @@ Release作成後にも `latest.json` のバージョン、HTTPS、署名、両�
 ## 更新署名の鍵
 
 更新の署名はAppleのDeveloper ID署名とは別です。公開鍵を `desktop/src-tauri/tauri.conf.json` の
-`plugins.updater.pubkey` に置き、秘密鍵とパスワードはリポジトリのActions secretsで管理します。
+`plugins.updater.pubkey` に置き、秘密鍵とパスワードは `release-signing` EnvironmentのActions secretsで管理します。
+リポジトリSecretsには残しません。
 
 | secret | 内容 |
 | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY` | `tauri signer generate` で作った、暗号化された秘密鍵の内容 |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 秘密鍵のパスワード |
 
-秘密を使うのはタグ用のReleaseビルドだけです。PRやmainの成果物ビルドには渡しません。
+秘密を使うのは、承認を受けたタグ用の署名ジョブだけです。ビルドジョブには渡しません。
+署名ジョブは共有キャッシュを復元せず、Cargo・アプリ・ビルドフックを実行しません。
+npmはロックファイルの整合性を検証し、`--ignore-scripts` で署名用CLIだけを準備します。
+更新署名はCLIの `signer sign --app-version` を直接呼び、秘密はこのステップだけに渡します。
 秘密鍵をファイル・ログ・コミット・Actionsの成果物に入れないでください。
 既存の鍵を失うと、既に配ったアプリが新しい鍵の更新を受け取れなくなります。
 鍵の変更は、既存の公開鍵を持つアプリからの移行手順を用意して行います。
@@ -85,12 +91,16 @@ GPG秘密鍵はCIへ渡しません。ローカルのGPG暗号化バックアッ
 
 `tools/macos_signing.py import` は一時キーチェーンへ秘密鍵を読み込み、固定した公開証明書との一致を確認します。
 証明書の指紋を明示して署名し、ビルド用・利用者のMacのどちらもOSの信頼設定は変更しません。
-`cleanup` を `if: always()` で実行し、一時キーチェーンを削除して検索対象を元へ戻します。
+CIの `sign` は鍵の書き出しを禁止してインポートし、OSのcodesignだけで署名します。
+成功・失敗のどちらでもp12と一時キーチェーンを削除し、検索対象を元へ戻します。
+`cleanup` も `if: always()` で実行して、秘密を置いた一時ディレクトリごと削除します。
 通常のローカルビルドとPR/mainの成果物はアドホック署名のままで、配布用の秘密鍵を使いません。
 ローカルで配布ビルドをする場合は、同じ証明書を読み込んだキーチェーンと `APPLE_SIGNING_IDENTITY` が必要です。
 
 CIでは異なる2つの実行ファイルを同じ証明書で署名して識別条件の一致を試験し、アドホック署名への置き換えを拒否することも確認します。
-配布ビルド後はアプリ全体の署名と識別条件、更新manifestを検証してから下書きのReleaseを公開します。
+配布zipは展開前にパス・リンク・特殊ファイル・サイズを検査します。
+アプリ全体の署名と識別条件、更新manifest、公開するファイル一覧を検証してから下書きのReleaseを公開します。
+dmgはOSのhdiutilで作成し、更新用tar.gzの最上位には従来と同じ `.app` を置きます。
 
 自己署名はAppleによる開発元の確認や公証には対応しません。
 Releaseの説明に次の案内を入れます。
@@ -105,3 +115,35 @@ Releaseの説明に次の案内を入れます。
 
 Developer IDを用意した段階で、証明書・パスワード・公証用の資格情報をActions secretsに置き、
 ReleaseビルドのTauri署名・公証を設定します。対応後にReleaseの案内も更新します。
+
+## CIの署名鍵の保護と移行
+
+`release-signing` Environmentは、`v*` タグだけを許可し、リポジトリ所有者の承認を必須にします。
+管理者の保護ルール迂回も無効にします。所有者1名で運用できるよう、実行者本人による承認は許可します。
+承認前にタグのコミット、ワークフロー、署名用スクリプトとnpm依存の変更を確認してください。
+タグの更新・削除はルールセットで禁止します。外部Actionは完全なコミットSHAに固定します。
+
+既存の4つのSecretsはGitHubから読み戻せません。保管している**同じ鍵**を手元から登録します。
+新しいワークフローをmainへ反映した後、次のコマンドを自分の端末で実行してください。
+パスワードは非表示のプロンプトで入力し、コマンド引数・環境変数・会話へ貼り付けません。
+`gh` の認証済みアカウントにSecretsの管理権限が必要です。
+
+```sh
+python3 tools/register_signing_secrets.py \
+  --certificate /path/to/existing-certificate.p12 \
+  --updater-key /path/to/existing-updater.key
+```
+
+このスクリプトは4つの値を標準入力経由でEnvironmentへ登録し、全件の成功と名前を確認してから
+リポジトリSecretsの旧4件を削除します。途中で失敗した場合は再実行できます。
+旧Secretsが残っている間は、他のワークフローから利用できるリスクが残ります。
+移行が完了するまで新しいリリースタグをpushしないでください。
+登録を確認するには、値を表示しない次の一覧を使います。
+
+```sh
+gh secret list --repo negineri/ptranslate-desk --env release-signing
+gh secret list --repo negineri/ptranslate-desk
+```
+
+GitHubホストランナーや署名用CLI自体の侵害までは、この分離で防げません。
+署名ジョブで追加のツール・Action・キャッシュ・アプリのコードを実行しないでください。

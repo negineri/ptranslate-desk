@@ -49,6 +49,15 @@ def release_version(root: Path, tag: str = "") -> str:
             raise ValueError("配布にはHEADに付いた v* のgitタグが必要です") from error
 
     tag = tag or git("describe", "--tags", "--exact-match", "--match", "v[0-9]*", "HEAD")
+    version = version_from_tag(tag)
+    if git("rev-parse", f"refs/tags/{tag}^{{commit}}") != git("rev-parse", "HEAD"):
+        raise ValueError("配布タグがHEADを指していません")
+    if git("status", "--porcelain", "--untracked-files=no"):
+        raise ValueError("配布する前に追跡ファイルの変更をコミットしてください")
+    return version
+
+
+def version_from_tag(tag: str) -> str:
     number = r"(?:0|[1-9][0-9]*)"
     identifier = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
     if not re.fullmatch(
@@ -56,10 +65,6 @@ def release_version(root: Path, tag: str = "") -> str:
         tag,
     ):
         raise ValueError("タグは v1.2.3 や v1.2.3-beta.1 の形式にしてください")
-    if git("rev-parse", f"refs/tags/{tag}^{{commit}}") != git("rev-parse", "HEAD"):
-        raise ValueError("配布タグがHEADを指していません")
-    if git("status", "--porcelain", "--untracked-files=no"):
-        raise ValueError("配布する前に追跡ファイルの変更をコミットしてください")
     return tag[1:]
 
 
