@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ビルドコードを実行せず、macOSの配布ファイルを作成する。"""
+"""ビルドコードを実行せず、macOSとWindowsの配布ファイルを作成する。"""
 
 import argparse
 import base64
@@ -12,6 +12,7 @@ import plistlib
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -116,12 +117,54 @@ def package(directory, version):
     )
 
 
-def sign_update(directory, version):
+def windows_filename(version):
+    safe_version = re.sub(r"[^A-Za-z0-9_.-]", ".", version)
+    return f"PTranslate.Desk_{safe_version}_x64-setup.exe"
+
+
+def prepare_windows(directory, source, version):
+    # インストーラーは署名ジョブでは実行しない。単一のGUI実行ファイルだけを受け取る。
+    files = list(source.iterdir())
+    if len(files) != 1:
+        raise ValueError("Windows配布物はインストーラー1個にしてください")
+    installer = files[0]
+    if (
+        installer.is_symlink()
+        or not installer.is_file()
+        or installer.name
+        not in (f"PTranslate Desk_{version}_x64-setup.exe", windows_filename(version))
+        or not 128 <= installer.stat().st_size <= 512 * 1024**2
+    ):
+        raise ValueError("Windowsインストーラーの名前・形式・サイズが不正です")
+    with installer.open("rb") as stream:
+        header = stream.read(64)
+        offset = struct.unpack_from("<I", header, 60)[0]
+        if header[:2] != b"MZ" or offset > installer.stat().st_size - 94:
+            raise ValueError("Windows実行ファイルではありません")
+        stream.seek(offset)
+        pe = stream.read(94)
+    if (
+        pe[:4] != b"PE\0\0"
+        or struct.unpack_from("<H", pe, 4)[0] not in (0x14C, 0x8664)
+        or struct.unpack_from("<H", pe, 24)[0] not in (0x10B, 0x20B)
+        or struct.unpack_from("<H", pe, 92)[0] != 2
+    ):
+        raise ValueError("Windows GUIインストーラーではありません")
+    output = directory / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    destination = output / windows_filename(version)
+    if destination.exists():
+        raise ValueError("Windows配布物が既にあります")
+    shutil.copyfile(installer, destination)
+
+
+def sign_update(directory, version, windows=False):
     if not os.environ.get("TAURI_SIGNING_PRIVATE_KEY") or not os.environ.get(
         "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
     ):
         raise ValueError("更新署名用のActions secretsを設定してください")
-    archive = directory / "output" / f"{artifact_stem(version)}.app.tar.gz"
+    filename = windows_filename(version) if windows else f"{artifact_stem(version)}.app.tar.gz"
+    archive = directory / "output" / filename
     # アプリのpackage.jsonのscriptsやビルドフックを経由しない。
     run(
         "node",
@@ -185,7 +228,7 @@ def verify_update_signature(archive, signature, public_key, version):
         raise ValueError("更新データ・版の署名がアプリの公開鍵と一致しません") from None
 
 
-def manifest(directory, tag):
+def manifest(directory, tag, require_windows=False):
     version = version_from_tag(tag)
     output = directory / "output"
     filename = f"{artifact_stem(version)}.app.tar.gz"
@@ -208,37 +251,64 @@ def manifest(directory, tag):
         "pub_date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "platforms": {name: entry for name in ("darwin-aarch64", "darwin-x86_64")},
     }
-    check_manifest(value, version)
-    (output / "latest.json").write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
     expected = {
         filename,
         filename + ".sig",
         "latest.json",
         f"{artifact_stem(version)}.dmg",
     }
+    if require_windows:
+        windows = windows_filename(version)
+        windows_signature = (output / (windows + ".sig")).read_text(encoding="utf-8").strip()
+        verify_update_signature(
+            output / windows, windows_signature, config["plugins"]["updater"]["pubkey"], version
+        )
+        value["platforms"]["windows-x86_64"] = {
+            "signature": windows_signature,
+            "url": f"https://github.com/negineri/ptranslate-desk/releases/download/{quote(tag, safe='')}/{quote(windows, safe='')}",
+        }
+        expected.update((windows, windows + ".sig"))
+    check_manifest(value, version, require_windows=require_windows)
+    (output / "latest.json").write_text(
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     if {p.name for p in output.iterdir()} != expected:
         raise ValueError("公開するファイルの一覧が一致しません")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["prepare", "package", "sign-update", "manifest"])
+    parser.add_argument(
+        "action",
+        choices=[
+            "prepare",
+            "prepare-windows",
+            "package",
+            "sign-update",
+            "sign-windows",
+            "manifest",
+        ],
+    )
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--archive", type=Path)
+    parser.add_argument("--require-windows", action="store_true")
     args = parser.parse_args()
     try:
         version = version_from_tag(args.tag)
-        if args.action == "prepare":
+        if args.action in ("prepare", "prepare-windows"):
             if not args.archive:
                 parser.error("--archive が必要です")
-            prepare(args.directory, args.archive, version)
+            if args.action == "prepare-windows":
+                prepare_windows(args.directory, args.archive, version)
+            else:
+                prepare(args.directory, args.archive, version)
         elif args.action == "package":
             package(args.directory, version)
-        elif args.action == "sign-update":
-            sign_update(args.directory, version)
+        elif args.action in ("sign-update", "sign-windows"):
+            sign_update(args.directory, version, windows=args.action == "sign-windows")
         else:
-            manifest(args.directory, args.tag)
+            manifest(args.directory, args.tag, require_windows=args.require_windows)
     except (ValueError, OSError, subprocess.TimeoutExpired, zipfile.BadZipFile):
         parser.exit(1, "配布処理に失敗しました（秘密の漏出を避けるため詳細は表示しません）\n")
 

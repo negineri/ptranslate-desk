@@ -35,7 +35,9 @@ npm run build
 Windows 用の設定は Tauri が `tauri.windows.conf.json` から自動で読み込みます。
 コード署名は未設定です。CI でも Windows の単体試験、モックでの主窓・ポップアップ試験、
 インストーラーの作成を行い、成果物 `windows-installer` に保存します。
-Windows の GitHub Releases への配布と更新用マニフェストへの登録は未対応です。
+タグの配布ビルドは最適化したインストーラーを作成し、GitHub Releasesと共通の更新マニフェストへ登録します。
+コード署名は付けませんが、更新ファイルにはTauriの更新署名を付けます。
+署名ジョブはWindowsのインストーラーを実行しません。詳細は[配布手順](../docs/RELEASING.md)を参照してください。
 
 ## サーバーに接続してログインする
 

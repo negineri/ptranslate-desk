@@ -6,7 +6,7 @@ import { run } from "@tauri-apps/cli";
 process.chdir(fileURLToPath(new URL(".", import.meta.url)));
 const args = process.argv.slice(2);
 if (!args.includes("--help") && !args.includes("-h")) {
-  const result = spawnSync("python3", ["../tools/check_release_version.py", "--write-config", "src-tauri/gen/release-version.json"], { stdio: "inherit" });
+  const result = spawnSync(process.platform === "win32" ? "python" : "python3", ["-X", "utf8", "../tools/check_release_version.py", "--write-config", "src-tauri/gen/release-version.json"], { stdio: "inherit" });
   if (result.error) console.error(result.error.message);
   if (result.status !== 0) process.exit(result.status ?? 1);
   args.push("--config", "src-tauri/gen/release-version.json");

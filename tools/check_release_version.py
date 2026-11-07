@@ -75,14 +75,18 @@ def write_release_config(root: Path, output: Path, version: str) -> None:
     output.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
 
 
-def check_manifest(manifest: dict, version: str) -> None:
+def check_manifest(manifest: dict, version: str, require_windows: bool = False) -> None:
     if manifest.get("version") != version:
         raise ValueError("latest.json の version がアプリと一致しません")
     platforms = manifest.get("platforms", {})
     entries = [platforms.get(name) for name in ("darwin-aarch64", "darwin-x86_64")]
     if not all(isinstance(entry, dict) for entry in entries):
         raise ValueError("latest.json に Apple Silicon と Intel の両方が必要です")
-    for entry in entries:
+    if require_windows and not isinstance(platforms.get("windows-x86_64"), dict):
+        raise ValueError("latest.json に Windows x64 が必要です")
+    for entry in platforms.values():
+        if not isinstance(entry, dict):
+            raise ValueError("更新情報の形式が不正です")
         if urlsplit(entry.get("url", "")).scheme != "https":
             raise ValueError("更新の URL は HTTPS が必要です")
         signature = entry.get("signature", "").strip()
