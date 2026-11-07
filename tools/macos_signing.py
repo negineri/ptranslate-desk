@@ -20,11 +20,20 @@ IDENTIFIER = "com.witenp.ptranslate-desk"
 def run(*args, env=None):
     print(f"実行: {args[0]} {args[1] if len(args) > 1 else ''}", flush=True)
     try:
-        result = subprocess.run(args, env=env, text=True, capture_output=True, timeout=60)
+        child_env = dict(os.environ if env is None else env)
+        for name in (
+            "MACOS_SIGNING_CERTIFICATE",
+            "MACOS_SIGNING_PASSWORD",
+            "TAURI_SIGNING_PRIVATE_KEY",
+            "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+        ):
+            child_env.pop(name, None)
+        result = subprocess.run(args, env=child_env, text=True, capture_output=True, timeout=60)
     except subprocess.TimeoutExpired:
         raise ValueError(f"{args[0]} の実行が60秒を超えました") from None
     if result.returncode:
-        raise ValueError(f"{args[0]}: {result.stderr.strip()}")
+        # ツールの診断文にも秘密が含まれ得る。引数・stdout・stderrは出さない。
+        raise ValueError(f"{args[0]} の実行に失敗しました")
     return result.stdout
 
 
@@ -94,6 +103,14 @@ def create(directory):
 
 
 def import_identity(directory, certificate, data, password):
+    archive = directory / "certificate.p12"
+    try:
+        return _import_identity(directory, certificate, data, password)
+    finally:
+        archive.unlink(missing_ok=True)
+
+
+def _import_identity(directory, certificate, data, password):
     keychain = directory / "signing.keychain-db"
     state = directory / "keychains.json"
     original = shlex.split(run("security", "list-keychains", "-d", "user"))
@@ -114,6 +131,7 @@ def import_identity(directory, certificate, data, password):
         str(keychain),
         "-P",
         password,
+        "-x",  # 秘密鍵の書き出しを許可しない。
         "-T",
         "/usr/bin/codesign",
     )
@@ -137,14 +155,36 @@ def import_identity(directory, certificate, data, password):
 
 def cleanup(directory, certificate):
     state = directory / "keychains.json"
-    if not state.exists():
-        return
     try:
-        run("security", "list-keychains", "-d", "user", "-s", *json.loads(state.read_text()))
+        if state.exists():
+            run("security", "list-keychains", "-d", "user", "-s", *json.loads(state.read_text()))
     finally:
-        keychain = directory / "signing.keychain-db"
-        if keychain.exists():
-            run("security", "delete-keychain", str(keychain))
+        try:
+            keychain = directory / "signing.keychain-db"
+            if keychain.exists():
+                run("security", "delete-keychain", str(keychain))
+        finally:
+            if directory.exists():
+                shutil.rmtree(directory)
+
+
+def sign(app, directory):
+    if not os.environ.get("MACOS_SIGNING_CERTIFICATE") or not os.environ.get(
+        "MACOS_SIGNING_PASSWORD"
+    ):
+        raise ValueError("コード署名用のActions secretsを設定してください")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+    try:
+        identity = import_identity(
+            directory,
+            PUBLIC / "certificate.pem",
+            base64.b64decode(os.environ["MACOS_SIGNING_CERTIFICATE"], validate=True),
+            os.environ["MACOS_SIGNING_PASSWORD"],
+        )
+        run("codesign", "--force", "--sign", identity, "--timestamp=none", str(app))
+        verify(app, PUBLIC / "certificate.pem")
+    finally:
+        cleanup(directory, PUBLIC / "certificate.pem")
 
 
 def verify(app, certificate, identifier=IDENTIFIER):
@@ -174,6 +214,23 @@ def self_test():
                 (directory / "certificate.p12").read_bytes(),
                 (directory / "password.txt").read_text(),
             )
+            try:
+                run(
+                    "security",
+                    "export",
+                    "-k",
+                    str(directory / "signing.keychain-db"),
+                    "-t",
+                    "privKeys",
+                    "-f",
+                    "openssl",
+                    "-P",
+                    secrets.token_hex(32),
+                )
+            except ValueError:
+                pass
+            else:
+                raise ValueError("署名用の秘密鍵を書き出せてしまいました")
             requirements = []
             for source in ("true", "false"):
                 target = directory / source
@@ -198,14 +255,14 @@ def self_test():
                 pass
             else:
                 raise ValueError("アドホック署名への置き換えを検出できませんでした")
-            print("異なるビルドの識別条件一致・異なる署名の拒否: PASS")
+            print("秘密鍵の書き出し拒否・異なるビルドの識別条件一致・異なる署名の拒否: PASS")
         finally:
             cleanup(directory, certificate)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["import", "cleanup", "verify", "self-test"])
+    parser.add_argument("action", choices=["import", "sign", "cleanup", "verify", "self-test"])
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--app", type=Path)
     args = parser.parse_args()
@@ -219,6 +276,10 @@ def main():
             print(verify(args.app, PUBLIC / "certificate.pem"))
         elif not directory:
             parser.error("--directory が必要です")
+        elif args.action == "sign":
+            if not args.app:
+                parser.error("--app が必要です")
+            sign(args.app, directory)
         elif args.action == "import":
             if not os.environ.get("MACOS_SIGNING_CERTIFICATE") or not os.environ.get(
                 "MACOS_SIGNING_PASSWORD"
