@@ -159,6 +159,10 @@ impl Auth {
         self.busy.load(Ordering::SeqCst)
     }
 
+    fn is_configured(&self) -> bool {
+        !self.server.is_empty() && !self.discovery_url.is_empty()
+    }
+
     pub fn begin_connection_change(&self) -> Result<ConnectionChange<'_>, String> {
         if self.mock {
             return Err("モック実行中は接続先を変更できません".into());
@@ -294,7 +298,7 @@ impl Auth {
             return Ok(());
         }
         credentials.initialized = true;
-        if self.mock || self.vault.load()?.is_none() {
+        if self.mock || !self.is_configured() || self.vault.load()?.is_none() {
             return Ok(());
         }
         if let Err(error) = self.refresh_locked(&mut credentials).await {
@@ -312,6 +316,11 @@ impl Auth {
         &self,
         open: impl FnOnce(&Url) -> Result<(), String>,
     ) -> Result<(), String> {
+        if !self.mock && !self.is_configured() {
+            return Err(
+                "設定でサーバーURLとOIDC discovery URLを入力し、保存して再起動してください".into(),
+            );
+        }
         if self.busy.swap(true, Ordering::SeqCst) {
             return Err("ログインを待っています".into());
         }
@@ -397,7 +406,7 @@ impl Auth {
     pub async fn logout(&self) -> Result<(), String> {
         self.cancel_login();
         self.authenticated.store(false, Ordering::SeqCst);
-        if self.mock {
+        if self.mock || !self.is_configured() {
             return Ok(());
         }
         let mut credentials = self.credentials.lock().await;

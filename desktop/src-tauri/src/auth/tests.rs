@@ -313,6 +313,28 @@ fn callback_rejects_wrong_state_paths_and_duplicates() {
 }
 
 #[tokio::test]
+async fn unconfigured_connection_does_not_use_credentials_or_open_a_browser() {
+    let mut auth = Auth::new(Client::new());
+    auth.mock = false;
+    let vault = Arc::new(MemoryVault::default());
+    vault.save("dummy-refresh").unwrap();
+    auth.vault = vault.clone();
+    auth.restore().await.unwrap();
+    assert!(!auth.is_authenticated());
+    let error = auth
+        .login_with(|_| panic!("接続先未設定でブラウザを開いてはいけません"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("設定"));
+    assert!(!auth.is_busy());
+    auth.logout().await.unwrap();
+    assert_eq!(
+        vault.load().unwrap().as_deref().map(|v| v.as_str()),
+        Some("dummy-refresh")
+    );
+}
+
+#[tokio::test]
 async fn login_restore_rotation_and_revoke_use_discovery_and_secure_storage() {
     let fixture = Fixture::new().await;
     let auth = fixture.auth();

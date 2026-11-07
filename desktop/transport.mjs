@@ -103,7 +103,8 @@ loginButton.addEventListener("click", async () => {
 await listen("session-changed", () => { void restoreSession().catch(showError); });
 await listen("login-started", () => { loginButton.disabled = true; cancelLogin.hidden = false; });
 await invoke("restore_session").catch(showError);
-await restoreSession().catch(showError);
+const initialSession = await restoreSession().catch(showError);
+if (initialSession) showPage(!initialSession.logged_in);
 
 export async function desktopFetch(...args) { await login; return request(...args); }
 
@@ -127,7 +128,7 @@ settingsPanel.innerHTML = `<summary>デスクトップの設定</summary>
   <p class="hint" id="shortcut-diagnostics"></p>
   <button id="accessibility" ${isMac ? "" : "hidden"}>アクセシビリティの設定を開く</button>
   <p class="hint">${isMac ? 'macOS のシステム設定で「PTranslate Desk」を許可してください。許可は数秒以内に反映されます。メインウィンドウを閉じても常駐します。終了するにはメニューバーの「終了」か ⌘Q を使います。' : 'メインウィンドウを閉じても通知領域に常駐します。終了するにはトレイの「終了」を使います。組み合わせのショートカットは、キーを離すと選んだ文をコピーします。管理者権限で動くアプリからは取得できない場合があります。'}</p>`;
-settingsPanel.open = true;
+settingsPanel.open = Boolean(initialSession?.logged_in);
 document.getElementById("connection-settings").after(settingsPanel);
 const shortcut = document.getElementById("shortcut");
 const shortcutStatus = document.getElementById("shortcut-status");

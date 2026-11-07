@@ -67,6 +67,8 @@ export function showPage(settings = false) {
     button.tabIndex = selected ? 0 : -1;
   }
 }
+// 認証状態の復元中も、接続先を確認できる設定タブを初期表示する。
+showPage(true);
 buttons.forEach((button, index) => {
   button.addEventListener("click", () => showPage(index === 1));
   button.addEventListener("keydown", (event) => {
@@ -80,14 +82,15 @@ buttons.forEach((button, index) => {
 const style = document.createElement("style");
 style.textContent = `
   [hidden] { display: none !important; }
-  #app-header { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
-  #app-header h1 { margin: 0; font-size: 1.4rem; white-space: nowrap; }
+  main { padding-top: 16px; padding-bottom: 16px; }
+  #app-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  #app-header h1 { margin: 0; font-size: 1.25rem; white-space: nowrap; }
   #app-header .sub { flex: 1; margin: 0; font-size: .85rem; }
   #header-account { display: flex; align-items: center; gap: 8px; margin-left: auto; }
   #app-header details { position: relative; margin: 0; }
   #app-header summary { list-style: none; cursor: pointer; }
   #app-header summary::-webkit-details-marker { display: none; }
-  #account-menu > summary { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 7px 14px; background: var(--panel); }
+  #account-menu > summary { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; background: var(--panel); }
   #account-menu > summary::after { content: "▾"; font-size: .75rem; color: var(--muted); }
   #who { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .header-popover { position: absolute; top: calc(100% + 10px); z-index: 10; padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 28px #0003; }
@@ -105,13 +108,15 @@ style.textContent = `
     #update-menu .header-popover { left: 0; right: auto; }
   }
 
-  .page-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin: 24px 0 20px; }
-  .page-tabs button { padding: 8px 4px 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); }
+  .page-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin: 16px 0 12px; }
+  .page-tabs button { padding: 6px 4px 8px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); }
   .page-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
   .settings-heading h2 { margin: 0; font-size: 1.2rem; }
   .settings-heading p { margin: 4px 0 20px; }
   #settings-page { max-width: 760px; margin: 0 auto; }
-  #settings-page > details, #settings-page > aside { padding: 20px; margin: 0 0 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  #translation-page section { padding: 12px; margin-bottom: 12px; }
+  #translation-page > .hint { margin: 8px 0 0; }
+  #settings-page > details, #settings-page > aside { padding: 16px; margin: 0 0 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
   #settings-page summary { color: var(--text); font-weight: 600; }
   #desktop-settings > label { display: block; margin: 16px 0 8px; }
   #custom-shortcut { margin-top: 12px; }

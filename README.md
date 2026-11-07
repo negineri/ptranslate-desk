@@ -76,7 +76,7 @@ Windowsではインストール時にアプリを終了し、完了後に起動�
 | ------------------ | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | サーバーURL        | `https://ptranslate.example.ts.net`（パスなし）                            | `https://translate.example.com`（パスなし）                                                  |
 | OIDC discovery URL | `https://ptranslate.example.ts.net:8443/.well-known/openid-configuration` | `https://auth.example.com/application/o/translator-desktop/.well-known/openid-configuration` |
-| client ID          | `ptranslate-desktop`                                                       | `translator-desktop`                                                                         |
+| client ID          | `translator-desktop`                                                       | `translator-desktop`                                                                         |
 
 client IDは公開クライアント（client secretなし、PKCE）のものです。
 
