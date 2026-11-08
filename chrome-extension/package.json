@@ -1,0 +1,7 @@
+{
+  "name": "ptranslate-chrome-extension-tests",
+  "private": true,
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}

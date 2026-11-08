@@ -44,6 +44,8 @@ jobs:
       - run: python -m unittest discover -s server/tests -v
       - run: node --test server/tests/test_translation.mjs
       - run: node chrome-extension/build.mjs
+      - run: npm ci --ignore-scripts
+        working-directory: chrome-extension
       - run: node --test chrome-extension/tests/*.test.mjs
 
   desktop-windows:
