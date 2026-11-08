@@ -1,6 +1,19 @@
 //! 初期設定用のGPU並列数計測。利用者の文章は使わない。
 use super::*;
 
+const SHORT_TEXTS: [&str; 2] = [
+    "The library opens at nine in the morning. Please return your books on time.",
+    "This application translates text on your computer while keeping the original links and formatting.",
+];
+
+fn adjusted_parallel(measured: usize, long_text: bool) -> usize {
+    if long_text {
+        measured
+    } else {
+        (measured * 2 / 3).max(1)
+    }
+}
+
 const TEXTS: [&str; 2] = [
     "The city council approved a plan to improve public transport. The new routes will connect residential areas with schools, hospitals, and the central railway station. Construction is expected to begin next spring, although residents have asked officials to provide more detailed information about the cost and schedule.",
     "The research team published a report on energy use in public buildings. They compared schools, libraries, and hospitals over several years, taking local weather conditions into account. Better insulation reduced heating costs, while regular maintenance helped keep equipment working efficiently. The report recommends gradual improvements and careful monitoring rather than replacing every system at once. Local authorities will review the findings before deciding how to distribute next year's budget. Residents can attend a public meeting to ask questions and share their views.",
@@ -38,8 +51,10 @@ async fn translate(
     client: &reqwest::Client,
     endpoint: &Endpoint,
     index: usize,
+    long_text: bool,
 ) -> Result<(), String> {
-    let text = format!("{} Reference number: {index}.", TEXTS[index % TEXTS.len()]);
+    let texts = if long_text { &TEXTS } else { &SHORT_TEXTS };
+    let text = format!("{} Reference number: {index}.", texts[index % texts.len()]);
     let (prompt, limit) = prompt(&json!({"text":text,"target_lang":"ja"}))?;
     let response = client
         .post(format!("{}/v1/completions", endpoint.url))
@@ -68,6 +83,7 @@ async fn batch(
     client: &reqwest::Client,
     endpoint: &Endpoint,
     parallel: usize,
+    long_text: bool,
 ) -> Result<f64, String> {
     // どの候補も同じ96件を処理する。各ワーカーに均等に分け、未送信分の待ちも含む。
     const REQUESTS: usize = 96;
@@ -78,7 +94,7 @@ async fn batch(
         let endpoint = endpoint.clone();
         workers.spawn(async move {
             for index in (worker..REQUESTS).step_by(parallel) {
-                translate(&client, &endpoint, index).await?;
+                translate(&client, &endpoint, index, long_text).await?;
             }
             Ok::<_, String>(())
         });
@@ -112,13 +128,13 @@ async fn sweep(
         // 起動直後の初回推論を計測から除外。準備完了後の異常終了もここで検出する。
         tokio::time::timeout(
             Duration::from_secs(15),
-            translate(&trial.client, &endpoint, 1000),
+            translate(&trial.client, &endpoint, 1000, measurement.long_text),
         )
         .await
         .map_err(|_| "並列計測の準備がタイムアウトしました")??;
         let speed = tokio::time::timeout(Duration::from_secs(60), async {
-            let first = batch(&trial.client, &endpoint, parallel).await?;
-            let second = batch(&trial.client, &endpoint, parallel).await?;
+            let first = batch(&trial.client, &endpoint, parallel, measurement.long_text).await?;
+            let second = batch(&trial.client, &endpoint, parallel, measurement.long_text).await?;
             Ok::<_, String>(2. / (1. / first + 1. / second))
         })
         .await
@@ -168,7 +184,9 @@ pub async fn measure(
         return Err("計測を中止しました".into());
     }
     if let Some(best) = recommendation(&samples) {
-        measurement.recommended_parallel = Some(best.parallel);
+        measurement.measured_parallel = Some(best.parallel);
+        measurement.recommended_parallel =
+            Some(adjusted_parallel(best.parallel, measurement.long_text));
         measurement.bulk_per_second = Some(best.requests_per_second);
     }
     measurement.bulk_error = result.err();
@@ -179,6 +197,13 @@ pub async fn measure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn short_recommendation_is_two_thirds_rounded_down_and_long_is_unchanged() {
+        for (measured, expected) in [(1, 1), (2, 1), (4, 2), (24, 16), (32, 21), (64, 42)] {
+            assert_eq!(adjusted_parallel(measured, false), expected);
+            assert_eq!(adjusted_parallel(measured, true), measured);
+        }
+    }
     #[test]
     fn fastest_successful_gpu_is_measured_even_if_cpu_is_faster() {
         let results = [
@@ -231,7 +256,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        assert!(translate(&reqwest::Client::new(), &endpoint, 0)
+        assert!(translate(&reqwest::Client::new(), &endpoint, 0, false)
             .await
             .is_err());
         server.await.unwrap();
@@ -259,65 +284,78 @@ mod tests {
     #[tokio::test]
     async fn batch_runs_real_concurrent_requests_against_a_local_mock() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = Endpoint {
-            url: format!("http://{}", listener.local_addr().unwrap()),
-            key: "test".into(),
-        };
-        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (a, p, c) = (active.clone(), peak.clone(), count.clone());
-        let server = tokio::spawn(async move {
-            let mut connections = tokio::task::JoinSet::new();
-            for _ in 0..96 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let (a, p, c) = (a.clone(), p.clone(), c.clone());
-                connections.spawn(async move {
-                    let mut data = Vec::new();
-                    let mut buffer = [0; 4096];
-                    loop {
-                        let n = stream.read(&mut buffer).await.unwrap();
-                        assert!(n > 0);
-                        data.extend_from_slice(&buffer[..n]);
-                        if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
-                            let headers = String::from_utf8_lossy(&data[..end]);
-                            let length: usize = headers
-                                .lines()
-                                .find_map(|l| {
-                                    l.to_ascii_lowercase()
-                                        .strip_prefix("content-length: ")
-                                        .map(str::to_owned)
-                                })
-                                .unwrap()
-                                .parse()
-                                .unwrap();
-                            if data.len() >= end + 4 + length {
-                                break;
+        for long_text in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = Endpoint {
+                url: format!("http://{}", listener.local_addr().unwrap()),
+                key: "test".into(),
+            };
+            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (a, p, c) = (active.clone(), peak.clone(), count.clone());
+            let server = tokio::spawn(async move {
+                let mut connections = tokio::task::JoinSet::new();
+                for _ in 0..96 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let (a, p, c) = (a.clone(), p.clone(), c.clone());
+                    connections.spawn(async move {
+                        let mut data = Vec::new();
+                        let mut buffer = [0; 4096];
+                        loop {
+                            let n = stream.read(&mut buffer).await.unwrap();
+                            assert!(n > 0);
+                            data.extend_from_slice(&buffer[..n]);
+                            if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                                let headers = String::from_utf8_lossy(&data[..end]);
+                                let length: usize = headers
+                                    .lines()
+                                    .find_map(|l| {
+                                        l.to_ascii_lowercase()
+                                            .strip_prefix("content-length: ")
+                                            .map(str::to_owned)
+                                    })
+                                    .unwrap()
+                                    .parse()
+                                    .unwrap();
+                                if data.len() >= end + 4 + length {
+                                    let body: Value =
+                                        serde_json::from_slice(&data[end + 4..end + 4 + length])
+                                            .unwrap();
+                                    let prompt = body["prompt"].as_str().unwrap();
+                                    let texts = if long_text { &TEXTS } else { &SHORT_TEXTS };
+                                    assert!(texts.iter().any(|text| prompt.contains(text)));
+                                    break;
+                                }
                             }
                         }
-                    }
-                    p.fetch_max(a.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(2)).await;
-                    let body = r#"{"choices":[{"text":"訳","finish_reason":"stop"}]}"#;
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    a.fetch_sub(1, Ordering::SeqCst);
-                    stream.write_all(response.as_bytes()).await.unwrap();
-                    c.fetch_add(1, Ordering::SeqCst);
-                });
-            }
-            while let Some(result) = connections.join_next().await {
-                result.unwrap();
-            }
-        });
-        assert!(batch(&reqwest::Client::new(), &endpoint, 12).await.unwrap() > 0.);
-        server.await.unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 96);
-        assert!(peak.load(Ordering::SeqCst) > 1);
-        assert!(peak.load(Ordering::SeqCst) <= 12);
+                        p.fetch_max(a.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                        let body = r#"{"choices":[{"text":"訳","finish_reason":"stop"}]}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        a.fetch_sub(1, Ordering::SeqCst);
+                        stream.write_all(response.as_bytes()).await.unwrap();
+                        c.fetch_add(1, Ordering::SeqCst);
+                    });
+                }
+                while let Some(result) = connections.join_next().await {
+                    result.unwrap();
+                }
+            });
+            assert!(
+                batch(&reqwest::Client::new(), &endpoint, 12, long_text)
+                    .await
+                    .unwrap()
+                    > 0.
+            );
+            server.await.unwrap();
+            assert_eq!(count.load(Ordering::SeqCst), 96);
+            assert!(peak.load(Ordering::SeqCst) > 1);
+            assert!(peak.load(Ordering::SeqCst) <= 12);
+        }
     }
 }

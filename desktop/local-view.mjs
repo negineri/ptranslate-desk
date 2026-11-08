@@ -28,7 +28,7 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
     <div id="local-setup" hidden>
       <div class="setup-group">
         <h4>翻訳に使うデバイス</h4>
-        <div class="local-actions"><button id="local-measure">計測して候補を確認</button><button id="local-cancel-measure" hidden>計測を中止</button><button id="local-manual" class="link">手動で選ぶ</button></div>
+        <div class="local-actions"><button id="local-measure">計測して候補を確認</button><button id="local-measure-long">長文も調べる</button><button id="local-cancel-measure" hidden>計測を中止</button><button id="local-manual" class="link">手動で選ぶ</button></div>
         <p id="local-measure-status" class="hint" role="status"></p><ol id="local-candidates"></ol>
         <label for="local-device">使用するデバイス</label><select id="local-device"><option value="none">CPU</option></select>
       </div>
@@ -114,6 +114,7 @@ function busy() {
   $("local-save").disabled = downloading || measuring || detecting > 0 || !state?.available;
   $("local-download").disabled = downloading || measuring;
   $("local-measure").disabled = downloading || measuring || detecting > 0 || !state?.available;
+  $("local-measure-long").disabled = $("local-measure").disabled || !/^(Vulkan|MTL)\d{1,3}$/.test($("local-device").value);
   $("local-cancel-measure").hidden = !measuring;
   $("local-start").disabled = !state?.enabled || downloading || measuring || state?.loading;
   $("mode-server").disabled = downloading || measuring;
@@ -139,16 +140,16 @@ async function devices() {
   if (!options.some((o) => o.value === value)) options.push(new Option(value === "auto" ? "自動（エンジンに任せる）" : value, value));
   $("local-device").replaceChildren(...options); $("local-device").value = value;
 }
-async function measure() {
+async function measure(longText = false) {
   if (measuring || downloading || !state.available) return;
   measuring = true; busy(); $("local-candidates").replaceChildren();
-  message("local-measure-status", "デバイスと大量翻訳向けの並列数を計測します。数分かかることがあります…");
+  message("local-measure-status", longText ? "選択したGPUを長文で追加計測します…" : "短文でデバイスと並列数を計測します…");
   const progress = new Channel();
   progress.onmessage = (r) => message("local-measure-status", r.measuring_parallel
-    ? `${r.name}：${r.measuring_parallel}並列で大量翻訳を計測しています…`
+    ? `${r.name}：${r.measuring_parallel}並列で${longText ? "長文" : "短文"}を計測しています…`
     : r.milliseconds === null && !r.error ? `${r.name}を計測しています…` : `${r.name}の計測が終わりました`);
   try {
-    const results = await invoke("measure_local_devices", { progress });
+    const results = await invoke("measure_local_devices", { progress, longText, device: longText ? $("local-device").value : null });
     const fastest = results.find((r) => r.milliseconds !== null);
     for (const r of results) {
       if (![...$("local-device").options].some((o) => o.value === r.id)) $("local-device").add(new Option(r.name, r.id));
@@ -157,12 +158,14 @@ async function measure() {
       li.append(document.createTextNode(`${r.name}：${seconds}`));
       if (r.milliseconds !== null) {
         const button = document.createElement("button"); button.textContent = "選択";
-        button.onclick = () => { $("local-device").value = r.id; manual = true; };
+        button.onclick = () => { $("local-device").value = r.id; manual = true; busy(); };
         li.append(button);
       }
       if (r.recommended_parallel) {
         const result = document.createElement("p");
-        result.textContent = `大量翻訳：推奨${r.recommended_parallel}並列（約${r.bulk_per_second.toFixed(1)}件/秒）`;
+        result.textContent = r.long_text
+          ? `長文の推奨：${r.recommended_parallel}並列（約${r.bulk_per_second.toFixed(1)}件/秒）`
+          : `推奨${r.recommended_parallel}並列（短文計測${r.measured_parallel}並列の2/3、端数切り捨て・最低1）`;
         const apply = document.createElement("button"); apply.textContent = "大量翻訳に設定";
         apply.onclick = () => {
           $("local-device").value = r.id; manual = true;
@@ -181,7 +184,7 @@ async function measure() {
       $("local-candidates").append(li);
     }
     if (fastest && !manual) $("local-device").value = fastest.id;
-    message("local-measure-status", fastest ? "短文の速度と大量翻訳の推奨値を参考に選んでください。CPUの並列数は計測しません。" : "計測できませんでした。デバイスを手動で選択できます。", !fastest);
+    message("local-measure-status", fastest ? longText ? "長文での計測が終わりました。設定を選んで保存すると反映します。" : "短文の結果から推奨値を求めました。GPUを選ぶと長文も追加で調べられます。" : "計測できませんでした。デバイスを手動で選択できます。", !fastest);
   } catch (e) { message("local-measure-status", e, true); }
   finally { measuring = false; busy(); }
 }
@@ -212,12 +215,13 @@ $("chrome-register").onclick = async () => {
   } catch (e) { message("chrome-status", e, true); }
 };
 $("local-measure").onclick = () => { manual = false; void measure(); };
+$("local-measure-long").onclick = () => { void measure(true); };
 $("local-manual").onclick = async () => {
   manual = true;
   if (measuring) await invoke("cancel_local_measurement").catch(error);
   if (state.available) await devices(); $("local-device").focus();
 };
-$("local-device").onchange = () => { manual = true; };
+$("local-device").onchange = () => { manual = true; busy(); };
 $("local-cancel-measure").onclick = () => void invoke("cancel_local_measurement").catch(error);
 $("local-auto-release").onchange = () => { $("local-idle-setting").hidden = !$("local-auto-release").checked; };
 $("local-download").onclick = () => { $("local-download-confirm").showModal(); $("local-decline-download").focus(); };

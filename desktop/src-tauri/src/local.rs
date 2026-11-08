@@ -626,6 +626,8 @@ pub struct Measurement {
     error: Option<String>,
     measuring_parallel: Option<usize>,
     recommended_parallel: Option<usize>,
+    measured_parallel: Option<usize>,
+    long_text: bool,
     bulk_per_second: Option<f64>,
     bulk_error: Option<String>,
     parallel_samples: Vec<benchmark::Sample>,
@@ -641,9 +643,15 @@ pub async fn measure_local_devices(
     app: AppHandle,
     window: WebviewWindow,
     progress: Channel<Measurement>,
+    long_text: Option<bool>,
+    device: Option<String>,
 ) -> Result<Vec<Measurement>, String> {
     require_main(&window)?;
     installation(&app)?;
+    let long_text = long_text.unwrap_or(false);
+    if long_text && !device.as_deref().is_some_and(gpu_device) {
+        return Err("長文の追加計測にはGPUを選択してください".into());
+    }
     if !resources::supported() {
         return Err(
             "デバイスの計測はWindows x64とmacOS 13.3以降（Apple Silicon・Intel）に対応しています"
@@ -679,10 +687,17 @@ pub async fn measure_local_devices(
         devices = list_devices(app.clone()) => devices.unwrap_or_default(),
     };
     devices.truncate(8);
-    devices.push(Device {
-        id: "none".into(),
-        name: "CPU".into(),
-    });
+    if long_text {
+        devices.retain(|gpu| Some(&gpu.id) == device.as_ref());
+        if devices.is_empty() {
+            return Err("選択したGPUが見つかりませんでした".into());
+        }
+    } else {
+        devices.push(Device {
+            id: "none".into(),
+            name: "CPU".into(),
+        });
+    }
     let mut results = Vec::new();
     for device in devices {
         progress
@@ -746,6 +761,7 @@ pub async fn measure_local_devices(
     if !local.measurement_cancel.canceled.load(Ordering::SeqCst) {
         if let Some(index) = benchmark::target(&results) {
             let gpu = &mut results[index];
+            gpu.long_text = long_text;
             benchmark::measure(&app, &progress, gpu).await?;
             progress
                 .send(gpu.clone())
