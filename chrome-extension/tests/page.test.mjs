@@ -116,7 +116,7 @@ test("ログインしていないときは login を返す", async () => {
 
 test("接続先が未設定なら設定を促す", async () => {
   const server = fakeServer();
-  const messages = await runPage([{ id: 0, text: "Hello" }], server, { server: async () => "" }).finished;
+  const messages = await runPage([{ id: 0, text: "Hello" }], server, { settings: async () => ({ ...SETTINGS, server: "" }) }).finished;
   assert.deepEqual(messages.at(-1), {
     type: "error", code: "no-server", remedy: "options",
     message: "接続先が未設定です。拡張の設定でサーバーURLを入れてください",
@@ -323,5 +323,44 @@ for (const advertised of [undefined, 1, 4]) {
     assert.equal(messages.at(-1).type, "done");
     assert.equal(maximum, advertised ?? 1);
     assert.equal(server.requests.length, 8);
+  });
+}
+
+for (const mode of ["local", "server"]) {
+  test(`設定変更後もページの再試行・後続段落・更新を元の接続先へ送る (${mode})`, { timeout: 5000 }, async () => {
+    const settings = { ...SETTINGS, mode };
+    const calls = [];
+    let translations = 0;
+    let page;
+    const respond = async (route) => {
+      calls.push(route);
+      if (route.endsWith("api/config")) {
+        settings.mode = "server";
+        settings.server = "https://other.example.com";
+        return Response.json({ ...CONFIG, concurrency: { max_in_flight: 1 } });
+      }
+      translations++;
+      if (translations === 1) return Response.json({ error: "busy" }, { status: 429 });
+      if (translations === 2) {
+        page.postMessage({ type: "update", blocks: [{ id: 2, text: "Updated paragraph" }] });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return sse([{ t: "訳" }, { done: true, finish: "stop" }]);
+    };
+    const task = runPage([{ id: 0, text: "First paragraph" }, { id: 1, text: "Second paragraph" }], {
+      fetch: async (url) => respond(url),
+    }, {
+      settings: async () => settings,
+      server: async () => settings.server,
+      nativeFetch: async (route) => { const res = await respond(`local/${route}`); return { status: res.status, body: res.body }; },
+      busyRetryMs: 1,
+    });
+    page = task.page;
+    const messages = await task.finished;
+    assert.equal(messages.at(-1).type, "done");
+    assert.ok(translations >= 3);
+    const prefix = mode === "local" ? "local/" : `${SERVER}/`;
+    assert.ok(calls.every((url) => url.startsWith(prefix)), JSON.stringify(calls));
+    assert.ok(messages.some((msg) => msg.type === "block" && msg.id === 2));
   });
 }

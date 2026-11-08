@@ -1,7 +1,7 @@
 // ページ全体の翻訳 (background 側)。ページの content script (page-content.js) から段落の一覧を受け取り、
 // 接続先が通知する並列数に合わせて訳し、portで返す
 import { splitText, translateChunk } from "./translation.mjs";
-import { apiFetch, RelayError } from "./relay.mjs";
+import { apiFetch, pinConnection, RelayError } from "./relay.mjs";
 import { requestSettings } from "./settings.mjs";
 import { ensureOk, LoginRequired } from "./translate.mjs";
 
@@ -38,6 +38,7 @@ export function shouldTranslate(text) {
 export function runPageTask(port, deps) {
   const abort = new AbortController();
   let closed = false;
+  let requestDeps = deps;
   let priority = new Map();
   let update = null;
   const onPriority = (msg) => {
@@ -79,7 +80,7 @@ export function runPageTask(port, deps) {
     try {
       for (;;) {
         abort.signal.throwIfAborted();
-        const res = await apiFetch(route, body, deps, abort);
+        const res = await apiFetch(route, body, requestDeps, abort);
         if (route !== "api/translate" || res.status !== 429) {
           return ensureOk(new Response(res.body, { status: res.status }));
         }
@@ -104,6 +105,7 @@ export function runPageTask(port, deps) {
     if (!Array.isArray(blocks)) throw new RelayError("bad-request", "ページの文を読み取れませんでした");
     blocks = blocks.filter((b) => b && Number.isInteger(b.id) && typeof b.text === "string");
     const settings = await deps.settings();
+    requestDeps = await pinConnection(deps, settings);
     const config = await (await call("api/config")).json();
     // 訳す先の自動はページ全体の文で決める
     const sample = blocks.map((b) => b.text).join("\n");

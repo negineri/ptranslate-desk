@@ -53,8 +53,10 @@ export function relay(port, deps) {
     }
   });
 
-  async function run({ route, body } = {}) {
-    const res = await apiFetch(route, body, deps, abort);
+  async function run({ route, body, connection } = {}) {
+    // 接続先は信頼済みの拡張画面だけが渡す。権限は要求ごとに確かめる。
+    const requestDeps = connection ? await pinConnection(deps, connection) : deps;
+    const res = await apiFetch(route, body, requestDeps, abort);
     post({ type: "head", status: res.status });
     if (!res.body) return post({ type: "end" });
     const reader = res.body.getReader();
@@ -71,6 +73,14 @@ export function relay(port, deps) {
   }
 }
 
+// 翻訳開始時の接続先を保持し、区切り・再試行・追従中に設定を読み直さない。
+export async function pinConnection(deps, settings = undefined) {
+  const snapshot = { ...(settings ?? await deps.settings?.()) };
+  const server = snapshot.mode === "local" ? "" : snapshot.server ?? await deps.server();
+  snapshot.server = server;
+  return { ...deps, settings: async () => snapshot, server: async () => server };
+}
+
 // background から API を 1 回呼ぶ。返す body は読むたびに時間切れを延ばし、abort で止まる。
 // 失敗は RelayError (route・no-server・no-permission・timeout) か、接続の失敗 (そのほかの例外)
 export async function apiFetch(route, body, deps, abort) {
@@ -78,7 +88,7 @@ export async function apiFetch(route, body, deps, abort) {
   if (!method) throw new RelayError("route", "不明な API です");
   const settings = await deps.settings?.();
   const local = settings?.mode === "local";
-  const server = local ? "local" : await deps.server();
+  const server = local ? "local" : settings?.server ?? await deps.server();
   const send = () => local ? (deps.nativeFetch ?? nativeFetch)(route, body, abort) : httpFetch(route, body, deps, abort, server);
   const key = local ? "local" : server;
   if (route === "api/config") {

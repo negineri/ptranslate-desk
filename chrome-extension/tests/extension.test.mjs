@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { normalizeServerUrl, originPattern, requestSettings, sanitize } from "../dist/settings.mjs";
 import { isExtensionPage, relay } from "../dist/relay.mjs";
-import { extensionFetch } from "../dist/transport.mjs";
+import { extensionFetch, sessionFetch } from "../dist/transport.mjs";
 import { ensureOk, LoginRequired, remedy } from "../dist/translate.mjs";
 import { translateChunk } from "../dist/translation.mjs";
 import { portPair, SERVER, sse } from "./helpers.mjs";
@@ -123,3 +123,26 @@ test("エラーの状態を画面の言葉にする", async () => {
   await assert.rejects(ensureOk(new Response(JSON.stringify({ error: "同時に訳せるのは 2 つまでです" }), { status: 429 })),
     /同時に訳せるのは 2 つまでです/);
 });
+
+for (const initial of [{ mode: "local", server: SERVER }, { mode: "server", server: SERVER }]) {
+  test(`区切りごとのportをまたいで開始時の接続先を保つ (${initial.mode})`, async () => {
+    let settings = { ...initial };
+    const calls = [];
+    const connect = connectTo({
+      settings: async () => settings,
+      server: async () => settings.server,
+      nativeFetch: async (route) => { calls.push(`local/${route}`); return { status: 200, body: new Response("ok").body }; },
+      fetch: async (url) => { calls.push(url); return new Response("ok"); },
+    });
+    const fetch = sessionFetch(settings, connect);
+    await (await fetch("api/config")).text();
+    settings.mode = "server";
+    settings.server = "https://other.example.com";
+    for (let i = 0; i < 2; i++) await (await fetch("api/translate", { body: "{}" })).text();
+    const prefix = initial.mode === "local" ? "local/" : `${SERVER}/`;
+    assert.deepEqual(calls, ["api/config", "api/translate", "api/translate"].map((route) => prefix + route));
+    // 新しく開始した翻訳だけが新しい接続先を使う。
+    await (await sessionFetch(settings, connect)("api/config")).text();
+    assert.equal(calls.at(-1), "https://other.example.com/api/config");
+  });
+}

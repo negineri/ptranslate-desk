@@ -9,7 +9,13 @@ export class TransportError extends Error {
 
 const defaultConnect = () => chrome.runtime.connect({ name: "api" });
 
-export function extensionFetch(route, { body, signal } = {}, connect = defaultConnect) {
+// 別々のportを使う各区切りにも、開始時の接続先を引き継ぐ。
+export function sessionFetch(settings, connect = defaultConnect) {
+  const connection = Object.freeze({ mode: settings.mode, server: settings.server });
+  return (route, options = {}) => extensionFetch(route, { ...options, connection }, connect);
+}
+
+export function extensionFetch(route, { body, signal, connection } = {}, connect = defaultConnect) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason ?? new DOMException("中止しました", "AbortError"));
     const port = connect();
@@ -84,6 +90,6 @@ export function extensionFetch(route, { body, signal } = {}, connect = defaultCo
       signal?.removeEventListener("abort", onAbort);
       fail(new TransportError("network", "翻訳サーバーに接続できません"));
     });
-    port.postMessage({ route, body });
+    port.postMessage({ route, body, ...(connection ? { connection } : {}) });
   });
 }

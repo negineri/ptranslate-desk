@@ -1,3 +1,4 @@
+import { sessionFetch } from "./transport.mjs";
 import { loadSettings, requestSettings, saveSettings } from "./settings.mjs";
 import { doneMessage, errorMessage, loadConfig, remedy, translateInto } from "./translate.mjs";
 
@@ -28,9 +29,11 @@ async function run() {
   $("copy").disabled = true;
   setStatus({ text: "訳しています" });
   try {
+    const fetch = sessionFetch(settings);
+    const config = await loadConfig({ signal: mine.signal, fetch });
     const common = requestSettings(text, settings, config);
     if (common.source_lang && common.source_lang === common.target_lang) throw new Error("原文と訳す先が同じ言語です");
-    const { truncated } = await translateInto($("out"), text, common, { signal: mine.signal });
+    const { truncated } = await translateInto($("out"), text, common, { signal: mine.signal, fetch });
     setStatus(doneMessage(truncated));
   } catch (error) {
     if (mine.signal.reason === "superseded") return;
@@ -53,7 +56,7 @@ async function init() {
     ? `ショートカットは ${command.shortcut} です。`
     : "ショートカットは拡張の設定から割り当てられます。";
   try {
-    config = await loadConfig();
+    config = await loadConfig({ fetch: sessionFetch(settings) });
     for (const l of config.languages || []) $("target").append(new Option(l.name, l.code));
     if ([...$("target").options].some((o) => o.value === settings.target)) $("target").value = settings.target;
   } catch (error) {
