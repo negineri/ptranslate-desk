@@ -437,6 +437,11 @@ class Handler(BaseHTTPRequestHandler):
                         "languages": [{"code": c, "name": n} for c, n in LANGUAGES],
                         "max_chars": MAX_CHARS,
                         "max_glossary": MAX_GLOSSARY,
+                        "concurrency": {
+                            "max_in_flight": MAX_ACTIVE_PER_USER,
+                            "recommended_in_flight": MAX_ACTIVE_PER_USER,
+                            "scope": "user",
+                        },
                         "desktop_connection": {
                             "server_url": PUBLIC_SERVER_URL,
                             "discovery_url": DESKTOP_DISCOVERY_URL,

@@ -1,10 +1,10 @@
 // ページ全体の翻訳 (background 側)。先に node chrome-extension/build.mjs で dist/ を作ってから実行する
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PAGE_CONCURRENCY, runPageTask, shouldTranslate } from "../dist/page-task.mjs";
+import { concurrencyLimit, runPageTask, shouldTranslate } from "../dist/page-task.mjs";
 import { portPair, SERVER, sse } from "./helpers.mjs";
 
-const CONFIG = { user: "test", max_glossary: 200, languages: [{ code: "ja", name: "日本語" }, { code: "en", name: "英語" }] };
+const CONFIG = { concurrency: { max_in_flight: 2, recommended_in_flight: 2, scope: "user" }, user: "test", max_glossary: 200, languages: [{ code: "ja", name: "日本語" }, { code: "en", name: "英語" }] };
 const SETTINGS = { server: SERVER, source: "", target: "auto", form: "", glossary: "" };
 
 // 訳を "[訳す先] 原文" で返すサーバー。受けた要求を requests に残す
@@ -136,7 +136,7 @@ test("ページが port を閉じたら訳している要求も止める", async
   while (!messages.some((m) => m.type === "partial")) await new Promise((r) => setTimeout(r, 5));
   page.disconnect();
   await new Promise((r) => setTimeout(r, 30));
-  assert.equal(server.requests.length, PAGE_CONCURRENCY);
+  assert.equal(server.requests.length, 2);
   assert.ok(server.requests.every((r) => r.signal.aborted));
 });
 
@@ -303,3 +303,25 @@ test("認証や要求エラーは枠待ちとして再試行しない", async ()
     assert.ok(!messages.some((m) => m.type === "waiting"));
   }
 });
+
+for (const advertised of [undefined, 1, 4]) {
+  test(`接続先の通知に応じてページ翻訳を実行する (${advertised ?? "通知なし"})`, async () => {
+    let active = 0, maximum = 0;
+    const config = { ...CONFIG };
+    if (advertised === undefined) delete config.concurrency;
+    else config.concurrency = { max_in_flight: advertised, recommended_in_flight: advertised };
+    const server = fakeServer({
+      config: () => Response.json(config),
+      translate: async (body) => {
+        active++; maximum = Math.max(maximum, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active--;
+        return sse([{ t: body.text }, { done: true, finish: "stop" }]);
+      },
+    });
+    const messages = await runPage(Array.from({ length: 8 }, (_, id) => ({ id, text: `Paragraph ${id}` })), server).finished;
+    assert.equal(messages.at(-1).type, "done");
+    assert.equal(maximum, advertised ?? 1);
+    assert.equal(server.requests.length, 8);
+  });
+}

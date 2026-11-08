@@ -90,4 +90,5 @@ $("options").addEventListener("click", () => { void chrome.runtime.openOptionsPa
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") { e.preventDefault(); close(); }
 });
+if (embedded) window.parent.postMessage({ ptranslate: "ready" }, "*");
 main().catch((e) => setStatus(errorMessage(e)));

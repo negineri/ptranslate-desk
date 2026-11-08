@@ -1,7 +1,7 @@
 // 拡張の設定。原文と訳はここに保存しない
 import { guessTarget, parseGlossary } from "./translation.mjs";
 
-export const DEFAULTS = Object.freeze({ server: "", source: "", target: "auto", form: "", glossary: "" });
+export const DEFAULTS = Object.freeze({ server: "", mode: "server", source: "", target: "auto", form: "", glossary: "" });
 const KEYS = Object.keys(DEFAULTS);
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
@@ -31,6 +31,7 @@ export function originPattern(server) {
 export function sanitize(stored) {
   const out = { ...DEFAULTS };
   for (const key of KEYS) if (typeof stored?.[key] === "string") out[key] = stored[key];
+  if (!["server", "local"].includes(out.mode)) out.mode = "server";
   return out;
 }
 

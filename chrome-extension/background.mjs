@@ -1,3 +1,4 @@
+import { mountOverlay } from "./overlay.mjs";
 import { runPageTask } from "./page-task.mjs";
 import { isExtensionPage, relay } from "./relay.mjs";
 import { loadSettings, originPattern } from "./settings.mjs";
@@ -91,59 +92,6 @@ async function pickSelection(tabId, frameId) {
   }
 }
 
-// ページの上に訳の枠を出す。ページの CSS が混ざらないように shadow DOM に入れる
-function mountOverlay(src, rect) {
-  const ID = "ptranslate-extension-overlay";
-  document.getElementById(ID)?.remove();
-  const host = document.createElement("div");
-  host.id = ID;
-  const shadow = host.attachShadow({ mode: "closed" });
-  const frame = document.createElement("iframe");
-  frame.src = src;
-  frame.allow = "clipboard-write";
-  frame.title = "PTranslate";
-  const width = Math.min(480, innerWidth - 16);
-  const maxHeight = Math.max(160, Math.round(innerHeight * 0.6));
-  let height = 180;
-  let top = 8;
-  let left = innerWidth - width - 8;
-  if (rect) {
-    left = Math.min(Math.max(8, rect.left), innerWidth - width - 8);
-    top = rect.bottom + 8 + height <= innerHeight ? rect.bottom + 8 : Math.max(8, rect.top - 8 - height);
-  }
-  const place = () => {
-    frame.style.cssText = [
-      "position:fixed", `top:${top}px`, `left:${left}px`, `width:${width}px`, `height:${height}px`,
-      "border:0", "border-radius:10px", "box-shadow:0 6px 24px rgba(0,0,0,.25)", "z-index:2147483647",
-      "background:transparent", "color-scheme:normal", "margin:0", "padding:0",
-    ].join(";");
-  };
-  place();
-  shadow.append(frame);
-  document.documentElement.append(host);
-  const close = () => {
-    removeEventListener("message", onMessage, true);
-    removeEventListener("mousedown", onOutside, true);
-    removeEventListener("keydown", onKey, true);
-    host.remove();
-  };
-  const onMessage = (e) => {
-    if (e.source !== frame.contentWindow || typeof e.data !== "object" || !e.data) return;
-    if (e.data.ptranslate === "close") close();
-    if (e.data.ptranslate === "resize" && Number.isFinite(e.data.height)) {
-      height = Math.min(maxHeight, Math.max(120, Math.round(e.data.height)));
-      if (top + height > innerHeight - 8) top = Math.max(8, innerHeight - 8 - height);
-      place();
-    }
-  };
-  const onOutside = (e) => { if (!e.composedPath().includes(host)) close(); };
-  const onKey = (e) => { if (e.key === "Escape") close(); };
-  addEventListener("message", onMessage, true);
-  addEventListener("mousedown", onOutside, true);
-  addEventListener("keydown", onKey, true);
-  frame.addEventListener("load", () => frame.focus(), { once: true });
-}
-
 async function translateSelection(tab, fallbackText, frameId) {
   const picked = tab?.id === undefined ? null : await pickSelection(tab.id, frameId);
   const text = picked?.text || fallbackText;
@@ -154,12 +102,12 @@ async function translateSelection(tab, fallbackText, frameId) {
   const src = chrome.runtime.getURL(`popup.html#${id}`);
   if (tab?.id !== undefined) {
     try {
-      await chrome.scripting.executeScript({
+      const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id, frameIds: [0] },
         func: mountOverlay,
         args: [src, picked?.rect ?? null],
       });
-      return;
+      if (results[0]?.result !== "blocked") return;
     } catch {
       /* ページに出せないときは別ウィンドウで開く */
     }

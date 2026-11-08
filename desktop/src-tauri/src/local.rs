@@ -26,6 +26,7 @@ pub struct Settings {
     pub auto_release: bool,
     #[serde(default = "default_idle_minutes")]
     pub idle_minutes: u64,
+    pub parallel: usize,
 }
 fn default_idle_minutes() -> u64 {
     5
@@ -40,6 +41,7 @@ impl Default for Settings {
             device: default_device(),
             auto_release: false,
             idle_minutes: default_idle_minutes(),
+            parallel: 1,
         }
     }
 }
@@ -117,6 +119,7 @@ pub struct Local {
     measuring: tokio::sync::Mutex<()>,
     measurement_cancel: Operation,
     downloads: resources::Downloads,
+    slots: tokio::sync::Semaphore,
 }
 
 #[derive(Default)]
@@ -242,7 +245,11 @@ impl Local {
         Self::new(settings, configured)
     }
     fn new(settings: Settings, configured: bool) -> Result<Self, Box<dyn std::error::Error>> {
+        if ![1, 2, 4].contains(&settings.parallel) {
+            return Err("同時に訳す数は1・2・4から選んでください".into());
+        }
         Ok(Self {
+            slots: tokio::sync::Semaphore::new(settings.parallel),
             settings,
             process: Mutex::new(None),
             starting: tokio::sync::Mutex::new(()),
@@ -346,9 +353,9 @@ impl Local {
                 "--port",
                 &port.to_string(),
                 "--ctx-size",
-                "32768",
+                &(32768 * self.settings.parallel).to_string(),
                 "--parallel",
-                "1",
+                &self.settings.parallel.to_string(),
                 "--flash-attn",
                 "on",
                 "--no-webui",
@@ -449,6 +456,7 @@ pub struct Status {
     loading: bool,
     auto_release: bool,
     idle_minutes: u64,
+    parallel: usize,
     error: Option<String>,
 }
 #[tauri::command]
@@ -468,6 +476,7 @@ pub fn local_status(app: AppHandle) -> Status {
         loading: local.loading.load(Ordering::SeqCst),
         auto_release: local.settings.auto_release,
         idle_minutes: local.settings.idle_minutes,
+        parallel: local.settings.parallel,
         error,
     }
 }
@@ -542,14 +551,15 @@ pub async fn measure_local_devices(
         _ = local.measurement_cancel.canceled() => return Err("計測を中止しました".into()),
         guard = local.starting.lock() => guard,
     };
-    if app
-        .state::<crate::Backend>()
-        .session
-        .lock()
-        .unwrap()
-        .requests
-        .values()
-        .any(|r| r.translation && !r.task.inner().is_finished())
+    if local.activity.lock().unwrap().0 > 0
+        || app
+            .state::<crate::Backend>()
+            .session
+            .lock()
+            .unwrap()
+            .requests
+            .values()
+            .any(|r| r.translation && !r.task.inner().is_finished())
     {
         return Err("翻訳が終わってから計測してください".into());
     }
@@ -717,6 +727,9 @@ pub async fn save_local_settings(
     if !(1..=60).contains(&settings.idle_minutes) {
         return Err("メモリを解放するまでの時間は1〜60分で指定してください".into());
     }
+    if ![1, 2, 4].contains(&settings.parallel) {
+        return Err("同時に訳す数は1・2・4から選んでください".into());
+    }
     persist_settings(&app, &settings)?;
     crate::cancel_all(&app);
     app.state::<Local>().stop();
@@ -840,14 +853,22 @@ pub fn prompt(body: &Value) -> Result<(String, usize), String> {
     Ok((value, (text.chars().count() * 3 / 2 + 64).clamp(256, 8000)))
 }
 
-fn bytes(stream: &Channel<Message>, data: Value) -> Result<(), ()> {
+pub trait Output: Send + Sync {
+    fn send(&self, message: Message) -> Result<(), ()>;
+}
+impl Output for Channel<Message> {
+    fn send(&self, message: Message) -> Result<(), ()> {
+        Channel::send(self, message).map_err(|_| ())
+    }
+}
+fn bytes(stream: &dyn Output, data: Value) -> Result<(), ()> {
     stream
         .send(Message::Bytes {
             bytes: format!("data: {data}\n\n").into_bytes(),
         })
         .map_err(|_| ())
 }
-fn json_response(stream: &Channel<Message>, status: u16, data: Value) -> Result<(), ()> {
+fn json_response(stream: &dyn Output, status: u16, data: Value) -> Result<(), ()> {
     stream.send(Message::Start { status }).map_err(|_| ())?;
     stream
         .send(Message::Bytes {
@@ -859,22 +880,26 @@ pub async fn request(
     app: &AppHandle,
     route: &str,
     body: Option<&Value>,
-    stream: &Channel<Message>,
+    stream: &dyn Output,
 ) -> Result<(), ()> {
+    let local = app.state::<Local>();
     if route == "api/config" {
         return json_response(
             stream,
             200,
-            json!({"user":"この端末", "languages":languages(), "max_chars":4000, "max_glossary":200}),
+            json!({"user":"この端末", "languages":languages(), "max_chars":4000, "max_glossary":200, "concurrency":{"max_in_flight":local.settings.parallel,"recommended_in_flight":local.settings.parallel,"scope":"application"}}),
         );
+    }
+    if route != "api/translate" {
+        return json_response(stream, 404, json!({"error":"不明なAPIです"}));
     }
     let (prompt, limit) = match body.ok_or("原文がありません".to_string()).and_then(prompt)
     {
         Ok(value) => value,
         Err(error) => return json_response(stream, 400, json!({"error":error})),
     };
-    let local = app.state::<Local>();
     let _lease = local.lease();
+    let _slot = local.slots.acquire().await.map_err(|_| ())?;
     let endpoint = match local.start(app).await {
         Ok(e) => e,
         Err(error) => return json_response(stream, 503, json!({"error":error})),
@@ -982,12 +1007,53 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn shared_slots_limit_concurrent_work_and_release_canceled_waiters() {
+        for parallel in [1, 2, 4] {
+            let local = Local::new(
+                Settings {
+                    parallel,
+                    ..Settings::default()
+                },
+                true,
+            )
+            .unwrap();
+            let mut permits = Vec::new();
+            for _ in 0..parallel {
+                permits.push(local.slots.acquire().await.unwrap());
+            }
+            assert!(local.slots.try_acquire().is_err());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(5), local.slots.acquire())
+                    .await
+                    .is_err()
+            );
+            permits.pop();
+            // timeoutで破棄した待機要求が枠を占有しない。
+            let permit = local.slots.try_acquire().unwrap();
+            drop(permit);
+            drop(permits);
+            assert_eq!(local.slots.available_permits(), parallel);
+        }
+        for parallel in [0, 3, 5, usize::MAX] {
+            assert!(Local::new(
+                Settings {
+                    parallel,
+                    ..Settings::default()
+                },
+                true
+            )
+            .is_err());
+        }
+    }
+
     #[test]
     fn legacy_settings_preload_by_default_and_idle_does_not_interrupt_work() {
         let settings: Settings =
             serde_json::from_str(r#"{"enabled":true,"device":"Vulkan0"}"#).unwrap();
         assert!(!settings.auto_release);
         assert_eq!(settings.idle_minutes, 5);
+        assert_eq!(settings.parallel, 1);
         let local = Local::new(settings, true).unwrap();
         let now = Instant::now();
         let old = now - Duration::from_secs(301);

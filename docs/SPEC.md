@@ -154,6 +154,11 @@ Windows・macOS向けのローカル翻訳の導入・デバイス選択・メ�
   ],
   "max_chars": 4000,
   "max_glossary": 200,
+  "concurrency": {
+    "max_in_flight": 2,
+    "recommended_in_flight": 2,
+    "scope": "user"
+  },
   "desktop_connection": {
     "server_url": "https://translate.example.com",
     "discovery_url": "https://auth.example.com/.well-known/openid-configuration",
@@ -171,6 +176,12 @@ ms my ne nl pa pl ru si sk sl sr sw ta te th tl ur uz vi`)。表示名はサー�
 URLの既定値は空欄、client IDは `translator-desktop`。Web版はサーバーURLが空欄なら閲覧中のオリジンを表示する。
 認証先が空欄のときは管理者への確認を案内し、内部のuserinfo URLや要求のヘッダーから推測しない。
 既存の `/api/config` と同じ認証を必要とし、秘密鍵やトークンは含めない。
+
+`concurrency` は未完了の翻訳要求数の上限と推奨値を通知する。枠の予約ではない。
+サーバーは `TR_MAX_ACTIVE_PER_USER` の値を両方に返し、`scope` は `user`（同じ利用者の全クライアントで共有）とする。
+ローカルは設定済みの推論並列数を両方に返し、`scope` は `application`（デスクトップと拡張で共有）とする。
+クライアントは上限・推奨値と自身の処理上限の範囲で送信する。古い接続先で通知がない場合は1件とする。
+競合時もサーバーの429制御は維持する。ローカルではアプリ内の共通待ち行列で実行数を制限する。
 
 ### 5.2 `POST /api/translate`
 

@@ -1,12 +1,20 @@
 // ページ全体の翻訳 (background 側)。ページの content script (page-content.js) から段落の一覧を受け取り、
-// サーバーの 1 人あたりの上限に合わせて 2 か所まで並列に訳し、port で返す
+// 接続先が通知する並列数に合わせて訳し、portで返す
 import { splitText, translateChunk } from "./translation.mjs";
 import { apiFetch, RelayError } from "./relay.mjs";
 import { requestSettings } from "./settings.mjs";
 import { ensureOk, LoginRequired } from "./translate.mjs";
 
 export const MAX_BLOCKS = 3000;
-export const PAGE_CONCURRENCY = 2;
+export const PAGE_CONCURRENCY = 8;
+// 古い接続先や不正な通知は1件。通知値をそのままワーカー数に使わない。
+export function concurrencyLimit(config) {
+  const c = config?.concurrency;
+  if (!Number.isSafeInteger(c?.max_in_flight) || c.max_in_flight < 1) return 1;
+  const recommended = Number.isSafeInteger(c.recommended_in_flight) && c.recommended_in_flight > 0
+    ? c.recommended_in_flight : c.max_in_flight;
+  return Math.min(PAGE_CONCURRENCY, c.max_in_flight, recommended);
+}
 const BUSY_TIMEOUT_MS = 60_000;
 const BUSY_RETRY_MS = 500;
 
@@ -127,7 +135,7 @@ export function runPageTask(port, deps) {
         skipped = candidates.length - pending.length;
         total = done + running.size + pending.length;
       }
-      while (pending.length && running.size < PAGE_CONCURRENCY && !abort.signal.aborted) {
+      while (pending.length && running.size < concurrencyLimit(config) && !abort.signal.aborted) {
         // 空いた枠へ、最新の表示順で次の箇所を送る。
         let nextIndex = 0;
         let bestPriority = Infinity;

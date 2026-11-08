@@ -4,6 +4,7 @@
 )]
 
 mod auth;
+mod chrome_bridge;
 mod connection;
 mod local;
 #[cfg(target_os = "macos")]
@@ -317,6 +318,10 @@ fn start_request(
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    if chrome_bridge::host_entry() {
+        return;
+    }
     let client = Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -353,6 +358,8 @@ fn main() {
             });
             resident::setup(app.handle())?;
             local::Local::schedule(app.handle());
+            #[cfg(target_os = "windows")]
+            chrome_bridge::schedule(app.handle())?;
             updates::schedule(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -405,6 +412,7 @@ fn main() {
         login,
         logout,
         restore_session,
+        chrome_bridge::register_chrome,
         local::local_status,
         local::select_server_mode,
         local::measure_local_devices,
@@ -441,6 +449,7 @@ fn main() {
             login,
             logout,
             restore_session,
+            chrome_bridge::register_chrome,
             local::local_status,
             local::select_server_mode,
             local::measure_local_devices,
@@ -475,6 +484,9 @@ fn main() {
             smoke_result
         ])
         .on_page_load(|window, payload| {
+            if std::env::var("PTRANSLATE_EXTENSION_PROBE").as_deref() == Ok("1") {
+                return;
+            }
             if window.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
             {

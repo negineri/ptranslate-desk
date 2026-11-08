@@ -44,9 +44,9 @@ async function run() {
 
 async function init() {
   settings = await loadSettings();
-  if (!settings.server) { $("setup").hidden = false; return; }
+  if (settings.mode !== "local" && !settings.server) { $("setup").hidden = false; return; }
   $("translator").hidden = false;
-  $("open-web").hidden = false;
+  $("open-web").hidden = settings.mode === "local";
   $("src").focus();
   const [command] = (await chrome.commands.getAll()).filter((c) => c.name === "translate-selection");
   $("shortcut").textContent = command?.shortcut

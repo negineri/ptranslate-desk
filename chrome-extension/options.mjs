@@ -24,14 +24,25 @@ async function check() {
   try {
     const config = await loadConfig();
     fillLanguages(config.languages || []);
-    setStatus("status", { text: `接続できました (${config.user} でログイン中)`, cls: "ok" });
+    setStatus("status", { text: settings.mode === "local" ? "このPCのローカル翻訳に接続できました" : `接続できました (${config.user} でログイン中)`, cls: "ok" });
   } catch (error) {
     setStatus("status", errorMessage(error));
     $("login").hidden = remedy(error) !== "login";
   }
 }
 
+function showMode() {
+  $("server-fields").hidden = $("mode").value === "local";
+  $("local-help").hidden = $("mode").value !== "local";
+  $("login").hidden = true;
+}
+$("mode").addEventListener("change", showMode);
+$("extension-id").textContent = chrome.runtime.id;
 $("save").addEventListener("click", () => {
+  if ($("mode").value === "local") {
+    void saveSettings({ mode: "local" }).then(async (saved) => { settings = saved; await check(); }).catch((e) => setStatus("status", errorMessage(e)));
+    return;
+  }
   let server;
   try {
     server = normalizeServerUrl($("server").value);
@@ -46,7 +57,7 @@ $("save").addEventListener("click", () => {
       setStatus("status", { text: "サーバーへの接続が許可されませんでした", cls: "err" });
       return;
     }
-    settings = await saveSettings({ server });
+    settings = await saveSettings({ server, mode: "server" });
     await check();
   }, (error) => setStatus("status", errorMessage(error)));
 });
@@ -64,9 +75,10 @@ $("shortcuts").addEventListener("click", () => { void chrome.tabs.create({ url: 
 
 async function init() {
   settings = await loadSettings();
+  $("mode").value = settings.mode; showMode();
   $("server").value = settings.server;
   $("form").value = settings.form;
   $("glossary").value = settings.glossary;
-  if (settings.server) await check();
+  if (settings.mode === "local" || settings.server) await check();
 }
 init().catch((e) => setStatus("status", errorMessage(e)));

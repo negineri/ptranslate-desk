@@ -1,3 +1,8 @@
+import { nativeFetch } from "./native.mjs";
+import { Scheduler } from "./scheduler.mjs";
+const scheduler = new Scheduler();
+const limits = new Map();
+
 // background で API を呼び、応答を拡張の画面へ port で流す。
 // 画面 (popup.html など) は Web ページの中の iframe でも動くので、Cookie を確実に付けられる
 // background からだけサーバーへつなぐ。デスクトップの start_request と同じく 2 つの API だけ通す
@@ -40,7 +45,7 @@ export function relay(port, deps) {
       await run(msg);
     } catch (e) {
       if (abort.signal.aborted && !(e instanceof RelayError)) return;
-      const code = e instanceof RelayError ? e.code : "network";
+      const code = e instanceof RelayError ? e.code : e?.code === "local" ? "local" : "network";
       post({ type: "error", code, message: code === "network" ? "翻訳サーバーに接続できません" : e.message });
     } finally {
       // port は画面の側が閉じる (先に閉じると送ったメッセージが届かないことがある)
@@ -71,7 +76,29 @@ export function relay(port, deps) {
 export async function apiFetch(route, body, deps, abort) {
   const method = ROUTES[route];
   if (!method) throw new RelayError("route", "不明な API です");
-  const server = await deps.server();
+  const settings = await deps.settings?.();
+  const local = settings?.mode === "local";
+  const server = local ? "local" : await deps.server();
+  const send = () => local ? (deps.nativeFetch ?? nativeFetch)(route, body, abort) : httpFetch(route, body, deps, abort, server);
+  const key = local ? "local" : server;
+  if (route === "api/config") {
+    const res = await send();
+    if (res.status === 200 && res.body) {
+      const response = new Response(res.body, { status: res.status });
+      const text = await response.text();
+      try {
+        const c = JSON.parse(text).concurrency;
+        limits.set(key, Number.isSafeInteger(c?.max_in_flight) && c.max_in_flight > 0 ? Math.min(c.max_in_flight, 8) : 1);
+      } catch { limits.set(key, 1); }
+      return { status: res.status, body: new Response(text).body };
+    }
+    return res;
+  }
+  return scheduler.run(key, limits.get(key) ?? 1, abort.signal, send);
+}
+
+async function httpFetch(route, body, deps, abort, server) {
+  const method = ROUTES[route];
   if (!server) throw new RelayError("no-server", "接続先が未設定です。拡張の設定でサーバーURLを入れてください");
   if (!(await deps.hasPermission(server))) {
     throw new RelayError("no-permission", "サーバーへの接続が許可されていません。拡張の設定で保存し直してください");

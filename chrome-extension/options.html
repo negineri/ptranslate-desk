@@ -16,11 +16,16 @@
 </head>
 <body><main>
   <h1><img class="brand-mark" src="./logo.png" width="32" height="32" alt="">拡張の設定</h1>
-  <p class="sub">翻訳には PTranslate のサーバーとそのアカウントが要ります。ログインは Web版 (サーバーURLのページ) で行い、拡張はそのログインを使います。</p>
+  <p class="sub">サーバーモードの翻訳には PTranslate のサーバーとそのアカウントが要ります。ログインは Web版 (サーバーURLのページ) で行い、拡張はそのログインを使います。</p>
   <section>
+    <label for="mode">翻訳する場所</label>
+    <select id="mode"><option value="server">サーバーで翻訳</option><option value="local">このPCで翻訳</option></select>
+    <p id="local-help" class="hint" hidden>Windows版デスクトップをローカルモードで起動し、設定の「Chrome連携」に次の拡張IDを登録してください。<br><code id="extension-id"></code></p>
+    <div id="server-fields">
     <label for="server">サーバーURL</label>
     <input id="server" type="url" placeholder="https://translate.example.com" spellcheck="false" autocomplete="off">
     <p class="hint">管理者から伝えられたURL (パスなし)。Web版の「クライアントの接続設定」にも出ています。</p>
+    </div>
     <div class="row">
       <button id="save" class="primary">保存して接続を確かめる</button>
       <button id="login" hidden>Web版を開いてログイン</button>

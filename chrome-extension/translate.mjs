@@ -69,6 +69,6 @@ export function errorMessage(error) {
 // ログインや設定が要るときの手当てのボタン
 export function remedy(error) {
   if (error instanceof LoginRequired) return "login";
-  if (error?.code === "no-server" || error?.code === "no-permission") return "options";
+  if (error?.code === "local" || error?.code === "no-server" || error?.code === "no-permission") return "options";
   return null;
 }

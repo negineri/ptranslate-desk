@@ -194,6 +194,17 @@ class ServerTest(unittest.TestCase):
         _, resp = self.call("POST", "/api/translate", req(), user="Bad User")
         self.assertEqual(resp.status, 401)
 
+    def test_config_announces_actual_user_concurrency_limit(self):
+        with patch.object(tr, "MAX_ACTIVE_PER_USER", 4):
+            conn, response = self.call("GET", "/api/config")
+            try:
+                config = json.loads(response.read())
+            finally:
+                conn.close()
+        self.assertEqual(
+            config["concurrency"], {"max_in_flight": 4, "recommended_in_flight": 4, "scope": "user"}
+        )
+
     def test_config_exposes_only_explicit_public_desktop_settings(self):
         for discovery in ("", "https://auth.example.com/.well-known/openid-configuration"):
             with (

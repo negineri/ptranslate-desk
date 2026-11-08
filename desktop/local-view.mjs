@@ -33,12 +33,23 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
         <label for="local-device">使用するデバイス</label><select id="local-device"><option value="none">CPU</option></select>
       </div>
       <div class="setup-group">
+        <h4>同時に訳す数</h4>
+        <label for="local-parallel">推論の並列数</label><select id="local-parallel"><option value="1">1件</option><option value="2">2件</option><option value="4">4件</option></select>
+        <p class="hint">増やすとメモリ使用量も増えます。保存して再起動すると反映されます。</p>
+      </div>
+      <div class="setup-group">
         <h4>メモリ</h4>
         <label class="local-check"><input id="local-auto-release" type="checkbox"> 使っていないときにモデルのメモリを自動解放する</label>
         <p class="hint">無効の場合は、ローカルモードの起動直後にモデルを読み込みます。</p>
         <p id="local-idle-setting"><label for="local-idle-minutes">解放するまでの未使用時間</label> <select id="local-idle-minutes"><option value="1">1分</option><option value="5">5分</option><option value="10">10分</option><option value="30">30分</option><option value="60">60分</option></select></p>
       </div>
       <div class="local-actions save-row"><button id="local-start">モデルを読み込む</button><button id="local-stop">モデルを解放</button><span class="spacer"></span><button id="local-save" class="primary">保存して再起動</button></div>
+    </div>
+    <div class="setup-group">
+      <h4>Chrome連携</h4>
+      <p class="hint">拡張の設定に表示される拡張IDを登録すると、このPCの翻訳を共有できます。</p>
+      <label for="chrome-extension-id">拡張ID</label><input id="chrome-extension-id" type="text" maxlength="32" autocomplete="off" spellcheck="false">
+      <button id="chrome-register">Chrome連携を登録</button><p id="chrome-status" class="hint" role="status"></p>
     </div>
   </div><p id="mode-status" class="hint" role="status"></p>
   <dialog id="local-download-confirm" aria-labelledby="local-download-title">
@@ -76,7 +87,7 @@ function message(id, text, failed = false) {
   $(id).setAttribute("role", failed ? "alert" : "status");
 }
 function error(e) { message("local-status", e, true); }
-function settings() { return { enabled: true, device: $("local-device").value, auto_release: $("local-auto-release").checked, idle_minutes: Number($("local-idle-minutes").value) }; }
+function settings() { return { enabled: true, device: $("local-device").value, auto_release: $("local-auto-release").checked, idle_minutes: Number($("local-idle-minutes").value), parallel: Number($("local-parallel").value) }; }
 function busy() {
   $("local-setup").hidden = !state?.available;
   $("local-save").disabled = downloading || measuring || detecting > 0 || !state?.available;
@@ -153,6 +164,13 @@ $("welcome-local").onclick = () => void chooseLocal().catch(error);
 $("welcome-server").onclick = () => void chooseServer();
 $("mode-local").onclick = () => void chooseLocal().catch(error);
 $("mode-server").onclick = () => void chooseServer();
+$("chrome-register").onclick = async () => {
+  try {
+    const extensionId = $("chrome-extension-id").value.trim();
+    if (!/^[a-p]{32}$/.test(extensionId)) throw new Error("拡張IDはa〜pの32文字で入力してください");
+    await invoke("register_chrome", { extensionId }); message("chrome-status", "登録しました。拡張の設定から接続を確かめてください。");
+  } catch (e) { message("chrome-status", e, true); }
+};
 $("local-measure").onclick = () => { manual = false; void measure(); };
 $("local-manual").onclick = async () => {
   manual = true;
@@ -194,6 +212,7 @@ $("local-stop").onclick = async () => {
   try { await invoke("stop_local_engine"); message("local-status", "モデルのメモリを解放しました。"); } catch (e) { error(e); }
 };
 state = await invoke("local_status");
+$("local-parallel").value = String(state.parallel);
 $("local-auto-release").checked = state.auto_release;
 if (![...$("local-idle-minutes").options].some((o) => Number(o.value) === state.idle_minutes)) $("local-idle-minutes").add(new Option(`${state.idle_minutes}分`, String(state.idle_minutes)));
 $("local-idle-minutes").value = String(state.idle_minutes); $("local-idle-setting").hidden = !state.auto_release;

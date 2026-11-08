@@ -30,7 +30,7 @@ test("サーバーURLは origin にそろえ、HTTPS かループバックだけ
 
 test("保存した設定は決まった項目の文字列だけを読む", () => {
   assert.deepEqual(sanitize({ server: SERVER, target: 3, text: "原文", glossary: "a => b" }),
-    { server: SERVER, source: "", target: "auto", form: "", glossary: "a => b" });
+    { server: SERVER, mode: "server", source: "", target: "auto", form: "", glossary: "a => b" });
 });
 
 test("送る設定: 自動の訳す先、文体は日本語のときだけ、用語集", () => {
