@@ -29,9 +29,11 @@ async function run() {
   $("copy").disabled = true;
   setStatus({ text: "訳しています" });
   try {
-    const fetch = sessionFetch(settings);
+    settings = await loadSettings();
+    const snapshot = { ...settings };
+    const fetch = sessionFetch(snapshot);
     const config = await loadConfig({ signal: mine.signal, fetch });
-    const common = requestSettings(text, settings, config);
+    const common = requestSettings(text, snapshot, config);
     if (common.source_lang && common.source_lang === common.target_lang) throw new Error("原文と訳す先が同じ言語です");
     const { truncated } = await translateInto($("out"), text, common, { signal: mine.signal, fetch });
     setStatus(doneMessage(truncated));
