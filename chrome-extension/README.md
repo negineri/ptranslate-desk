@@ -13,7 +13,8 @@ Chrome 120 以降と、Edge などの Chromium 系のブラウザで動きます
 
 ## 使い方
 
-1. 拡張を読み込みます (下の「開発」)。ストアでの配布はまだしていません
+1. [GitHub Releases](https://github.com/negineri/ptranslate-desk/releases)の `PTranslate.Chrome_` で始まるZIPを展開し、
+   [導入手順](../docs/CHROME_EXTENSION_RELEASE.md)に沿って読み込みます。ストアでの配布はまだしていません
 2. 拡張の設定でサーバーURL (例: `https://translate.example.com`、パスなし) を入れ、「保存して接続を確かめる」を押します。
    そのサーバーへの接続の許可を求められるので、許可します
 3. 同じブラウザで Web版 (サーバーURLのページ) にログインしておきます。「ログインしていません」と出たら、
