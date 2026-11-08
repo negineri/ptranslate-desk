@@ -76,6 +76,36 @@ test("段落内の非表示の文字を送らず、書き換えない", () => {
   p.w.close();
 });
 
+test("clipで隠した見出し・リンクとその子を、画面内の本文より先に送らない", () => {
+  const p = page('<main><h1 style="position:absolute;clip:rect(0px,0px,0px,0px)">Hidden heading</h1><div style="position:absolute;clip:rect(0px,0px,0px,0px)"><a><span>Hidden link</span></a></div><h2>Visible headline</h2><p>Visible paragraph</p></main>', (w) => {
+    w.Range.prototype.getClientRects = () => [rect(0, 10, 200, 20)];
+  });
+  assert.deepEqual(Array.from(p.blocks, (b) => b.text), ["Visible headline", "Visible paragraph"]);
+  assert.deepEqual(Array.from(p.messages[0].visibleIds), [0, 1]);
+  p.w.close();
+});
+
+test("clip-pathで全体を隠した文字を省き、一部が残る文字と通常の画面外の文は収集する", () => {
+  const p = page('<span style="clip-path:inset(50%)">Clipped label</span><span style="clip-path:inset(0px 50% 0px 50%)">Clipped horizontally</span><span style="clip-path:inset(1px)">Partial clipping</span><span style="position:absolute;clip:rect(0px,100px,20px,0px)">Partial rectangle</span><span style="position:relative;clip:rect(0px,0px,0px,0px)">Inactive clip</span><p>Outside viewport</p>', (w) => {
+    w.Element.prototype.getBoundingClientRect = () => rect(0, 2000, 100, 20);
+  });
+  assert.deepEqual(Array.from(p.blocks, (b) => b.text), ["Partial clipping", "Partial rectangle", "Inactive clip", "Outside viewport"]);
+  assert.deepEqual(Array.from(p.messages[0].visibleIds), []);
+  p.w.close();
+});
+
+test("切り抜きが解除されて表示された文字は、変更後に翻訳対象へ追加する", async () => {
+  const p = page('<main><div id="clipped" style="position:absolute;clip:rect(0px,0px,0px,0px)"><h2>Newly visible headline</h2></div><p>Visible paragraph</p></main>', (w) => {
+    w.Range.prototype.getClientRects = () => [rect(0, 10, 200, 20)];
+  });
+  assert.deepEqual(Array.from(p.blocks, (b) => b.text), ["Visible paragraph"]);
+  p.w.document.querySelector("#clipped").style.clip = "auto";
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  const update = p.messages.findLast((message) => message.type === "update");
+  assert.ok(Array.from(update.blocks).some((block) => block.text === "Newly visible headline"));
+  p.w.close();
+});
+
 test("画面外の文章も収集し、上限による未翻訳を完了時に表示する", () => {
   const p = page('<p>Hello</p><p style="margin-top:20000px">Outside viewport</p>');
   assert.equal(p.blocks.length, 2);

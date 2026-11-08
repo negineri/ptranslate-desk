@@ -63,22 +63,57 @@
     return added;
   }
 
-  function textVisible(el) {
+  // 読み上げ用の文字はcheckVisibilityでも可視扱いになることがある。
+  // clipやclip-pathで面積が0になる祖先を、収集と画面内の優先判定の両方から除く。
+  function emptyClip(el, style) {
+    const clip = style.clip?.match(/^rect\((.*)\)$/);
+    if (clip && ["absolute", "fixed"].includes(style.position)) {
+      const edges = clip[1].trim().split(/[,\s]+/).map((value) =>
+        /^-?(?:\d+\.?\d*|\.\d+)(?:px)?$/.test(value) ? parseFloat(value) : NaN);
+      if (edges.length === 4 && (edges[2] <= edges[0] || edges[1] <= edges[3])) return true;
+    }
+    const inset = style.clipPath?.match(/^inset\(([^)]*)\)$/);
+    if (!inset) return false;
+    const values = inset[1].split(/\s+round\s+/)[0].trim().split(/\s+/);
+    if (values.length < 1 || values.length > 4) return false;
+    const [top, right = top, bottom = top, left = right] = values;
+    const rect = el.getBoundingClientRect();
+    const pixels = (value, size) => {
+      const match = value.match(/^(-?(?:\d+\.?\d*|\.\d+))(px|%)?$/);
+      return match ? Number(match[1]) * (match[2] === "%" ? size / 100 : 1) : NaN;
+    };
+    return pixels(top, rect.height) + pixels(bottom, rect.height) >= rect.height ||
+      pixels(left, rect.width) + pixels(right, rect.width) >= rect.width;
+  }
+
+  function fullyClipped(el, cache) {
+    const path = [];
+    let clipped = false;
+    for (let current = el; current; current = composedParent(current)) {
+      if (cache.has(current)) { clipped = cache.get(current); break; }
+      path.push(current);
+      if (emptyClip(current, getComputedStyle(current))) { clipped = true; break; }
+    }
+    for (const current of path) cache.set(current, clipped);
+    return clipped;
+  }
+
+  function textVisible(el, clipCache) {
     if (!el || !el.isConnected) return false;
     // display:contents の要素自身には箱がなく、checkVisibility() は false を返す。
     // 文字の visibility を調べたうえで、箱のある祖先に表示状態を問い合わせる。
     if (["hidden", "collapse"].includes(getComputedStyle(el).visibility)) return false;
     let box = el;
     while (box && getComputedStyle(box).display === "contents") box = composedParent(box);
-    return !!box && (!box.checkVisibility || box.checkVisibility({ opacityProperty: true }));
+    return !!box && (!box.checkVisibility || box.checkVisibility({ opacityProperty: true })) && !fullyClipped(el, clipCache);
   }
 
   // 文字そのものの位置を、画面と祖先のスクロール領域で切り取って判定する。
   // 大きな親要素の矩形だけを見ると、その中の画面外の文まで見えている扱いになる。
-  function onScreen(block) {
+  function onScreen(block, clipCache) {
     return block.nodes.some((node) => {
       const el = node.assignedSlot || textContainer(node);
-      if (!node.isConnected || !textVisible(el)) return false;
+      if (!node.isConnected || !textVisible(el, clipCache)) return false;
       let left = 0, top = 0, right = innerWidth, bottom = innerHeight;
       for (let parent = el; parent; parent = composedParent(parent)) {
         const style = getComputedStyle(parent);
@@ -116,7 +151,8 @@
   }
 
   function visibleBlocks() {
-    return blocks.filter(onScreen).sort((a, b) => contentPriority(a) - contentPriority(b));
+    const clipCache = new WeakMap();
+    return blocks.filter((block) => onScreen(block, clipCache)).sort((a, b) => contentPriority(a) - contentPriority(b));
   }
 
   function schedulePriority() {
@@ -212,6 +248,7 @@
   }
 
   function collect() {
+    const clipCache = new WeakMap();
     const groups = []; // 同じ親要素を持つ、連続する文字のノード
     function visit(root) {
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
@@ -231,7 +268,7 @@
           continue;
         }
         const el = textContainer(node);
-        if (!textVisible(el)) {
+        if (!textVisible(el, clipCache)) {
           previous = null;
           continue;
         }
@@ -246,7 +283,7 @@
     visit(document.body);
     const list = [];
     for (const [el, nodes] of groups) {
-      if (!textVisible(el)) continue;
+      if (!textVisible(el, clipCache)) continue;
       const text = nodes.map(sourceData).join("").replace(/\s+/g, " ").trim();
       if (!text) continue;
       list.push({ id: list.length, nodes, text });
