@@ -335,18 +335,18 @@
   const shadow = host.attachShadow({ mode: "closed" });
   shadow.innerHTML = `<style>
     :host { all: initial; }
-    .bar { position: fixed; top: 12px; right: 12px; z-index: 2147483647; display: grid; gap: 6px;
-      width: 300px; max-width: calc(100vw - 24px); box-sizing: border-box; padding: 8px; border-radius: 10px;
+    .bar { position: fixed; top: 12px; right: 12px; z-index: 2147483647; display: grid; gap: 4px;
+      width: 260px; max-width: calc(100vw - 24px); box-sizing: border-box; padding: 6px; border-radius: 10px;
       font: 13px/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
       background: #ffffff; color: #1d2330; border: 1px solid #dde1e8; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
-    .heading, .actions { display: flex; align-items: center; gap: 6px; }
+    .heading, .actions { display: flex; align-items: center; gap: 4px; }
     .heading strong { font-size: 12px; }
     .msg { flex: 1; min-width: 0; display: block; height: 20px; line-height: 20px; overflow: hidden; text-overflow: ellipsis;
       white-space: nowrap; font-variant-numeric: tabular-nums; }
     .actions { flex-wrap: wrap; min-height: 26px; }
     .err { color: #c43c3c; } .ok { color: #1f8a4c; } .warn { color: #b26a00; }
     button { font: inherit; color: inherit; background: transparent; border: 1px solid #dde1e8; border-radius: 6px;
-      padding: 2px 8px; cursor: pointer; white-space: nowrap; }
+      padding: 2px 6px; cursor: pointer; white-space: nowrap; }
     button.primary { background: #2f6fde; color: #fff; border-color: #2f6fde; }
     button:disabled { opacity: .45; cursor: default; }
     button[hidden] { display: none; }
