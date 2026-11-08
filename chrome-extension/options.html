@@ -1,10 +1,10 @@
 <!doctype html>
-<!-- 拡張の設定 -->
+<!-- 設定 -->
 <html lang="ja">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PTranslate — 拡張の設定</title>
+<title>PTranslate — 設定</title>
 <!-- shared-style -->
 <style>
   main { max-width: 720px; }
@@ -15,15 +15,15 @@
 </style>
 </head>
 <body><main>
-  <h1><img class="brand-mark" src="./logo.png" width="32" height="32" alt="">拡張の設定</h1>
+  <h1><img class="brand-mark" src="./logo.png" width="32" height="32" alt="">設定</h1>
+  <p class="hint">接続後は、拡張のアイコンを左クリックするとページ全体を翻訳します。設定はアイコンを右クリックして開けます。</p>
   <p class="sub">サーバーモードの翻訳には PTranslate のサーバーとそのアカウントが要ります。ログインは Web版 (サーバーURLのページ) で行い、拡張はそのログインを使います。</p>
   <section>
     <label for="mode">翻訳する場所</label>
     <select id="mode"><option value="server">サーバーで翻訳</option><option value="local">このPCで翻訳</option></select>
     <div id="local-help" hidden>
       <p class="hint">Windows版デスクトップと連携すると、このPCで翻訳できます。</p>
-      <button id="connect-desktop">デスクトップと接続</button>
-      <p class="hint">デスクトップで登録を承認し、ローカルモードにしてください。ブラウザーがアプリを開く確認を表示したら、開くことを許可してください。</p>
+      <p class="hint">「接続」を押し、デスクトップで登録を承認してください。デスクトップはローカルモードにしてください。ブラウザーがアプリを開く確認を表示したら、開くことを許可してください。</p>
       <details><summary>デスクトップが開かない場合</summary><p class="hint">最新版をインストールして一度起動してください。手動で登録する場合は、デスクトップの「Chrome連携」に次のIDを入力してください。<br><code id="extension-id"></code></p></details>
     </div>
     <div id="server-fields">
@@ -32,7 +32,7 @@
     <p class="hint">管理者から伝えられたURL (パスなし)。Web版の「クライアントの接続設定」にも出ています。</p>
     </div>
     <div class="row">
-      <button id="save" class="primary">保存して接続を確かめる</button>
+      <button id="save" class="primary">接続</button>
       <button id="login" hidden>Web版を開いてログイン</button>
       <span id="status" class="hint" role="status"></span>
     </div>

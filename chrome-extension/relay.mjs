@@ -109,9 +109,9 @@ export async function apiFetch(route, body, deps, abort) {
 
 async function httpFetch(route, body, deps, abort, server) {
   const method = ROUTES[route];
-  if (!server) throw new RelayError("no-server", "接続先が未設定です。拡張の設定でサーバーURLを入れてください");
+  if (!server) throw new RelayError("no-server", "接続先が未設定です。設定でサーバーURLを入れ、「接続」を押してください");
   if (!(await deps.hasPermission(server))) {
-    throw new RelayError("no-permission", "サーバーへの接続が許可されていません。拡張の設定で保存し直してください");
+    throw new RelayError("no-permission", "サーバーへの接続が許可されていません。設定で「接続」を押してください");
   }
   let timer;
   const timeoutMs = deps.timeoutMs ?? READ_TIMEOUT_MS;

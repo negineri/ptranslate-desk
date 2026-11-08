@@ -1,16 +1,20 @@
 import { mountOverlay } from "./overlay.mjs";
 import { runPageTask } from "./page-task.mjs";
-import { isExtensionPage, relay } from "./relay.mjs";
-import { loadSettings, originPattern } from "./settings.mjs";
+import { apiFetch, isExtensionPage, pinConnection, relay } from "./relay.mjs";
+import { connectionKey, loadSettings, originPattern } from "./settings.mjs";
 
 const MENU_ID = "translate-selection";
 const PAGE_MENU_ID = "translate-page";
+const SETTINGS_MENU_ID = "settings";
 const EXTENSION_ROOT = chrome.runtime.getURL("");
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  await chrome.contextMenus.removeAll();
   chrome.contextMenus.create({ id: MENU_ID, title: "PTranslate で翻訳", contexts: ["selection"] });
   chrome.contextMenus.create({ id: PAGE_MENU_ID, title: "PTranslate でこのページを翻訳", contexts: ["page"] });
-  chrome.storage.session.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
+  chrome.contextMenus.create({ id: SETTINGS_MENU_ID, title: "設定", contexts: ["action"] });
+  await chrome.storage.session.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
+  if (reason === "install") await chrome.runtime.openOptionsPage();
 });
 
 const apiDeps = {
@@ -31,14 +35,9 @@ chrome.runtime.onConnect.addListener((port) => {
   port.disconnect();
 });
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender) => {
   if (sender.id !== chrome.runtime.id) return;
-  // ツールバーの画面の「このページを翻訳」
-  if (msg?.type === "translate-page" && isExtensionPage(sender, EXTENSION_ROOT) && Number.isInteger(msg.tabId)) {
-    translatePage(msg.tabId).then(sendResponse);
-    return true;
-  }
-  // ページのバーの「Web版を開いてログイン」「拡張の設定」
+  // ページのバーの「Web版を開いてログイン」「設定」
   if (msg?.type === "open" && sender.tab) {
     if (msg.what === "options") void chrome.runtime.openOptionsPage();
     if (msg.what === "login") {
@@ -48,8 +47,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === SETTINGS_MENU_ID) void chrome.runtime.openOptionsPage();
   if (info.menuItemId === MENU_ID) void translateSelection(tab, info.selectionText || "", info.frameId);
   if (info.menuItemId === PAGE_MENU_ID && tab?.id !== undefined) void translatePage(tab.id);
+});
+
+// ツールバーは入力画面を開かず、そのページを翻訳する。
+chrome.action.onClicked.addListener(async (tab) => {
+  if (tab?.id === undefined) return;
+  const settings = await loadSettings();
+  if (settings.mode !== "local" && !settings.server) return chrome.runtime.openOptionsPage();
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 5000);
+  try {
+    const key = connectionKey(settings);
+    const connected = await chrome.storage.session.get("connectedTo");
+    if (connected.connectedTo !== key) {
+      const deps = await pinConnection(apiDeps, settings);
+      const res = await apiFetch("api/config", null, deps, abort);
+      if (res.status !== 200) { await res.body?.cancel(); throw new Error("接続してください"); }
+      await new Response(res.body).json();
+      await chrome.storage.session.set({ connectedTo: key });
+    }
+  } catch {
+    await chrome.storage.session.remove("connectedTo");
+    await chrome.runtime.openOptionsPage();
+    return;
+  } finally { clearTimeout(timer); abort.abort(); }
+  const result = await translatePage(tab.id);
+  await chrome.action.setBadgeText({ tabId: tab.id, text: result.ok ? "" : "!" });
+  await chrome.action.setTitle({ tabId: tab.id, title: result.ok ? "PTranslate でこのページを翻訳" : result.message });
 });
 
 chrome.commands.onCommand.addListener((command, tab) => {

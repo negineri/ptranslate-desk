@@ -5,10 +5,10 @@ export function nativeFetch(route, body, abort, connect = () => chrome.runtime.c
   return new Promise((resolve, reject) => {
     abort.signal.throwIfAborted();
     let port;
-    try { port = connect(); } catch { reject(localError("Chrome連携に接続できません。デスクトップの設定で登録してください")); return; }
+    try { port = connect(); } catch { reject(localError("Chrome連携に接続できません。設定で「接続」を押してください")); return; }
     let timer;
     let controller, finished = false, started = false;
-    const failure = () => localError("ローカル翻訳に接続できません。デスクトップの起動・ローカルモード・Chrome連携の登録を確認してください");
+    const failure = () => localError("ローカル翻訳に接続できません。デスクトップの起動とローカルモードを確認し、設定で「接続」を押してください");
     const close = () => { clearTimeout(timer); abort.signal.removeEventListener("abort", onAbort); port.disconnect(); };
     const fail = (error) => {
       if (finished) return;

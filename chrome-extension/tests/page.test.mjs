@@ -119,7 +119,7 @@ test("接続先が未設定なら設定を促す", async () => {
   const messages = await runPage([{ id: 0, text: "Hello" }], server, { settings: async () => ({ ...SETTINGS, server: "" }) }).finished;
   assert.deepEqual(messages.at(-1), {
     type: "error", code: "no-server", remedy: "options",
-    message: "接続先が未設定です。拡張の設定でサーバーURLを入れてください",
+    message: "接続先が未設定です。設定でサーバーURLを入れ、「接続」を押してください",
   });
 });
 

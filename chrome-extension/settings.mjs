@@ -62,3 +62,8 @@ export function chromeRegistrationUrl(id) {
   if (!/^[a-p]{32}$/.test(id)) throw new Error("拡張IDが正しくありません");
   return `ptranslate://register-chrome?extension_id=${id}`;
 }
+
+// 接続済みの判定は翻訳先ごと。ブラウザーを閉じると消えるsessionにだけ保持する。
+export function connectionKey(settings) {
+  return settings.mode === "local" ? "local" : `server:${settings.server}`;
+}

@@ -354,7 +354,7 @@
     <button data-act="restore">原文に戻す</button>
     <button data-act="again" class="primary">訳す</button>
     <button data-act="login">Web版を開いてログイン</button>
-    <button data-act="options">拡張の設定</button>
+    <button data-act="options">設定</button>
     <button data-act="close" aria-label="閉じる">×</button>
   </div>`;
   const $ = (sel) => shadow.querySelector(sel);

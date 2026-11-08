@@ -47,7 +47,7 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
     </div>
     <div class="setup-group">
       <h4>Chrome連携</h4>
-      <p class="hint">拡張の設定で「デスクトップと接続」を押すと、IDを入力せずに連携できます。</p>
+      <p class="hint">拡張の設定で「接続」を押すと、IDを入力せずに連携できます。</p>
       <details><summary>拡張IDを手動で登録</summary>
       <label for="chrome-extension-id">拡張ID</label><input id="chrome-extension-id" type="text" maxlength="32" autocomplete="off" spellcheck="false">
       <button id="chrome-register">Chrome連携を登録</button></details><p id="chrome-status" class="hint" role="status"></p>
@@ -66,7 +66,7 @@ chromeDialog.id = "chrome-registration-confirm";
 chromeDialog.setAttribute("aria-labelledby", "chrome-registration-title");
 chromeDialog.innerHTML = `<h2 id="chrome-registration-title">Chrome拡張との連携を登録しますか？</h2>
   <p>この拡張が、デスクトップのローカル翻訳を利用できるようになります。</p>
-  <p>拡張の設定で「デスクトップと接続」を押して開いた場合だけ登録してください。</p>
+  <p>拡張の設定で「接続」を押して開いた場合だけ登録してください。</p>
   <p>拡張ID：<code id="chrome-registration-id"></code></p>
   <p id="chrome-registration-status" class="hint" role="status"></p>
   <div class="local-actions"><button id="chrome-registration-approve" class="primary">登録する</button><button id="chrome-registration-cancel" autofocus>キャンセル</button></div>`;
