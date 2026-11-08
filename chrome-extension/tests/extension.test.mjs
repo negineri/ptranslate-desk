@@ -1,7 +1,7 @@
 // 先に node chrome-extension/build.mjs で dist/ を作ってから実行する
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeServerUrl, originPattern, requestSettings, sanitize } from "../dist/settings.mjs";
+import { chromeRegistrationUrl, normalizeServerUrl, originPattern, requestSettings, sanitize } from "../dist/settings.mjs";
 import { isExtensionPage, relay } from "../dist/relay.mjs";
 import { extensionFetch, sessionFetch } from "../dist/transport.mjs";
 import { ensureOk, LoginRequired, remedy } from "../dist/translate.mjs";
@@ -146,3 +146,11 @@ for (const initial of [{ mode: "local", server: SERVER }, { mode: "server", serv
     assert.equal(calls.at(-1), "https://other.example.com/api/config");
   });
 }
+
+test("連携URLには拡張自身の正しい形式のIDだけを入れる", () => {
+  const id = "abcdefghijklmnopabcdefghijklmnop";
+  assert.equal(chromeRegistrationUrl(id), `ptranslate://register-chrome?extension_id=${id}`);
+  for (const invalid of ["", "a".repeat(31), "q".repeat(32), "A".repeat(32), `${id}&extra=1`]) {
+    assert.throws(() => chromeRegistrationUrl(invalid));
+  }
+});

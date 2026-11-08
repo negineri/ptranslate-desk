@@ -329,7 +329,16 @@ fn main() {
         .read_timeout(Duration::from_secs(120))
         .build()
         .expect("HTTP クライアントの作成に失敗しました");
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "windows")]
+    let builder = builder
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if args.len() == 1 {
+                resident::show_main(app);
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init());
+    let builder = builder
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
@@ -357,6 +366,8 @@ fn main() {
             #[cfg(target_os = "windows")]
             chrome_bridge::schedule(app.handle());
             updates::schedule(app.handle());
+            #[cfg(target_os = "windows")]
+            chrome_bridge::setup_links(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -418,6 +429,8 @@ fn main() {
         logout,
         restore_session,
         chrome_bridge::register_chrome,
+        chrome_bridge::chrome_registration_request,
+        chrome_bridge::finish_chrome_registration,
         local::local_status,
         local::select_server_mode,
         local::measure_local_devices,
@@ -454,6 +467,8 @@ fn main() {
             logout,
             restore_session,
             chrome_bridge::register_chrome,
+            chrome_bridge::chrome_registration_request,
+            chrome_bridge::finish_chrome_registration,
             local::local_status,
             local::select_server_mode,
             local::measure_local_devices,
@@ -495,7 +510,13 @@ fn main() {
             {
                 window
                     .eval(
-                        if std::env::var("PTRANSLATE_BRIDGE_FAILURE_PROBE").as_deref() == Ok("1") {
+                        if std::env::var("PTRANSLATE_CHROME_REGISTRATION_PROBE").as_deref()
+                            == Ok("1")
+                        {
+                            include_str!("../../tests/chrome-registration-probe.js")
+                        } else if std::env::var("PTRANSLATE_BRIDGE_FAILURE_PROBE").as_deref()
+                            == Ok("1")
+                        {
                             include_str!("../../tests/bridge-failure-probe.js")
                         } else if std::env::var("PTRANSLATE_LOCAL_MEASURE_PROBE").as_deref()
                             == Ok("1")

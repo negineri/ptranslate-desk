@@ -47,9 +47,10 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
     </div>
     <div class="setup-group">
       <h4>Chrome連携</h4>
-      <p class="hint">拡張の設定に表示される拡張IDを登録すると、このPCの翻訳を共有できます。</p>
+      <p class="hint">拡張の設定で「デスクトップと接続」を押すと、IDを入力せずに連携できます。</p>
+      <details><summary>拡張IDを手動で登録</summary>
       <label for="chrome-extension-id">拡張ID</label><input id="chrome-extension-id" type="text" maxlength="32" autocomplete="off" spellcheck="false">
-      <button id="chrome-register">Chrome連携を登録</button><p id="chrome-status" class="hint" role="status"></p>
+      <button id="chrome-register">Chrome連携を登録</button></details><p id="chrome-status" class="hint" role="status"></p>
     </div>
   </div><p id="mode-status" class="hint" role="status"></p>
   <dialog id="local-download-confirm" aria-labelledby="local-download-title">
@@ -60,6 +61,20 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
     <div class="local-actions"><button id="local-confirm-download" class="primary">ダウンロードする</button><button id="local-decline-download" autofocus>キャンセル</button></div>
   </dialog>`;
 settingsPage.querySelector(".settings-heading").after(panel);
+const chromeDialog = document.createElement("dialog");
+chromeDialog.id = "chrome-registration-confirm";
+chromeDialog.setAttribute("aria-labelledby", "chrome-registration-title");
+chromeDialog.innerHTML = `<h2 id="chrome-registration-title">Chrome拡張との連携を登録しますか？</h2>
+  <p>この拡張が、デスクトップのローカル翻訳を利用できるようになります。</p>
+  <p>拡張の設定で「デスクトップと接続」を押して開いた場合だけ登録してください。</p>
+  <p>拡張ID：<code id="chrome-registration-id"></code></p>
+  <p id="chrome-registration-status" class="hint" role="status"></p>
+  <div class="local-actions"><button id="chrome-registration-approve" class="primary">登録する</button><button id="chrome-registration-cancel" autofocus>キャンセル</button></div>`;
+main.append(chromeDialog);
+const chromeNotice = document.createElement("p");
+chromeNotice.id = "chrome-registration-result"; chromeNotice.className = "hint"; chromeNotice.setAttribute("role", "status");
+main.append(chromeNotice);
+
 const runtime = document.createElement("p");
 runtime.id = "local-runtime-status"; runtime.className = "hint"; runtime.hidden = true; runtime.setAttribute("role", "status");
 header.after(runtime);
@@ -235,3 +250,40 @@ async function refreshRuntime() {
 }
 void refreshRuntime().catch(error);
 setInterval(() => { void refreshRuntime().catch(error); }, 1000);
+
+// イベントの到着が画面の初期化より早くても、保留中の要求を取得できる。
+let chromeRequest = null;
+let registeringChrome = false;
+async function showChromeRegistration() {
+  const pending = await invoke("chrome_registration_request");
+  if (!pending || chromeDialog.open || registeringChrome) return;
+  chromeRequest = pending;
+  $("chrome-registration-id").textContent = pending.extension_id;
+  message("chrome-registration-status", "");
+  chromeDialog.showModal();
+}
+async function finishChromeRegistration(approve) {
+  if (!chromeRequest || registeringChrome) return;
+  registeringChrome = true;
+  $("chrome-registration-approve").disabled = $("chrome-registration-cancel").disabled = true;
+  try {
+    await invoke("finish_chrome_registration", { token: chromeRequest.token, approve });
+    if (approve) {
+      $("chrome-extension-id").value = chromeRequest.extension_id;
+      message("chrome-status", "登録しました。拡張に戻り、接続を確かめてください。");
+      message("chrome-registration-result", "Chrome連携を登録しました。拡張に戻り、接続を確かめてください。");
+    }
+  } catch (e) { message("chrome-registration-result", e, true); }
+  finally {
+    chromeRequest = null;
+    chromeDialog.close();
+    registeringChrome = false;
+    $("chrome-registration-approve").disabled = $("chrome-registration-cancel").disabled = false;
+    void showChromeRegistration().catch(error);
+  }
+}
+$("chrome-registration-approve").onclick = () => { void finishChromeRegistration(true); };
+$("chrome-registration-cancel").onclick = () => { void finishChromeRegistration(false); };
+chromeDialog.addEventListener("cancel", (event) => { event.preventDefault(); void finishChromeRegistration(false); });
+await window.__TAURI__.event.listen("chrome-registration-request", () => { void showChromeRegistration().catch(error); });
+await showChromeRegistration();

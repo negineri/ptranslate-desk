@@ -3,15 +3,148 @@
 use tauri::Manager;
 
 #[derive(Default)]
-pub struct Status(std::sync::Mutex<Option<String>>);
+pub struct Status {
+    error: std::sync::Mutex<Option<String>>,
+    pending: std::sync::Mutex<Option<RegistrationRequest>>,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct RegistrationRequest {
+    token: String,
+    extension_id: String,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn extension_id_from_url(input: &str) -> Option<String> {
+    if input.len() > 256 {
+        return None;
+    }
+    let url = reqwest::Url::parse(input).ok()?;
+    if url.scheme() != "ptranslate"
+        || url.host_str() != Some("register-chrome")
+        || !matches!(url.path(), "" | "/")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let pairs: Vec<_> = url.query_pairs().collect();
+    if pairs.len() != 1 || pairs[0].0 != "extension_id" {
+        return None;
+    }
+    let id = &pairs[0].1;
+    (id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))).then(|| id.to_string())
+}
+
+impl Status {
+    #[cfg(any(target_os = "windows", test))]
+    fn offer(&self, input: &str) -> bool {
+        let Some(extension_id) = extension_id_from_url(input) else {
+            return false;
+        };
+        let mut pending = self.pending.lock().unwrap();
+        // 確認中のIDを後から届いたURLで差し替えない。
+        if pending.is_some() {
+            return false;
+        }
+        let mut secret = [0u8; 32];
+        if getrandom::fill(&mut secret).is_err() {
+            return false;
+        }
+        use base64::Engine;
+        *pending = Some(RegistrationRequest {
+            token: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret),
+            extension_id,
+        });
+        true
+    }
+    fn take(&self, token: &str) -> Result<RegistrationRequest, String> {
+        let mut pending = self.pending.lock().unwrap();
+        if !pending.as_ref().is_some_and(|r| r.token == token) {
+            return Err("登録の確認が失効しました。拡張の設定からやり直してください".into());
+        }
+        Ok(pending.take().unwrap())
+    }
+}
+
+#[tauri::command]
+pub fn chrome_registration_request(
+    window: tauri::WebviewWindow,
+) -> Result<Option<RegistrationRequest>, String> {
+    if window.label() != "main" {
+        return Err("メイン画面から操作してください".into());
+    }
+    Ok(window.state::<Status>().pending.lock().unwrap().clone())
+}
+
+fn finish_registration(
+    state: &Status,
+    token: &str,
+    approve: bool,
+    register: impl FnOnce(String) -> Result<(), String>,
+) -> Result<(), String> {
+    let request = state.take(token)?;
+    if approve {
+        register(request.extension_id)
+    } else {
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub fn finish_chrome_registration(
+    window: tauri::WebviewWindow,
+    token: String,
+    approve: bool,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("メイン画面から操作してください".into());
+    }
+    finish_registration(&window.state::<Status>(), &token, approve, |id| {
+        register_chrome(window.clone(), id)
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub fn setup_links(app: &tauri::AppHandle) {
+    use tauri::{Emitter, Manager};
+    use tauri_plugin_deep_link::DeepLinkExt;
+    let handle = app.clone();
+    app.deep_link().on_open_url(move |event| {
+        for url in event.urls() {
+            if extension_id_from_url(url.as_str()).is_some() {
+                let offered = handle.state::<Status>().offer(url.as_str());
+                crate::resident::show_main(&handle);
+                if offered {
+                    let _ = handle.emit_to("main", "chrome-registration-request", ());
+                }
+                break;
+            }
+        }
+    });
+    if let Ok(Some(urls)) = app.deep_link().get_current() {
+        for url in urls {
+            if app.state::<Status>().offer(url.as_str()) {
+                break;
+            }
+        }
+    }
+    // 試験用EXEから利用者のプロトコル登録を変更しない。
+    #[cfg(not(feature = "smoke-test"))]
+    if app.deep_link().register_all().is_err() {
+        eprintln!("拡張からデスクトップを開くためのURL登録に失敗しました。拡張IDの手動登録は利用できます。");
+    }
+}
 
 pub fn error(app: &tauri::AppHandle) -> Option<String> {
-    app.state::<Status>().0.lock().unwrap().clone()
+    app.state::<Status>().error.lock().unwrap().clone()
 }
 
 #[cfg(target_os = "windows")]
 fn unavailable(app: &tauri::AppHandle) {
-    *app.state::<Status>().0.lock().unwrap() = Some(
+    *app.state::<Status>().error.lock().unwrap() = Some(
         "Chrome連携を起動できませんでした。同じアプリが起動中なら終了してから、このアプリを起動し直してください。デスクトップでの翻訳は利用できます。".into(),
     );
 }
@@ -190,7 +323,21 @@ mod windows {
         output.write_all(body)?;
         output.flush()
     }
+    fn unregister_protocol() -> io::Result<()> {
+        let key = r"Software\Classes\ptranslate";
+        let command = windows_registry::CURRENT_USER
+            .open(format!(r"{key}\shell\open\command"))
+            .and_then(|key| key.get_string(""));
+        let expected = format!("\"{}\" \"%1\"", std::env::current_exe()?.display());
+        if command.is_ok_and(|command| command == expected) {
+            windows_registry::CURRENT_USER
+                .remove_tree(key)
+                .map_err(io::Error::other)?;
+        }
+        Ok(())
+    }
     fn unregister() -> io::Result<()> {
+        unregister_protocol()?;
         let path = manifest_path()?;
         if !path.exists() {
             return Ok(());
@@ -469,5 +616,98 @@ mod windows {
                     .unwrap();
             assert!(matches!(result, Ok(0)) || result.is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    fn link(id: &str) -> String {
+        format!("ptranslate://register-chrome?extension_id={id}")
+    }
+    #[test]
+    fn accepts_only_registration_url_with_one_valid_id() {
+        let id = "abcdefghijklmnopabcdefghijklmnop";
+        assert_eq!(extension_id_from_url(&link(id)).as_deref(), Some(id));
+        for value in [
+            "https://register-chrome?extension_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "ptranslate://other?extension_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "ptranslate://register-chrome/path?extension_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "ptranslate://user@register-chrome?extension_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "ptranslate://register-chrome:80?extension_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "ptranslate://register-chrome?extension_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#fragment",
+            "ptranslate://register-chrome?extension_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&extra=1",
+            "ptranslate://register-chrome?extension_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&extension_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "ptranslate://register-chrome", "ptranslate://register-chrome?extension_id=",
+        ] { assert!(extension_id_from_url(value).is_none(), "{value}"); }
+        for id in [
+            "a".repeat(31),
+            "a".repeat(33),
+            "q".repeat(32),
+            "A".repeat(32),
+            "é".repeat(16),
+        ] {
+            assert!(extension_id_from_url(&link(&id)).is_none());
+        }
+    }
+    #[test]
+    fn only_explicit_approval_registers_and_cancel_consumes_request() {
+        let state = Status::default();
+        let id = "a".repeat(32);
+        state.offer(&link(&id));
+        let token = state
+            .pending
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .token
+            .clone();
+        finish_registration(&state, &token, false, |_| {
+            panic!("キャンセルで登録しました")
+        })
+        .unwrap();
+        assert!(
+            finish_registration(&state, &token, true, |_| panic!("古い要求で登録しました"))
+                .is_err()
+        );
+        state.offer(&link(&id));
+        let token = state
+            .pending
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .token
+            .clone();
+        let mut registered = None;
+        finish_registration(&state, &token, true, |value| {
+            registered = Some(value);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(registered, Some(id));
+        assert!(state.pending.lock().unwrap().is_none());
+    }
+    #[test]
+    fn pending_request_cannot_be_replaced_or_approved_with_stale_token() {
+        let state = Status::default();
+        assert!(state.offer(&link(&"a".repeat(32))));
+        let first = state.pending.lock().unwrap().clone().unwrap();
+        assert!(!state.offer(&link(&"b".repeat(32))));
+        assert!(state.take("wrong-token").is_err());
+        assert_eq!(
+            state.take(&first.token).unwrap().extension_id,
+            "a".repeat(32)
+        );
+        assert!(state.take(&first.token).is_err());
+        assert!(state.offer(&link(&"b".repeat(32))));
+        assert!(state.take(&first.token).is_err());
+        let second = state.pending.lock().unwrap().clone().unwrap();
+        assert_ne!(first.token, second.token);
+        assert_eq!(
+            state.take(&second.token).unwrap().extension_id,
+            "b".repeat(32)
+        );
     }
 }

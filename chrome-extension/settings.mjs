@@ -56,3 +56,9 @@ export function requestSettings(text, settings, config = {}) {
     glossary: parseGlossary(settings.glossary || "", config.max_glossary || 200),
   };
 }
+
+// Native Messagingの初回登録は専用URLでデスクトップへ引き継ぐ。
+export function chromeRegistrationUrl(id) {
+  if (!/^[a-p]{32}$/.test(id)) throw new Error("拡張IDが正しくありません");
+  return `ptranslate://register-chrome?extension_id=${id}`;
+}

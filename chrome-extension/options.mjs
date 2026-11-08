@@ -1,4 +1,4 @@
-import { loadSettings, normalizeServerUrl, originPattern, saveSettings } from "./settings.mjs";
+import { chromeRegistrationUrl, loadSettings, normalizeServerUrl, originPattern, saveSettings } from "./settings.mjs";
 import { errorMessage, loadConfig, remedy } from "./translate.mjs";
 
 const $ = (id) => document.getElementById(id);
@@ -38,6 +38,11 @@ function showMode() {
 }
 $("mode").addEventListener("change", showMode);
 $("extension-id").textContent = chrome.runtime.id;
+$("connect-desktop").addEventListener("click", () => {
+  // 外部アプリを開く操作は、クリックの直後に行う。
+  location.href = chromeRegistrationUrl(chrome.runtime.id);
+  setStatus("status", { text: "デスクトップで登録を確認したあと、「保存して接続を確かめる」を押してください。" });
+});
 $("save").addEventListener("click", () => {
   if ($("mode").value === "local") {
     void saveSettings({ mode: "local" }).then(async (saved) => { settings = saved; await check(); }).catch((e) => setStatus("status", errorMessage(e)));

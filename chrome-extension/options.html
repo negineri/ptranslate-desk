@@ -20,7 +20,12 @@
   <section>
     <label for="mode">翻訳する場所</label>
     <select id="mode"><option value="server">サーバーで翻訳</option><option value="local">このPCで翻訳</option></select>
-    <p id="local-help" class="hint" hidden>Windows版デスクトップをローカルモードで起動し、設定の「Chrome連携」に次の拡張IDを登録してください。<br><code id="extension-id"></code></p>
+    <div id="local-help" hidden>
+      <p class="hint">Windows版デスクトップと連携すると、このPCで翻訳できます。</p>
+      <button id="connect-desktop">デスクトップと接続</button>
+      <p class="hint">デスクトップで登録を承認し、ローカルモードにしてください。ブラウザーがアプリを開く確認を表示したら、開くことを許可してください。</p>
+      <details><summary>デスクトップが開かない場合</summary><p class="hint">最新版をインストールして一度起動してください。手動で登録する場合は、デスクトップの「Chrome連携」に次のIDを入力してください。<br><code id="extension-id"></code></p></details>
+    </div>
     <div id="server-fields">
     <label for="server">サーバーURL</label>
     <input id="server" type="url" placeholder="https://translate.example.com" spellcheck="false" autocomplete="off">
