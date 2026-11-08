@@ -15,12 +15,14 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "PTranslate Desk",
         "width": 1120,
         "height": 760
       },
       {
         "label": "popup",
+        "create": false,
         "title": "PTranslate Desk — 選んだ文を翻訳",
         "url": "popup.html",
         "width": 600,

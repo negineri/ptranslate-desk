@@ -37,6 +37,18 @@ class ChromeReleaseTest(unittest.TestCase):
         (dist / "icon.png").write_bytes(b"test-icon")
         return dist
 
+    def test_action_without_popup_packages_without_input_screen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dist = self.fixture(directory)
+            manifest = json.loads((dist / "manifest.json").read_text())
+            del manifest["action"]["default_popup"]
+            (dist / "manifest.json").write_text(json.dumps(manifest))
+            (dist / "action.html").unlink()
+            archive = chrome.package(dist, Path(directory) / "output", "1.2.3")
+            with zipfile.ZipFile(archive) as zipped:
+                self.assertNotIn("action.html", zipped.namelist())
+                self.assertIn("popup.html", zipped.namelist())
+
     def test_zip_has_root_manifest_and_tag_version_without_changing_sources(self):
         with tempfile.TemporaryDirectory() as directory:
             dist = self.fixture(directory)

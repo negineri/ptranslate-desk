@@ -1,10 +1,10 @@
 // ページ全体の翻訳 (background 側)。先に node chrome-extension/build.mjs で dist/ を作ってから実行する
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PAGE_CONCURRENCY, runPageTask, shouldTranslate } from "../dist/page-task.mjs";
+import { concurrencyLimit, runPageTask, shouldTranslate } from "../dist/page-task.mjs";
 import { portPair, SERVER, sse } from "./helpers.mjs";
 
-const CONFIG = { user: "test", max_glossary: 200, languages: [{ code: "ja", name: "日本語" }, { code: "en", name: "英語" }] };
+const CONFIG = { concurrency: { max_in_flight: 2, scope: "user" }, user: "test", max_glossary: 200, languages: [{ code: "ja", name: "日本語" }, { code: "en", name: "英語" }] };
 const SETTINGS = { server: SERVER, source: "", target: "auto", form: "", glossary: "" };
 
 // 訳を "[訳す先] 原文" で返すサーバー。受けた要求を requests に残す
@@ -21,7 +21,7 @@ function fakeServer({ config = () => Response.json(CONFIG), translate } = {}) {
 }
 
 // ページの側の port を作って blocks を送り、done か error まで受けたメッセージを返す
-function runPage(blocks, server, deps = {}) {
+function runPage(blocks, server, deps = {}, visibleIds) {
   const [page, background] = portPair();
   runPageTask(background, {
     fetch: server.fetch, server: async () => SERVER, hasPermission: async () => true, settings: async () => SETTINGS,
@@ -34,7 +34,7 @@ function runPage(blocks, server, deps = {}) {
       if (msg.type === "done" || msg.type === "error") resolve(messages);
     });
   });
-  page.postMessage({ blocks });
+  page.postMessage({ blocks, visibleIds });
   return { page, messages, finished };
 }
 
@@ -116,10 +116,10 @@ test("ログインしていないときは login を返す", async () => {
 
 test("接続先が未設定なら設定を促す", async () => {
   const server = fakeServer();
-  const messages = await runPage([{ id: 0, text: "Hello" }], server, { server: async () => "" }).finished;
+  const messages = await runPage([{ id: 0, text: "Hello" }], server, { settings: async () => ({ ...SETTINGS, server: "" }) }).finished;
   assert.deepEqual(messages.at(-1), {
     type: "error", code: "no-server", remedy: "options",
-    message: "接続先が未設定です。拡張の設定でサーバーURLを入れてください",
+    message: "接続先が未設定です。設定でサーバーURLを入れ、「接続」を押してください",
   });
 });
 
@@ -136,7 +136,7 @@ test("ページが port を閉じたら訳している要求も止める", async
   while (!messages.some((m) => m.type === "partial")) await new Promise((r) => setTimeout(r, 5));
   page.disconnect();
   await new Promise((r) => setTimeout(r, 30));
-  assert.equal(server.requests.length, PAGE_CONCURRENCY);
+  assert.equal(server.requests.length, 2);
   assert.ok(server.requests.every((r) => r.signal.aborted));
 });
 
@@ -302,4 +302,74 @@ test("認証や要求エラーは枠待ちとして再試行しない", async ()
     assert.equal(messages.at(-1).type, "error");
     assert.ok(!messages.some((m) => m.type === "waiting"));
   }
+});
+
+for (const advertised of [undefined, 1, 4, 12]) {
+  test(`接続先の通知に応じてページ翻訳を実行する (${advertised ?? "通知なし"})`, async () => {
+    let active = 0, maximum = 0;
+    const config = { ...CONFIG };
+    if (advertised === undefined) delete config.concurrency;
+    else config.concurrency = { max_in_flight: advertised };
+    const server = fakeServer({
+      config: () => Response.json(config),
+      translate: async (body) => {
+        active++; maximum = Math.max(maximum, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active--;
+        return sse([{ t: body.text }, { done: true, finish: "stop" }]);
+      },
+    });
+    const messages = await runPage(Array.from({ length: 16 }, (_, id) => ({ id, text: `Paragraph ${id}` })), server).finished;
+    assert.equal(messages.at(-1).type, "done");
+    assert.equal(maximum, advertised ?? 1);
+    assert.equal(server.requests.length, 16);
+  });
+}
+
+for (const mode of ["local", "server"]) {
+  test(`設定変更後もページの再試行・後続段落・更新を元の接続先へ送る (${mode})`, { timeout: 5000 }, async () => {
+    const settings = { ...SETTINGS, mode };
+    const calls = [];
+    let translations = 0;
+    let page;
+    const respond = async (route) => {
+      calls.push(route);
+      if (route.endsWith("api/config")) {
+        settings.mode = "server";
+        settings.server = "https://other.example.com";
+        return Response.json({ ...CONFIG, concurrency: { max_in_flight: 1 } });
+      }
+      translations++;
+      if (translations === 1) return Response.json({ error: "busy" }, { status: 429 });
+      if (translations === 2) {
+        page.postMessage({ type: "update", blocks: [{ id: 2, text: "Updated paragraph" }] });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return sse([{ t: "訳" }, { done: true, finish: "stop" }]);
+    };
+    const task = runPage([{ id: 0, text: "First paragraph" }, { id: 1, text: "Second paragraph" }], {
+      fetch: async (url) => respond(url),
+    }, {
+      settings: async () => settings,
+      server: async () => settings.server,
+      nativeFetch: async (route) => { const res = await respond(`local/${route}`); return { status: res.status, body: res.body }; },
+      busyRetryMs: 1,
+    });
+    page = task.page;
+    const messages = await task.finished;
+    assert.equal(messages.at(-1).type, "done");
+    assert.ok(translations >= 3);
+    const prefix = mode === "local" ? "local/" : `${SERVER}/`;
+    assert.ok(calls.every((url) => url.startsWith(prefix)), JSON.stringify(calls));
+    assert.ok(messages.some((msg) => msg.type === "block" && msg.id === 2));
+  });
+}
+
+test("ページ途中の表示IDを初回要求から優先し、画面外の200段落を先に送らない", async () => {
+  const server = fakeServer({ config: () => Response.json({ ...CONFIG, concurrency: { max_in_flight: 1 } }) });
+  const blocks = Array.from({ length: 250 }, (_, id) => ({ id, text: `Paragraph ${id}` }));
+  const messages = await runPage(blocks, server, {}, [200, 201]).finished;
+  assert.deepEqual(server.requests.slice(0, 3).map((request) => request.body.text), ["Paragraph 200", "Paragraph 201", "Paragraph 0"]);
+  assert.equal(messages.at(-1).type, "done");
+  assert.equal(server.requests.length, 250);
 });

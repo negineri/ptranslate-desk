@@ -76,13 +76,44 @@ test("段落内の非表示の文字を送らず、書き換えない", () => {
   p.w.close();
 });
 
+test("clipで隠した見出し・リンクとその子を、画面内の本文より先に送らない", () => {
+  const p = page('<main><h1 style="position:absolute;clip:rect(0px,0px,0px,0px)">Hidden heading</h1><div style="position:absolute;clip:rect(0px,0px,0px,0px)"><a><span>Hidden link</span></a></div><h2>Visible headline</h2><p>Visible paragraph</p></main>', (w) => {
+    w.Range.prototype.getClientRects = () => [rect(0, 10, 200, 20)];
+  });
+  assert.deepEqual(Array.from(p.blocks, (b) => b.text), ["Visible headline", "Visible paragraph"]);
+  assert.deepEqual(Array.from(p.messages[0].visibleIds), [0, 1]);
+  p.w.close();
+});
+
+test("clip-pathで全体を隠した文字を省き、一部が残る文字と通常の画面外の文は収集する", () => {
+  const p = page('<span style="clip-path:inset(50%)">Clipped label</span><span style="clip-path:inset(0px 50% 0px 50%)">Clipped horizontally</span><span style="clip-path:inset(1px)">Partial clipping</span><span style="position:absolute;clip:rect(0px,100px,20px,0px)">Partial rectangle</span><span style="position:relative;clip:rect(0px,0px,0px,0px)">Inactive clip</span><p>Outside viewport</p>', (w) => {
+    w.Element.prototype.getBoundingClientRect = () => rect(0, 2000, 100, 20);
+  });
+  assert.deepEqual(Array.from(p.blocks, (b) => b.text), ["Partial clipping", "Partial rectangle", "Inactive clip", "Outside viewport"]);
+  assert.deepEqual(Array.from(p.messages[0].visibleIds), []);
+  p.w.close();
+});
+
+test("切り抜きが解除されて表示された文字は、変更後に翻訳対象へ追加する", async () => {
+  const p = page('<main><div id="clipped" style="position:absolute;clip:rect(0px,0px,0px,0px)"><h2>Newly visible headline</h2></div><p>Visible paragraph</p></main>', (w) => {
+    w.Range.prototype.getClientRects = () => [rect(0, 10, 200, 20)];
+  });
+  assert.deepEqual(Array.from(p.blocks, (b) => b.text), ["Visible paragraph"]);
+  p.w.document.querySelector("#clipped").style.clip = "auto";
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  const update = p.messages.findLast((message) => message.type === "update");
+  assert.ok(Array.from(update.blocks).some((block) => block.text === "Newly visible headline"));
+  p.w.close();
+});
+
 test("画面外の文章も収集し、上限による未翻訳を完了時に表示する", () => {
   const p = page('<p>Hello</p><p style="margin-top:20000px">Outside viewport</p>');
   assert.equal(p.blocks.length, 2);
   p.receive({ type: "done", total: 3000, truncated: 2, omitted: 5 });
   const message = p.shadow.querySelector(".msg");
-  assert.match(message.textContent, /5 か所は訳していません/);
-  assert.match(message.textContent, /2 か所は長すぎて途中で切れました/);
+  assert.equal(message.textContent, "一部未翻訳");
+  assert.match(message.title, /未翻訳: 5件/);
+  assert.match(message.title, /途中まで: 2件/);
   assert.ok(message.classList.contains("warn"));
   p.w.close();
 });
@@ -102,6 +133,63 @@ test("縦横のスクロール領域で隠れた文より、実際に見えて�
   });
   assert.deepEqual(Array.from(p.blocks, (b) => b.text), ["Visible message", "Clipped above", "Clipped right", "Below viewport"]);
   assert.deepEqual(Array.from(p.messages[0].visibleIds), [2]);
+  p.w.close();
+});
+
+test("ページ途中から開始しても、画面全体へ適用されるbodyのoverflowで表示中の段落を除外しない", async () => {
+  let visibleId = 200;
+  const p = page(Array.from({ length: 250 }, (_, id) => `<p>Paragraph ${id}</p>`).join(""), (w) => {
+    const root = w.document.documentElement, body = w.document.body;
+    root.style.overflow = "visible";
+    body.style.overflowX = "hidden"; body.style.overflowY = "auto";
+    Object.defineProperty(w.document, "scrollingElement", { value: root });
+    for (const el of [root, body]) {
+      el.getBoundingClientRect = () => rect(0, -5000, 1024, w.innerHeight);
+      Object.defineProperties(el, { clientWidth: { value: 1024 }, clientHeight: { value: w.innerHeight } });
+    }
+    w.Range.prototype.getClientRects = function () {
+      const id = Number(this.startContainer.data.split(" ")[1]);
+      return [rect(0, (id - visibleId) * 1000 + 10, 100, 20)];
+    };
+  });
+  assert.equal(p.blocks[0].text, "Paragraph 200");
+  assert.deepEqual(Array.from(p.messages[0].visibleIds), [200]);
+  visibleId = 220;
+  p.w.dispatchEvent(new p.w.Event("scroll"));
+  await new Promise((resolve) => p.w.requestAnimationFrame(resolve));
+  assert.deepEqual(Array.from(p.messages.at(-1).ids), [220]);
+  p.w.close();
+});
+
+test("rootにoverflowがあるページでもroot自身は画面の矩形で判定する", () => {
+  const p = page('<p>Visible paragraph</p><p>Outside paragraph</p>', (w) => {
+    const root = w.document.documentElement;
+    root.style.overflow = "auto";
+    root.getBoundingClientRect = () => rect(0, -5000, 1024, w.innerHeight);
+    Object.defineProperty(w.document, "scrollingElement", { value: root });
+    Object.defineProperties(root, { clientWidth: { value: 1024 }, clientHeight: { value: w.innerHeight } });
+    w.Range.prototype.getClientRects = function () {
+      return [rect(0, this.startContainer.data.startsWith("Visible") ? 10 : -1000, 100, 20)];
+    };
+  });
+  assert.deepEqual(Array.from(p.messages[0].visibleIds), [0]);
+  p.w.close();
+});
+
+test("body自体が独立したスクロール枠の場合は、その枠の外の文字を優先しない", () => {
+  const p = page('<p>Clipped above</p><p>Visible paragraph</p>', (w) => {
+    w.document.documentElement.style.overflowX = "hidden";
+    w.document.documentElement.style.overflowY = "hidden";
+    const body = w.document.body;
+    body.style.overflowX = "hidden"; body.style.overflowY = "auto";
+    body.getBoundingClientRect = () => rect(100, 100, 300, 200);
+    Object.defineProperties(body, { clientWidth: { value: 300 }, clientHeight: { value: 200 } });
+    w.Range.prototype.getClientRects = function () {
+      return [rect(110, this.startContainer.data.startsWith("Visible") ? 110 : 50, 100, 20)];
+    };
+  });
+  assert.equal(p.blocks[0].text, "Visible paragraph");
+  assert.deepEqual(Array.from(p.messages[0].visibleIds), [1]);
   p.w.close();
 });
 
@@ -226,6 +314,7 @@ test("翻訳中に再利用された文字ノードへ古い訳を書かず、�
 test("中止後と原文へ戻した後は、新しい文章を自動で訳さない", async () => {
   for (const action of ["stop", "restore"]) {
     const p = page("<p>First message</p>");
+    if (action === "restore") complete(p.connections[0]);
     p.shadow.querySelector(`[data-act="${action}"]`).click();
     p.w.document.querySelector("p").textContent = "Second message";
     await new Promise((r) => setTimeout(r, 200));
@@ -253,9 +342,9 @@ test("片方が終わっても枠待ちの表示を保ち、再開で通常の�
   p.receive({ type: "waiting", id: 1, waiting: true });
   p.receive({ type: "waiting", id: 1, waiting: false });
   p.receive({ type: "block", id: 1, text: "訳", done: 1, total: 2 });
-  assert.match(p.shadow.querySelector(".msg").textContent, /前の翻訳の終了を待っています \(1 \/ 2\)/);
+  assert.match(p.shadow.querySelector(".msg").textContent, /順番待ち 1 \/ 2/);
   p.receive({ type: "waiting", id: 0, waiting: false });
-  assert.match(p.shadow.querySelector(".msg").textContent, /日本語に訳しています \(1 \/ 2\)/);
+  assert.match(p.shadow.querySelector(".msg").textContent, /翻訳中 1 \/ 2/);
   p.w.close();
 });
 
@@ -326,5 +415,54 @@ test("後からattachShadowされた既存要素も見つける", async () => {
   for (let i = 0; i < 200 && p.connections.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
   assert.equal(p.connections.length, 2);
   assert.deepEqual(Array.from(p.connections[1].messages[0].blocks, (b) => b.text), ["Late shadow headline"]);
+  p.w.close();
+});
+
+function started(connection) {
+  connection.receive({ type: "start", total: connection.messages[0].blocks.length, target: "ja", targetName: "日本語" });
+}
+
+test("通常の操作ボタンは準備中・翻訳中・完了でも消さず、文言を短く保つ", () => {
+  const p = page("<p>First</p>");
+  const controls = ["stop", "restore", "again"].map((act) => p.shadow.querySelector(`[data-act="${act}"]`));
+  assert.equal(p.shadow.querySelector(".msg").textContent, "準備中");
+  assert.equal(p.shadow.querySelector("select"), null);
+  assert.ok(controls.every((button) => !button.hidden));
+  started(p.connections[0]);
+  assert.equal(p.shadow.querySelector(".msg").textContent, "翻訳中 0 / 1");
+  complete(p.connections[0]);
+  assert.equal(p.shadow.querySelector(".msg").textContent, "完了");
+  assert.ok(controls.every((button) => !button.hidden && !button.disabled));
+  p.w.close();
+});
+
+test("完了後の短い追加翻訳では状態を点滅させない", async () => {
+  const p = page("<p>First</p>");
+  started(p.connections[0]); complete(p.connections[0]);
+  p.w.document.body.append(p.w.document.createElement("p"));
+  p.w.document.body.lastChild.textContent = "Later";
+  await waitUntil(() => p.connections.length === 2);
+  started(p.connections[1]);
+  assert.equal(p.shadow.querySelector(".msg").textContent, "完了");
+  complete(p.connections[1]);
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  assert.equal(p.shadow.querySelector(".msg").textContent, "完了");
+  p.w.close();
+});
+
+test("追加翻訳が長引くと翻訳中を表示し、中止した後に遅延表示を残さない", async () => {
+  const p = page("<p>First</p>");
+  started(p.connections[0]); complete(p.connections[0]);
+  const later = p.w.document.createElement("p"); later.textContent = "Later"; p.w.document.body.append(later);
+  await waitUntil(() => p.connections.length === 2);
+  started(p.connections[1]);
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  assert.equal(p.shadow.querySelector(".msg").textContent, "翻訳中 0 / 1");
+  complete(p.connections[1]);
+  later.textContent = "Next message";
+  await waitUntil(() => p.connections.length === 3);
+  p.shadow.querySelector('[data-act="stop"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  assert.equal(p.shadow.querySelector(".msg").textContent, "中止");
   p.w.close();
 });

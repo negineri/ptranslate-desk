@@ -1,3 +1,4 @@
+import { sessionFetch } from "./transport.mjs";
 import { loadSettings, requestSettings } from "./settings.mjs";
 import { doneMessage, errorMessage, loadConfig, remedy, translateInto } from "./translate.mjs";
 
@@ -54,15 +55,16 @@ async function main() {
   }
   const settings = await loadSettings();
   server = settings.server;
+  const fetch = sessionFetch(settings);
   setStatus({ text: "訳しています" });
   try {
-    const config = await loadConfig({ signal: abort.signal });
+    const config = await loadConfig({ signal: abort.signal, fetch });
     const common = requestSettings(text, settings, config);
     const name = (code) => config.languages?.find((l) => l.code === code)?.name || code;
     $("direction").textContent = `${common.source_lang ? name(common.source_lang) : "自動で判定"} → ${name(common.target_lang)}`;
     if (common.source_lang && common.source_lang === common.target_lang) throw new Error("原文と訳す先が同じ言語です");
     const { truncated } = await translateInto($("translation"), text, common, {
-      signal: abort.signal,
+      signal: abort.signal, fetch,
       onText: () => { $("copy").disabled = !$("translation").textContent.trim(); },
     });
     $("copy").disabled = !$("translation").textContent.trim();
@@ -90,4 +92,5 @@ $("options").addEventListener("click", () => { void chrome.runtime.openOptionsPa
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") { e.preventDefault(); close(); }
 });
+if (embedded) window.parent.postMessage({ ptranslate: "ready" }, "*");
 main().catch((e) => setStatus(errorMessage(e)));

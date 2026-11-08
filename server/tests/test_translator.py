@@ -9,6 +9,7 @@ import base64
 import http.client
 import importlib.util
 import json
+import socket
 import sys
 import threading
 import time
@@ -194,6 +195,15 @@ class ServerTest(unittest.TestCase):
         _, resp = self.call("POST", "/api/translate", req(), user="Bad User")
         self.assertEqual(resp.status, 401)
 
+    def test_config_announces_actual_user_concurrency_limit(self):
+        with patch.object(tr, "MAX_ACTIVE_PER_USER", 4):
+            conn, response = self.call("GET", "/api/config")
+            try:
+                config = json.loads(response.read())
+            finally:
+                conn.close()
+        self.assertEqual(config["concurrency"], {"max_in_flight": 4, "scope": "user"})
+
     def test_config_exposes_only_explicit_public_desktop_settings(self):
         for discovery in ("", "https://auth.example.com/.well-known/openid-configuration"):
             with (
@@ -281,6 +291,118 @@ class ServerTest(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertGreater(self.stats["canceled"], before)
+
+
+class UpstreamCancellationTest(unittest.TestCase):
+    """無応答のモックでも中止で接続が切れ、上流終了まで枠を保持する。"""
+
+    def setUp(self):
+        self.mock, self.stats = mock_plamo.make_server(api_key="test", delay=0.02, slow=30)
+        self.app = tr.TranslationHTTPServer(("127.0.0.1", 0), tr.Handler)
+        self.app.daemon_threads = True
+        self.config = patch.multiple(
+            tr,
+            UPSTREAM_URL=f"http://127.0.0.1:{self.mock.server_port}/v1/completions",
+            API_KEY="test",
+            HEARTBEAT_SECONDS=30,
+            UPSTREAM_TIMEOUT=60,
+            MAX_ACTIVE_PER_USER=1,
+        )
+        self.config.start()
+        self.connections = []
+        for server in (self.mock, self.app):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        for conn, response in self.connections:
+            response.close()
+            conn.close()
+        for server in (self.app, self.mock):
+            server.shutdown()
+            server.server_close()
+        self.config.stop()
+
+    def wait(self, predicate):
+        deadline = time.monotonic() + 3
+        while not predicate():
+            if time.monotonic() >= deadline:
+                self.fail("中止または実行枠の返却が完了しませんでした")
+            time.sleep(0.01)
+
+    def call(self, text):
+        pair = ServerTest.call(self, "POST", "/api/translate", req(text=text), user="cancel-probe")
+        self.connections.append(pair)
+        return pair
+
+    def active(self):
+        with tr.active_lock:
+            return tr.active.get("cancel-probe", 0)
+
+    def assert_cancels(self, text, read_first=False):
+        conn, response = self.call(text)
+        self.assertEqual(response.status, 200)
+        self.wait(lambda: self.stats["requests"] == 1)
+        if read_first:
+            self.assertTrue(response.readline().startswith(b"data:"))
+        response.close()
+        conn.close()
+        self.wait(lambda: self.stats["canceled"] == 1)
+        self.wait(lambda: self.active() == 0)
+        # 上流の30秒待ちや60秒の読み取り時限に頼らず、次の要求を受け付ける。
+        _, next_response = self.call("Hello")
+        self.assertEqual(next_response.status, 200)
+        self.assertIn(b'"done": true', next_response.read())
+        self.wait(lambda: self.active() == 0)
+
+    def test_cancel_before_upstream_response_headers(self):
+        self.assert_cancels("[wait-headers] waiting for the engine")
+
+    def test_cancel_while_waiting_for_first_token(self):
+        self.assert_cancels("[slow] waiting in the inference queue")
+
+    def test_cancel_during_translation(self):
+        self.assert_cancels("Hello " * 100, read_first=True)
+
+    def test_slot_is_held_until_upstream_worker_has_finished(self):
+        finished_network = threading.Event()
+        allow_finish = threading.Event()
+        original = tr.upstream_stream
+
+        def held_worker(*args):
+            try:
+                original(*args)
+            finally:
+                finished_network.set()
+                allow_finish.wait(5)
+
+        with patch.object(tr, "upstream_stream", held_worker):
+            conn, response = self.call("[wait-headers] waiting")
+            self.wait(lambda: self.stats["requests"] == 1)
+            response.close()
+            conn.close()
+            try:
+                self.assertTrue(finished_network.wait(3))
+                self.assertEqual(self.active(), 1)
+                _, busy = self.call("Still busy")
+                self.assertEqual(busy.status, 429)
+                busy.read()
+            finally:
+                allow_finish.set()
+            self.wait(lambda: self.active() == 0)
+
+    def test_cancel_before_socket_registration_interrupts_it_on_attach(self):
+        cancellation = tr.UpstreamCancellation()
+        left, right = socket.socketpair()
+        with left, right:
+            cancellation.set()
+            cancellation.attach(left)
+            right.settimeout(1)
+            self.assertEqual(right.recv(1), b"")
+            cancellation.detach()
+        with patch.object(tr.http.client, "HTTPConnection") as connection:
+            tr.upstream_stream("test", 256, tr.queue.Queue(), cancellation)
+            connection.return_value.connect.assert_not_called()
+            connection.return_value.request.assert_not_called()
 
 
 def jwt(exp: float) -> str:

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PTranslate for Chrome",
-  "description": "PLaMo 3 Translate の PTranslate サーバーで、ページの選んだ文やページ全体を翻訳します。",
+  "description": "PTranslate のサーバーまたはこのPCで、ページの選んだ文やページ全体を翻訳します。",
   "version": "0.0.1",
   "version_name": "0.0.0-dev",
   "minimum_chrome_version": "120",
@@ -12,8 +12,7 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "PTranslate",
-    "default_popup": "action.html",
+    "default_title": "PTranslate でこのページを翻訳",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
@@ -27,7 +26,7 @@
     "service_worker": "background.mjs",
     "type": "module"
   },
-  "permissions": ["activeTab", "contextMenus", "scripting", "storage"],
+  "permissions": ["nativeMessaging", "activeTab", "contextMenus", "scripting", "storage"],
   "optional_host_permissions": ["https://*/*", "http://127.0.0.1/*", "http://localhost/*"],
   "commands": {
     "translate-selection": {

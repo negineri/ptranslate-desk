@@ -4,6 +4,7 @@
 )]
 
 mod auth;
+mod chrome_bridge;
 mod connection;
 mod local;
 #[cfg(target_os = "macos")]
@@ -317,6 +318,10 @@ fn start_request(
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    if chrome_bridge::host_entry() {
+        return;
+    }
     let client = Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -324,7 +329,16 @@ fn main() {
         .read_timeout(Duration::from_secs(120))
         .build()
         .expect("HTTP クライアントの作成に失敗しました");
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "windows")]
+    let builder = builder
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if args.len() == 1 {
+                resident::show_main(app);
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init());
+    let builder = builder
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
@@ -336,15 +350,11 @@ fn main() {
                 })
                 .build(),
         )
+        .manage(chrome_bridge::Status::default())
         .manage(resident::Resident::default())
         .manage(updates::Updates::default())
         .setup(move |app| {
             app.manage(local::Local::load(app.handle())?);
-            if app.config().identifier.ends_with(".local-prototype") {
-                if let Some(window) = app.get_webview_window("main") {
-                    window.set_title("PTranslate Desk Local Prototype")?;
-                }
-            }
             let connection = connection::load(app.handle())?;
             app.manage(Backend {
                 auth: Arc::new(auth::Auth::with_connection(client.clone(), connection)),
@@ -353,7 +363,11 @@ fn main() {
             });
             resident::setup(app.handle())?;
             local::Local::schedule(app.handle());
+            #[cfg(target_os = "windows")]
+            chrome_bridge::schedule(app.handle());
             updates::schedule(app.handle());
+            #[cfg(target_os = "windows")]
+            chrome_bridge::setup_links(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -367,6 +381,15 @@ fn main() {
                     }
                 }
             });
+            // IPCを受け付ける画面は、状態と常駐機能の初期化が終わってから作る。
+            for config in &app.config().app.windows {
+                tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+            }
+            if app.config().identifier.ends_with(".local-prototype") {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.set_title("PTranslate Desk Local Prototype")?;
+                }
+            }
             if std::env::args().any(|arg| arg == "--verify-login") {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -405,8 +428,12 @@ fn main() {
         login,
         logout,
         restore_session,
+        chrome_bridge::register_chrome,
+        chrome_bridge::chrome_registration_request,
+        chrome_bridge::finish_chrome_registration,
         local::local_status,
         local::select_server_mode,
+        local::open_model_information,
         local::measure_local_devices,
         local::cancel_local_measurement,
         local::resources::local_download_info,
@@ -415,7 +442,6 @@ fn main() {
         local::local_devices,
         local::save_local_settings,
         local::start_local_engine,
-        local::stop_local_engine,
         cancel_login,
         start_request,
         stop_request,
@@ -441,8 +467,12 @@ fn main() {
             login,
             logout,
             restore_session,
+            chrome_bridge::register_chrome,
+            chrome_bridge::chrome_registration_request,
+            chrome_bridge::finish_chrome_registration,
             local::local_status,
             local::select_server_mode,
+            local::open_model_information,
             local::measure_local_devices,
             local::cancel_local_measurement,
             local::resources::local_download_info,
@@ -451,7 +481,6 @@ fn main() {
             local::local_devices,
             local::save_local_settings,
             local::start_local_engine,
-            local::stop_local_engine,
             cancel_login,
             start_request,
             stop_request,
@@ -475,12 +504,25 @@ fn main() {
             smoke_result
         ])
         .on_page_load(|window, payload| {
+            if std::env::var("PTRANSLATE_EXTENSION_PROBE").as_deref() == Ok("1") {
+                return;
+            }
             if window.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
             {
                 window
                     .eval(
-                        if std::env::var("PTRANSLATE_LOCAL_MEASURE_PROBE").as_deref() == Ok("1") {
+                        if std::env::var("PTRANSLATE_CHROME_REGISTRATION_PROBE").as_deref()
+                            == Ok("1")
+                        {
+                            include_str!("../../tests/chrome-registration-probe.js")
+                        } else if std::env::var("PTRANSLATE_BRIDGE_FAILURE_PROBE").as_deref()
+                            == Ok("1")
+                        {
+                            include_str!("../../tests/bridge-failure-probe.js")
+                        } else if std::env::var("PTRANSLATE_LOCAL_MEASURE_PROBE").as_deref()
+                            == Ok("1")
+                        {
                             include_str!("../../tests/local-setup-probe.js")
                         } else if std::env::var("PTRANSLATE_LOCAL_PROBE").as_deref() == Ok("1") {
                             include_str!("../../tests/local-probe.js")

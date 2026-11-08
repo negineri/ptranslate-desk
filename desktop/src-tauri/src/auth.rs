@@ -622,7 +622,7 @@ fn claim_names(token: &str) -> Vec<String> {
     claims.into_iter().map(|(key, _)| key).collect()
 }
 
-fn open_browser(url: &Url) -> Result<(), String> {
+pub(crate) fn open_browser(url: &Url) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(url.as_str()).spawn();
     #[cfg(target_os = "linux")]

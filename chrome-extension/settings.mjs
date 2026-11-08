@@ -1,7 +1,7 @@
 // 拡張の設定。原文と訳はここに保存しない
 import { guessTarget, parseGlossary } from "./translation.mjs";
 
-export const DEFAULTS = Object.freeze({ server: "", source: "", target: "auto", form: "", glossary: "" });
+export const DEFAULTS = Object.freeze({ server: "", mode: "server", source: "", target: "ja", form: "", glossary: "" });
 const KEYS = Object.keys(DEFAULTS);
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
@@ -31,6 +31,7 @@ export function originPattern(server) {
 export function sanitize(stored) {
   const out = { ...DEFAULTS };
   for (const key of KEYS) if (typeof stored?.[key] === "string") out[key] = stored[key];
+  if (!["server", "local"].includes(out.mode)) out.mode = "server";
   return out;
 }
 
@@ -54,4 +55,15 @@ export function requestSettings(text, settings, config = {}) {
     context: "",
     glossary: parseGlossary(settings.glossary || "", config.max_glossary || 200),
   };
+}
+
+// Native Messagingの初回登録は専用URLでデスクトップへ引き継ぐ。
+export function chromeRegistrationUrl(id) {
+  if (!/^[a-p]{32}$/.test(id)) throw new Error("拡張IDが正しくありません");
+  return `ptranslate://register-chrome?extension_id=${id}`;
+}
+
+// 接続済みの判定は翻訳先ごと。ブラウザーを閉じると消えるsessionにだけ保持する。
+export function connectionKey(settings) {
+  return settings.mode === "local" ? "local" : `server:${settings.server}`;
 }

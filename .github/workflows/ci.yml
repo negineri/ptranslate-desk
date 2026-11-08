@@ -73,6 +73,8 @@ jobs:
       - run: node desktop/build.mjs
       - run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
       - run: python tools/run_desktop_mock.py --smoke-test
+      - run: python tools/test_chrome_bridge.py
+      - run: python tools/test_chrome_registration.py
       - run: npm ci
         working-directory: desktop
       - run: npm run tauri -- build --ci -- --locked

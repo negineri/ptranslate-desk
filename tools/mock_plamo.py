@@ -5,6 +5,7 @@
 Server-Sent Events で返す。原文の中に次の印があれば、その動きをする。
 
 - `[slow]`   最初の断片を返す前に --slow 秒待つ (前段の生存確認の試験)
+- `[wait-headers]` HTTP応答のヘッダーを返す前に --slow 秒待つ
 - `[length]` `finish_reason: length` で終える (長すぎて切れた場合)
 - `[error]`  500 を返す
 
@@ -18,6 +19,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import select
+import socket
 import socketserver
 import threading
 import time
@@ -55,6 +58,23 @@ def make_server(port: int = 0, api_key: str = "", delay: float = 0.05, slow: flo
             self.end_headers()
             self.wfile.write(body)
 
+        def wait_or_canceled(self, seconds):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                try:
+                    readable, _, _ = select.select(
+                        [self.connection], [], [], min(0.02, max(0, deadline - time.monotonic()))
+                    )
+                    if readable and not self.connection.recv(1, socket.MSG_PEEK):
+                        with lock:
+                            stats["canceled"] += 1
+                        return True
+                except OSError:
+                    with lock:
+                        stats["canceled"] += 1
+                    return True
+            return False
+
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if api_key and self.headers.get("Authorization") != f"Bearer {api_key}":
@@ -73,14 +93,16 @@ def make_server(port: int = 0, api_key: str = "", delay: float = 0.05, slow: flo
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+            if "[wait-headers]" in text and self.wait_or_canceled(slow):
+                return
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Connection", "close")
             self.end_headers()
             finish = "length" if "[length]" in text else "stop"
             try:
-                if "[slow]" in text:
-                    time.sleep(slow)
+                if "[slow]" in text and self.wait_or_canceled(slow):
+                    return
                 for word in f"[{lang}] {text}".split(" "):
                     chunk = {"choices": [{"text": word + " ", "finish_reason": None}]}
                     self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())

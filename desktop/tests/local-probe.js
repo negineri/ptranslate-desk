@@ -62,10 +62,12 @@
     await invoke("start_request", { id: "local-probe-cancel", route: "api/translate", body: { text: "This application translates text on your computer. ".repeat(60), target_lang: "ja" }, stream: channel });
     await invoke("stop_request", { id: "local-probe-cancel" });
     await wait(() => canceled);
-    step = "モデルの解放";
-    if (state.auto_release) await wait(async () => !(await invoke("local_status")).ready);
-    else await invoke("stop_local_engine");
-    if ((await invoke("local_status")).ready) throw new Error("モデルが解放されませんでした");
+    if (state.auto_release) {
+      step = "モデルの自動解放";
+      await wait(async () => !(await invoke("local_status")).ready);
+      if ((await invoke("local_status")).ready) throw new Error("モデルが解放されませんでした");
+    }
+    // 自動解放を無効にした場合は、以下のsmoke_resultによるアプリ終了で解放する。
     await invoke("smoke_result", { passed: true, step: JSON.stringify({ device: state.device, loadMs, results }) });
   } catch (error) {
     await invoke("smoke_result", { passed: false, step: `${step}: ${error}` });

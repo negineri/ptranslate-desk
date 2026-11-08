@@ -41,11 +41,12 @@ def validate_files(files, version):
         raise ValueError("拡張のバージョンが配布タグと一致しません")
     required = {
         manifest["background"]["service_worker"],
-        manifest["action"]["default_popup"],
         manifest["options_ui"]["page"],
         *manifest["icons"].values(),
         *manifest["action"]["default_icon"].values(),
     }
+    if popup := manifest["action"].get("default_popup"):
+        required.add(popup)
     for resource in manifest.get("web_accessible_resources", []):
         required.update(resource["resources"])
     for name, content in files.items():

@@ -1,15 +1,20 @@
+import { mountOverlay } from "./overlay.mjs";
 import { runPageTask } from "./page-task.mjs";
-import { isExtensionPage, relay } from "./relay.mjs";
-import { loadSettings, originPattern } from "./settings.mjs";
+import { apiFetch, isExtensionPage, pinConnection, relay } from "./relay.mjs";
+import { connectionKey, loadSettings, originPattern } from "./settings.mjs";
 
 const MENU_ID = "translate-selection";
 const PAGE_MENU_ID = "translate-page";
+const SETTINGS_MENU_ID = "settings";
 const EXTENSION_ROOT = chrome.runtime.getURL("");
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  await chrome.contextMenus.removeAll();
   chrome.contextMenus.create({ id: MENU_ID, title: "PTranslate で翻訳", contexts: ["selection"] });
   chrome.contextMenus.create({ id: PAGE_MENU_ID, title: "PTranslate でこのページを翻訳", contexts: ["page"] });
-  chrome.storage.session.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
+  chrome.contextMenus.create({ id: SETTINGS_MENU_ID, title: "設定", contexts: ["action"] });
+  await chrome.storage.session.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
+  if (reason === "install") await chrome.runtime.openOptionsPage();
 });
 
 const apiDeps = {
@@ -30,14 +35,9 @@ chrome.runtime.onConnect.addListener((port) => {
   port.disconnect();
 });
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender) => {
   if (sender.id !== chrome.runtime.id) return;
-  // ツールバーの画面の「このページを翻訳」
-  if (msg?.type === "translate-page" && isExtensionPage(sender, EXTENSION_ROOT) && Number.isInteger(msg.tabId)) {
-    translatePage(msg.tabId).then(sendResponse);
-    return true;
-  }
-  // ページのバーの「Web版を開いてログイン」「拡張の設定」
+  // ページのバーの「Web版を開いてログイン」「設定」
   if (msg?.type === "open" && sender.tab) {
     if (msg.what === "options") void chrome.runtime.openOptionsPage();
     if (msg.what === "login") {
@@ -47,8 +47,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === SETTINGS_MENU_ID) void chrome.runtime.openOptionsPage();
   if (info.menuItemId === MENU_ID) void translateSelection(tab, info.selectionText || "", info.frameId);
   if (info.menuItemId === PAGE_MENU_ID && tab?.id !== undefined) void translatePage(tab.id);
+});
+
+// ツールバーは入力画面を開かず、そのページを翻訳する。
+chrome.action.onClicked.addListener(async (tab) => {
+  if (tab?.id === undefined) return;
+  const settings = await loadSettings();
+  if (settings.mode !== "local" && !settings.server) return chrome.runtime.openOptionsPage();
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 15000);
+  try {
+    const key = connectionKey(settings);
+    const connected = await chrome.storage.session.get("connectedTo");
+    if (connected.connectedTo !== key) {
+      const deps = await pinConnection(apiDeps, settings);
+      const res = await apiFetch("api/config", null, deps, abort);
+      if (res.status !== 200) { await res.body?.cancel(); throw new Error("接続してください"); }
+      await new Response(res.body).json();
+      await chrome.storage.session.set({ connectedTo: key });
+    }
+  } catch {
+    await chrome.storage.session.remove("connectedTo");
+    await chrome.runtime.openOptionsPage();
+    return;
+  } finally { clearTimeout(timer); abort.abort(); }
+  const result = await translatePage(tab.id);
+  await chrome.action.setBadgeText({ tabId: tab.id, text: result.ok ? "" : "!" });
+  await chrome.action.setTitle({ tabId: tab.id, title: result.ok ? "PTranslate でこのページを翻訳" : result.message });
 });
 
 chrome.commands.onCommand.addListener((command, tab) => {
@@ -91,59 +119,6 @@ async function pickSelection(tabId, frameId) {
   }
 }
 
-// ページの上に訳の枠を出す。ページの CSS が混ざらないように shadow DOM に入れる
-function mountOverlay(src, rect) {
-  const ID = "ptranslate-extension-overlay";
-  document.getElementById(ID)?.remove();
-  const host = document.createElement("div");
-  host.id = ID;
-  const shadow = host.attachShadow({ mode: "closed" });
-  const frame = document.createElement("iframe");
-  frame.src = src;
-  frame.allow = "clipboard-write";
-  frame.title = "PTranslate";
-  const width = Math.min(480, innerWidth - 16);
-  const maxHeight = Math.max(160, Math.round(innerHeight * 0.6));
-  let height = 180;
-  let top = 8;
-  let left = innerWidth - width - 8;
-  if (rect) {
-    left = Math.min(Math.max(8, rect.left), innerWidth - width - 8);
-    top = rect.bottom + 8 + height <= innerHeight ? rect.bottom + 8 : Math.max(8, rect.top - 8 - height);
-  }
-  const place = () => {
-    frame.style.cssText = [
-      "position:fixed", `top:${top}px`, `left:${left}px`, `width:${width}px`, `height:${height}px`,
-      "border:0", "border-radius:10px", "box-shadow:0 6px 24px rgba(0,0,0,.25)", "z-index:2147483647",
-      "background:transparent", "color-scheme:normal", "margin:0", "padding:0",
-    ].join(";");
-  };
-  place();
-  shadow.append(frame);
-  document.documentElement.append(host);
-  const close = () => {
-    removeEventListener("message", onMessage, true);
-    removeEventListener("mousedown", onOutside, true);
-    removeEventListener("keydown", onKey, true);
-    host.remove();
-  };
-  const onMessage = (e) => {
-    if (e.source !== frame.contentWindow || typeof e.data !== "object" || !e.data) return;
-    if (e.data.ptranslate === "close") close();
-    if (e.data.ptranslate === "resize" && Number.isFinite(e.data.height)) {
-      height = Math.min(maxHeight, Math.max(120, Math.round(e.data.height)));
-      if (top + height > innerHeight - 8) top = Math.max(8, innerHeight - 8 - height);
-      place();
-    }
-  };
-  const onOutside = (e) => { if (!e.composedPath().includes(host)) close(); };
-  const onKey = (e) => { if (e.key === "Escape") close(); };
-  addEventListener("message", onMessage, true);
-  addEventListener("mousedown", onOutside, true);
-  addEventListener("keydown", onKey, true);
-  frame.addEventListener("load", () => frame.focus(), { once: true });
-}
-
 async function translateSelection(tab, fallbackText, frameId) {
   const picked = tab?.id === undefined ? null : await pickSelection(tab.id, frameId);
   const text = picked?.text || fallbackText;
@@ -154,12 +129,12 @@ async function translateSelection(tab, fallbackText, frameId) {
   const src = chrome.runtime.getURL(`popup.html#${id}`);
   if (tab?.id !== undefined) {
     try {
-      await chrome.scripting.executeScript({
+      const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id, frameIds: [0] },
         func: mountOverlay,
         args: [src, picked?.rect ?? null],
       });
-      return;
+      if (results[0]?.result !== "blocked") return;
     } catch {
       /* ページに出せないときは別ウィンドウで開く */
     }

@@ -1,12 +1,19 @@
 // ページ全体の翻訳 (background 側)。ページの content script (page-content.js) から段落の一覧を受け取り、
-// サーバーの 1 人あたりの上限に合わせて 2 か所まで並列に訳し、port で返す
+// 接続先が通知する並列数に合わせて訳し、portで返す
+import { MAX_IN_FLIGHT } from "./scheduler.mjs";
 import { splitText, translateChunk } from "./translation.mjs";
-import { apiFetch, RelayError } from "./relay.mjs";
+import { apiFetch, pinConnection, RelayError } from "./relay.mjs";
 import { requestSettings } from "./settings.mjs";
 import { ensureOk, LoginRequired } from "./translate.mjs";
 
 export const MAX_BLOCKS = 3000;
-export const PAGE_CONCURRENCY = 2;
+export const PAGE_CONCURRENCY = MAX_IN_FLIGHT;
+// 古い接続先や不正な通知は1件。通知値をそのままワーカー数に使わない。
+export function concurrencyLimit(config) {
+  const c = config?.concurrency;
+  if (!Number.isSafeInteger(c?.max_in_flight) || c.max_in_flight < 1) return 1;
+  return Math.min(PAGE_CONCURRENCY, c.max_in_flight);
+}
 const BUSY_TIMEOUT_MS = 60_000;
 const BUSY_RETRY_MS = 500;
 
@@ -32,6 +39,7 @@ export function shouldTranslate(text) {
 export function runPageTask(port, deps) {
   const abort = new AbortController();
   let closed = false;
+  let requestDeps = deps;
   let priority = new Map();
   let update = null;
   const onPriority = (msg) => {
@@ -73,7 +81,7 @@ export function runPageTask(port, deps) {
     try {
       for (;;) {
         abort.signal.throwIfAborted();
-        const res = await apiFetch(route, body, deps, abort);
+        const res = await apiFetch(route, body, requestDeps, abort);
         if (route !== "api/translate" || res.status !== 429) {
           return ensureOk(new Response(res.body, { status: res.status }));
         }
@@ -98,6 +106,7 @@ export function runPageTask(port, deps) {
     if (!Array.isArray(blocks)) throw new RelayError("bad-request", "ページの文を読み取れませんでした");
     blocks = blocks.filter((b) => b && Number.isInteger(b.id) && typeof b.text === "string");
     const settings = await deps.settings();
+    requestDeps = await pinConnection(deps, settings);
     const config = await (await call("api/config")).json();
     // 訳す先の自動はページ全体の文で決める
     const sample = blocks.map((b) => b.text).join("\n");
@@ -127,7 +136,7 @@ export function runPageTask(port, deps) {
         skipped = candidates.length - pending.length;
         total = done + running.size + pending.length;
       }
-      while (pending.length && running.size < PAGE_CONCURRENCY && !abort.signal.aborted) {
+      while (pending.length && running.size < concurrencyLimit(config) && !abort.signal.aborted) {
         // 空いた枠へ、最新の表示順で次の箇所を送る。
         let nextIndex = 0;
         let bestPriority = Infinity;

@@ -25,7 +25,7 @@
   .sub { color: var(--muted); margin: 0 0 16px; font-size: .9rem; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
   .langs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-  button, select, textarea, input[type="url"], input[type="text"] { font: inherit; color: var(--text); background: var(--panel);
+  button, select, textarea, input[type="url"], input[type="text"], input[type="number"] { font: inherit; color: var(--text); background: var(--panel);
          border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
   select { -webkit-appearance: none; appearance: none; padding-right: 32px; cursor: pointer;
          background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
@@ -33,7 +33,7 @@
          background-position: right 16px center, right 12px center;
          background-size: 4px 4px; background-repeat: no-repeat; }
   button:focus-visible, select:focus-visible, textarea:focus-visible,
-  input[type="url"]:focus-visible, input[type="text"]:focus-visible {
+  input[type="url"]:focus-visible, input[type="text"]:focus-visible, input[type="number"]:focus-visible {
          outline: 2px solid var(--accent); outline-offset: 2px; }
   button { cursor: pointer; }
   button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); padding: 8px 20px; font-weight: 600; }
@@ -125,6 +125,7 @@
   #local-settings h3 { margin-top:0; } .mode-switch,.local-actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
   .mode-switch button[aria-pressed=true] { border-color:var(--accent); color:var(--accent); }
   #local-device { display:block; max-width:100%; margin:8px 0 20px; }
+  label[for="local-parallel-limit"] { margin-inline-end:8px; }
   .local-check { display:flex; align-items:center; gap:8px; } #local-options progress { width:100%; }
   #local-candidates li { margin:8px 0; } #local-candidates button { margin-left:8px; }
   #local-download-confirm { max-width:520px; } #local-runtime-status { margin:8px 0; }
@@ -221,9 +222,14 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
     <div id="local-setup" hidden>
       <div class="setup-group">
         <h4>翻訳に使うデバイス</h4>
-        <div class="local-actions"><button id="local-measure">計測して候補を確認</button><button id="local-cancel-measure" hidden>計測を中止</button><button id="local-manual" class="link">手動で選ぶ</button></div>
+        <div class="local-actions"><button id="local-measure">計測して候補を確認</button><button id="local-cancel-measure" hidden>計測を中止</button></div>
         <p id="local-measure-status" class="hint" role="status"></p><ol id="local-candidates"></ol>
         <label for="local-device">使用するデバイス</label><select id="local-device"><option value="none">CPU</option></select>
+      </div>
+      <div class="setup-group">
+        <h4>同時に訳す数</h4>
+        <label for="local-parallel-limit">推論の並列数</label><input id="local-parallel-limit" type="number" min="1" max="64" value="1" style="width:6em">
+        <p class="hint">1〜64件を指定できます。計測すると推奨値が入ります。保存して再起動すると反映されます。</p>
       </div>
       <div class="setup-group">
         <h4>メモリ</h4>
@@ -231,14 +237,22 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
         <p class="hint">無効の場合は、ローカルモードの起動直後にモデルを読み込みます。</p>
         <p id="local-idle-setting"><label for="local-idle-minutes">解放するまでの未使用時間</label> <select id="local-idle-minutes"><option value="1">1分</option><option value="5">5分</option><option value="10">10分</option><option value="30">30分</option><option value="60">60分</option></select></p>
       </div>
-      <div class="local-actions save-row"><button id="local-start">モデルを読み込む</button><button id="local-stop">モデルを解放</button><span class="spacer"></span><button id="local-save" class="primary">保存して再起動</button></div>
+      <div class="local-actions save-row"><button id="local-start">モデルを読み込む</button><span class="spacer"></span><button id="local-save" class="primary">保存して再起動</button></div>
+    </div>
+    <div class="setup-group">
+      <h4>Chrome連携</h4>
+      <p class="hint">拡張の設定で「接続」を押すと、IDを入力せずに連携できます。</p>
+      <details><summary>拡張IDを手動で登録</summary>
+      <label for="chrome-extension-id">拡張ID</label><input id="chrome-extension-id" type="text" maxlength="32" autocomplete="off" spellcheck="false">
+      <button id="chrome-register">Chrome連携を登録</button></details><p id="chrome-status" class="hint" role="status"></p>
     </div>
   </div><p id="mode-status" class="hint" role="status"></p>
   <dialog id="local-download-confirm" aria-labelledby="local-download-title">
     <h2 id="local-download-title">翻訳モデルをダウンロードしますか？</h2>
     <p>PLaMo 3 Translate 2B（Q4_K_M、約1.81 GB）と、推論エンジン（約37 MB）をこのPCに保存します。</p>
     <p>Hugging FaceとGitHubから取得します。通信量は約1.85 GB、空き容量は少なくとも約2 GB必要です。</p>
-    <p><a href="https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF" target="_blank" rel="noreferrer">モデルの情報</a></p>
+    <p><a id="local-model-information" href="https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF" target="_blank" rel="noreferrer">モデルの情報</a></p>
+    <p id="local-model-information-status" class="hint" role="status"></p>
     <div class="local-actions"><button id="local-confirm-download" class="primary">ダウンロードする</button><button id="local-decline-download" autofocus>キャンセル</button></div>
   </dialog></aside>
     <details id="connection-settings"><summary>接続先の設定</summary>
@@ -309,18 +323,19 @@ function scene(name) {
   $('mode-local').setAttribute('aria-pressed',String(!server)); $('mode-server').setAttribute('aria-pressed',String(server));
   $('translation-tab').setAttribute('aria-selected',String(translate)); $('settings-tab').setAttribute('aria-selected',String(!translate));
   $('local-save').disabled = missing || name === 'measuring'; $('local-measure').disabled = missing || name === 'measuring';
-  $('local-start').disabled = missing || name === 'measuring'; $('local-stop').disabled = missing || name === 'measuring';
+  $('local-start').disabled = missing || name === 'measuring';
   $('local-status').className = name === 'error' ? 'hint err' : 'hint';
   $('local-status').textContent = name === 'error' ? 'ダウンロードが途切れました。やり直してください' : name === 'downloading' ? '' : missing ? 'モデルをダウンロードすると、このPCで翻訳できます。' : 'モデルの準備ができました。';
-  $('local-measure-status').textContent = name === 'measuring' ? 'AMD Radeon Graphicsを計測しています…' : ['candidates','memory'].includes(name) ? '結果を参考に使用するデバイスを選んでください。文章の長さによって速度は変わります。' : '';
+  $('local-measure-status').textContent = name === 'measuring' ? 'AMD Radeon Graphicsを計測しています…' : ['candidates','memory'].includes(name) ? '推奨値を設定欄に反映しました。「保存して再起動」で適用します。' : '';
   $('local-candidates').replaceChildren();
   if (['candidates','memory'].includes(name)) {
     for (const [label,id] of [['NVIDIA GeForce RTX 4090：短文の翻訳 約0.06秒（おすすめ）','Vulkan0'],['CPU：短文の翻訳 約0.45秒','none'],['AMD Radeon Graphics：短文の翻訳 約3.20秒','Vulkan1']]) {
       const li = document.createElement('li'); li.append(document.createTextNode(label));
-      const button = document.createElement('button'); button.textContent = '選択'; button.onclick = () => $('local-device').value = id; li.append(button); $('local-candidates').append(li);
+      $('local-candidates').append(li);
     }
   }
   $('local-device').innerHTML = '<option value="Vulkan0">NVIDIA GeForce RTX 4090</option><option value="Vulkan1">AMD Radeon Graphics</option><option value="none">CPU</option>';
+  $('local-parallel-limit').value = '8';
   $('local-progress').value = .42; $('local-progress-label').textContent = '翻訳モデル：723.9 / 1723.5 MiB（42%）';
   $('client-id').value = 'translator-desktop'; $('shortcut-status').textContent = 'ショートカットを使えます';
   $('header-account').querySelector('summary').title = 'アカウント';
@@ -342,10 +357,9 @@ $('local-confirm-download').onclick = () => {
 };
 $('local-cancel-download').onclick = () => scene('missing');
 $('local-measure').onclick = () => { scene('measuring'); animation = setInterval(() => scene('candidates'),1800); };
-$('local-cancel-measure').onclick = () => scene('candidates'); $('local-manual').onclick = () => $('local-device').focus();
+$('local-cancel-measure').onclick = () => scene('candidates');
 $('local-auto-release').onchange = () => show('local-idle-setting',$('local-auto-release').checked);
 $('local-save').onclick = () => scene('translation'); $('local-start').onclick = () => $('local-status').textContent = 'モデルの準備ができました。';
-$('local-stop').onclick = () => $('local-status').textContent = 'モデルのメモリを解放しました。';
 $('translation-tab').onclick = () => scene('translation'); $('settings-tab').onclick = () => scene('candidates');
 $('connection-form').onsubmit = (e) => { e.preventDefault(); $('connection-confirm').showModal(); };
 $('cancel-connection').onclick = () => $('connection-confirm').close(); $('confirm-connection').onclick = () => { scene('translation'); $('who').textContent = 'サンプルユーザー'; };

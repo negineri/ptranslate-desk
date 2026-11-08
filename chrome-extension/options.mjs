@@ -1,72 +1,140 @@
-import { loadSettings, normalizeServerUrl, originPattern, saveSettings } from "./settings.mjs";
+import { chromeRegistrationUrl, connectionKey, loadSettings, normalizeServerUrl, originPattern, saveSettings } from "./settings.mjs";
 import { errorMessage, loadConfig, remedy } from "./translate.mjs";
+import { extensionFetch } from "./transport.mjs";
 
-const $ = (id) => document.getElementById(id);
-let settings = null;
-
-function setStatus(id, { text, cls = "" }) {
-  $(id).textContent = text;
-  $(id).className = "hint " + cls;
-}
-
-function fillLanguages(languages) {
-  for (const id of ["source", "target"]) {
-    const select = $(id);
-    while (select.options.length > 1) select.remove(1);
-    for (const l of languages) select.append(new Option(l.name, l.code));
-    if ([...select.options].some((o) => o.value === settings[id])) select.value = settings[id];
-  }
-}
-
-async function check() {
-  $("login").hidden = true;
-  setStatus("status", { text: "接続を確かめています" });
-  try {
-    const config = await loadConfig();
-    fillLanguages(config.languages || []);
-    setStatus("status", { text: `接続できました (${config.user} でログイン中)`, cls: "ok" });
-  } catch (error) {
+export function mountOptions({ document = globalThis.document, chrome = globalThis.chrome,
+  fetch = extensionFetch, openDesktop = (url) => { location.href = url; },
+  retryMs = 1000, registrationTimeoutMs = 120_000, checkTimeoutMs = 15000 } = {}) {
+  const $ = (id) => document.getElementById(id);
+  let settings = null, operation = null, localReady = false;
+  const setStatus = (id, { text, cls = "" }) => {
+    $(id).textContent = text; $(id).className = "hint " + cls;
+  };
+  const begin = () => {
+    operation?.abort(); operation = new AbortController();
+    $("login").hidden = true;
+    return operation;
+  };
+  const cancel = () => operation?.abort();
+  const failed = async (error, mine) => {
+    if (mine.signal.aborted) return;
+    await chrome.storage.session.remove("connectedTo");
+    if (mine.signal.aborted) return;
     setStatus("status", errorMessage(error));
     $("login").hidden = remedy(error) !== "login";
+  };
+  async function read(snapshot, signal) {
+    const abort = new AbortController();
+    const onAbort = () => abort.abort(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    const timer = setTimeout(() => abort.abort(new Error("接続先から応答がありません")), checkTimeoutMs);
+    try {
+      return await loadConfig({ signal: abort.signal, fetch: (route, options) => fetch(route, {
+        ...options, connection: { mode: snapshot.mode, server: snapshot.server },
+      }) });
+    } finally { clearTimeout(timer); signal.removeEventListener("abort", onAbort); }
   }
-}
-
-$("save").addEventListener("click", () => {
-  let server;
-  try {
-    server = normalizeServerUrl($("server").value);
-  } catch (error) {
-    setStatus("status", errorMessage(error));
-    return;
+  async function connected(snapshot, config, mine) {
+    if (mine.signal.aborted) return;
+    for (const id of ["source", "target"]) {
+      const select = $(id);
+      while (select.options.length > 1) select.remove(1);
+      for (const language of config.languages || []) select.append(new document.defaultView.Option(language.name, language.code));
+      if ([...select.options].some((option) => option.value === settings[id])) select.value = settings[id];
+    }
+    localReady = snapshot.mode === "local";
+    await chrome.storage.session.set({ connectedTo: connectionKey(snapshot) });
+    if (mine.signal.aborted) return;
+    setStatus("status", { text: snapshot.mode === "local" ? "このPCのローカル翻訳に接続できました" : `接続できました (${config.user} でログイン中)`, cls: "ok" });
   }
-  $("server").value = server;
-  // 権限の確認はボタンを押した直後 (await の前) に呼ぶ必要がある
-  chrome.permissions.request({ origins: [originPattern(server)] }).then(async (granted) => {
-    if (!granted) {
-      setStatus("status", { text: "サーバーへの接続が許可されませんでした", cls: "err" });
+  function showMode() {
+    cancel();
+    $("server-fields").hidden = $("mode").value === "local";
+    $("local-help").hidden = $("mode").value !== "local";
+    $("login").hidden = true;
+    setStatus("status", { text: "" });
+  }
+  function pause(signal) {
+    return new Promise((resolve, reject) => {
+      const onAbort = () => { clearTimeout(timer); signal.removeEventListener("abort", onAbort); reject(signal.reason); };
+      const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, retryMs);
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+  }
+  async function connectLocal(mine, launched) {
+    settings = await saveSettings({ mode: "local" });
+    const snapshot = { ...settings };
+    const deadline = Date.now() + registrationTimeoutMs;
+    for (;;) {
+      mine.signal.throwIfAborted();
+      let config;
+      try { config = await read(snapshot, mine.signal); }
+      catch (error) {
+        localReady = false;
+        if (!launched || Date.now() >= deadline || mine.signal.aborted) throw error;
+        await pause(mine.signal);
+        continue;
+      }
+      await connected(snapshot, config, mine);
       return;
     }
-    settings = await saveSettings({ server });
-    await check();
-  }, (error) => setStatus("status", errorMessage(error)));
-});
-
-$("login").addEventListener("click", () => { void chrome.tabs.create({ url: `${settings.server}/` }); });
-
-$("save-prefs").addEventListener("click", async () => {
-  settings = await saveSettings({
-    source: $("source").value, target: $("target").value, form: $("form").value, glossary: $("glossary").value,
+  }
+  $("mode").addEventListener("change", showMode);
+  $("extension-id").textContent = chrome.runtime.id;
+  $("save").addEventListener("click", () => {
+    const mine = begin();
+    if ($("mode").value === "local") {
+      const launched = !localReady;
+      // 専用URLはクリック直後に開き、承認後の接続はこの操作の中で待つ。
+      try { if (launched) openDesktop(chromeRegistrationUrl(chrome.runtime.id)); }
+      catch (error) { void failed(error, mine); return; }
+      setStatus("status", { text: launched ? "デスクトップで登録を承認してください。接続を待っています" : "接続を確かめています" });
+      void connectLocal(mine, launched).catch((error) => failed(error, mine));
+      return;
+    }
+    let server;
+    try { server = normalizeServerUrl($("server").value); }
+    catch (error) { void failed(error, mine); return; }
+    $("server").value = server;
+    // 権限の要求もクリック直後、awaitの前に行う。
+    const permission = chrome.permissions.request({ origins: [originPattern(server)] });
+    setStatus("status", { text: "接続を確かめています" });
+    void permission.then(async (granted) => {
+      mine.signal.throwIfAborted();
+      if (!granted) throw new Error("サーバーへの接続が許可されませんでした");
+      settings = await saveSettings({ server, mode: "server" });
+      const snapshot = { ...settings };
+      await connected(snapshot, await read(snapshot, mine.signal), mine);
+    }).catch((error) => failed(error, mine));
   });
-  setStatus("prefs-status", { text: "保存しました", cls: "ok" });
-});
-
-$("shortcuts").addEventListener("click", () => { void chrome.tabs.create({ url: "chrome://extensions/shortcuts" }); });
-
-async function init() {
-  settings = await loadSettings();
-  $("server").value = settings.server;
-  $("form").value = settings.form;
-  $("glossary").value = settings.glossary;
-  if (settings.server) await check();
+  $("login").addEventListener("click", () => { void chrome.tabs.create({ url: `${settings.server}/` }); });
+  $("save-prefs").addEventListener("click", async () => {
+    settings = await saveSettings({ source: $("source").value, target: $("target").value, form: $("form").value, glossary: $("glossary").value });
+    setStatus("prefs-status", { text: "保存しました", cls: "ok" });
+  });
+  $("shortcuts").addEventListener("click", () => { void chrome.tabs.create({ url: "chrome://extensions/shortcuts" }); });
+  const ready = (async () => {
+    settings = await loadSettings();
+    $("mode").value = settings.mode; showMode();
+    for (const id of ["source", "target"]) {
+      const select = $(id);
+      if (![...select.options].some((option) => option.value === settings[id])) {
+        select.append(new document.defaultView.Option(settings[id], settings[id]));
+      }
+      select.value = settings[id];
+    }
+    $("server").value = settings.server; $("form").value = settings.form; $("glossary").value = settings.glossary;
+    if (settings.mode === "local" || settings.server) {
+      const mine = begin(), snapshot = { ...settings };
+      setStatus("status", { text: "接続を確かめています" });
+      try { await connected(snapshot, await read(snapshot, mine.signal), mine); }
+      catch (error) { localReady = false; await failed(error, mine); }
+    }
+  })().catch((error) => setStatus("status", errorMessage(error)));
+  document.defaultView.addEventListener("pagehide", cancel, { once: true });
+  return { ready, destroy: cancel };
 }
-init().catch((e) => setStatus("status", errorMessage(e)));
+
+if (typeof document !== "undefined") mountOptions();

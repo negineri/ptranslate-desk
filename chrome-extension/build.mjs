@@ -13,9 +13,9 @@ if (!style) throw new Error("Web 画面の見た目 (<style>) を見つけられ
 
 await rm(dist, { recursive: true, force: true });
 await mkdir(new URL("icons/", dist), { recursive: true });
-const pages = ["popup.html", "action.html", "options.html"];
-const scripts = ["background.mjs", "relay.mjs", "transport.mjs", "settings.mjs", "translate.mjs",
-  "popup.mjs", "action.mjs", "options.mjs", "page-task.mjs", "page-content.js"];
+const pages = ["popup.html", "options.html"];
+const scripts = ["background.mjs", "overlay.mjs", "relay.mjs", "native.mjs", "scheduler.mjs", "transport.mjs", "settings.mjs", "translate.mjs",
+  "popup.mjs", "options.mjs", "page-task.mjs", "page-content.js"];
 await Promise.all([
   copyFile(new URL("manifest.json", here), new URL("manifest.json", dist)),
   ...pages.map(async (name) => {

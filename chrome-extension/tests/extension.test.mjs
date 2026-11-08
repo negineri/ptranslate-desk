@@ -1,9 +1,9 @@
 // 先に node chrome-extension/build.mjs で dist/ を作ってから実行する
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeServerUrl, originPattern, requestSettings, sanitize } from "../dist/settings.mjs";
+import { chromeRegistrationUrl, normalizeServerUrl, originPattern, requestSettings, sanitize } from "../dist/settings.mjs";
 import { isExtensionPage, relay } from "../dist/relay.mjs";
-import { extensionFetch } from "../dist/transport.mjs";
+import { extensionFetch, sessionFetch } from "../dist/transport.mjs";
 import { ensureOk, LoginRequired, remedy } from "../dist/translate.mjs";
 import { translateChunk } from "../dist/translation.mjs";
 import { portPair, SERVER, sse } from "./helpers.mjs";
@@ -30,7 +30,7 @@ test("サーバーURLは origin にそろえ、HTTPS かループバックだけ
 
 test("保存した設定は決まった項目の文字列だけを読む", () => {
   assert.deepEqual(sanitize({ server: SERVER, target: 3, text: "原文", glossary: "a => b" }),
-    { server: SERVER, source: "", target: "auto", form: "", glossary: "a => b" });
+    { server: SERVER, mode: "server", source: "", target: "ja", form: "", glossary: "a => b" });
 });
 
 test("送る設定: 自動の訳す先、文体は日本語のときだけ、用語集", () => {
@@ -122,4 +122,40 @@ test("エラーの状態を画面の言葉にする", async () => {
   await assert.rejects(ensureOk(new Response("", { status: 502 })), /翻訳サーバーに接続できません/);
   await assert.rejects(ensureOk(new Response(JSON.stringify({ error: "同時に訳せるのは 2 つまでです" }), { status: 429 })),
     /同時に訳せるのは 2 つまでです/);
+});
+
+for (const initial of [{ mode: "local", server: SERVER }, { mode: "server", server: SERVER }]) {
+  test(`区切りごとのportをまたいで開始時の接続先を保つ (${initial.mode})`, async () => {
+    let settings = { ...initial };
+    const calls = [];
+    const connect = connectTo({
+      settings: async () => settings,
+      server: async () => settings.server,
+      nativeFetch: async (route) => { calls.push(`local/${route}`); return { status: 200, body: new Response("ok").body }; },
+      fetch: async (url) => { calls.push(url); return new Response("ok"); },
+    });
+    const fetch = sessionFetch(settings, connect);
+    await (await fetch("api/config")).text();
+    settings.mode = "server";
+    settings.server = "https://other.example.com";
+    for (let i = 0; i < 2; i++) await (await fetch("api/translate", { body: "{}" })).text();
+    const prefix = initial.mode === "local" ? "local/" : `${SERVER}/`;
+    assert.deepEqual(calls, ["api/config", "api/translate", "api/translate"].map((route) => prefix + route));
+    // 新しく開始した翻訳だけが新しい接続先を使う。
+    await (await sessionFetch(settings, connect)("api/config")).text();
+    assert.equal(calls.at(-1), "https://other.example.com/api/config");
+  });
+}
+
+test("連携URLには拡張自身の正しい形式のIDだけを入れる", () => {
+  const id = "abcdefghijklmnopabcdefghijklmnop";
+  assert.equal(chromeRegistrationUrl(id), `ptranslate://register-chrome?extension_id=${id}`);
+  for (const invalid of ["", "a".repeat(31), "q".repeat(32), "A".repeat(32), `${id}&extra=1`]) {
+    assert.throws(() => chromeRegistrationUrl(invalid));
+  }
+});
+
+test("新しい設定の翻訳先は日本語にし、保存済みの自動設定は維持する", () => {
+  assert.equal(sanitize({}).target, "ja");
+  assert.equal(sanitize({ target: "auto" }).target, "auto");
 });
