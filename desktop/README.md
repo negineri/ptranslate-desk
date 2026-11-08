@@ -1,5 +1,8 @@
 # PTranslate Desk (macOS / Windows)
 
+Windowsでは、翻訳サーバーを使わない[ローカル翻訳](../docs/LOCAL_TRANSLATION.md)も選べます。
+初回にモードを選び、モデルの取得とデバイスの簡易計測を画面から進めます。
+
 Tauri 2 のメインウィンドウをローカルの翻訳モックで試せます。Rust、Node.js、各 OS の
 [Tauri の開発に必要なツール](https://v2.tauri.app/start/prerequisites/)を用意してください。Ubuntu では追加で `libdbus-1-dev` が必要です。
 

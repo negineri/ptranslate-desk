@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="ja" data-theme="auto">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PTranslate Desk — デザイン確認</title>
+<!-- アプリのHTML/CSSを直接編集できます。実際の通信やモデル取得は行いません。 -->
+<style>
+
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6576; --line: #dde1e8;
+    --accent: #2f6fde; --accent-text: #ffffff; --ok: #1f8a4c; --warn: #b26a00; --err: #c43c3c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1d2128; --text: #e7eaf0; --muted: #9aa3b2; --line: #2e343e;
+      --accent: #5b8ff0; --accent-text: #0d1117; --ok: #4cc283; --warn: #e3a33c; --err: #ef6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { display: flex; align-items: center; gap: 10px; font-size: 1.4rem; margin: 0 0 4px; }
+  .brand-mark { display: block; flex-shrink: 0; }
+  .sub { color: var(--muted); margin: 0 0 16px; font-size: .9rem; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .langs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  button, select, textarea, input[type="url"], input[type="text"] { font: inherit; color: var(--text); background: var(--panel);
+         border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
+  select { -webkit-appearance: none; appearance: none; padding-right: 32px; cursor: pointer;
+         background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                           linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+         background-position: right 16px center, right 12px center;
+         background-size: 4px 4px; background-repeat: no-repeat; }
+  button:focus-visible, select:focus-visible, textarea:focus-visible,
+  input[type="url"]:focus-visible, input[type="text"]:focus-visible {
+         outline: 2px solid var(--accent); outline-offset: 2px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); padding: 8px 20px; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 760px) { .panes { grid-template-columns: 1fr; } }
+  textarea { width: 100%; resize: vertical; }
+  #src { min-height: 320px; }
+  #out { min-height: 320px; border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px;
+         white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+  #out:empty::before { content: "ここに訳が出ます"; color: var(--muted); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  .hint { color: var(--muted); font-size: .85rem; }
+  .spacer { flex: 1; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); }
+  details textarea { min-height: 80px; margin-top: 4px; }
+  details label { display: block; margin-top: 10px; font-size: .9rem; }
+  #status { min-height: 1.4em; }
+  .under { display: flex; align-items: center; gap: 8px; }
+  button.link { border: 0; background: none; color: var(--accent); padding: 0; font-size: .85rem; }
+  label.check { display: inline-flex; align-items: center; gap: 4px; font-size: .9rem; color: var(--muted); cursor: pointer; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+  .web-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .web-actions { flex-shrink: 0; }
+  @media (max-width: 480px) { .web-heading { flex-wrap: wrap; margin-bottom: 8px; } }
+  dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto;
+           color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+  dialog::backdrop { background: #0006; }
+  dialog h2 { margin: 0 0 12px; font-size: 1.2rem; }
+  .connection-value { display: flex; gap: 8px; margin: 4px 0 12px; }
+  .connection-value input { width: 100%; min-width: 0; }
+  .connection-value button { flex-shrink: 0; }
+
+
+  [hidden] { display: none !important; }
+  [data-web-only] { display: none !important; }
+  main { padding-top: 16px; padding-bottom: 16px; }
+  #app-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  #app-header h1 { margin: 0; font-size: 1.25rem; white-space: nowrap; }
+  #app-header .sub { flex: 1; margin: 0; font-size: .85rem; }
+  #header-account { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  #app-header details { position: relative; margin: 0; }
+  #app-header summary { list-style: none; cursor: pointer; }
+  #app-header summary::-webkit-details-marker { display: none; }
+  #account-menu > summary { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; background: var(--panel); }
+  #account-menu > summary::after { content: "▾"; font-size: .75rem; color: var(--muted); }
+  #who { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .header-popover { position: absolute; top: calc(100% + 10px); z-index: 10; padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 28px #0003; }
+  #account-menu .header-popover { right: 0; min-width: 150px; }
+  #account-menu .header-popover button { width: 100%; text-align: left; }
+  #update-menu > summary { border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; color: var(--muted); background: var(--panel); font-size: .8rem; white-space: nowrap; }
+  #update-menu .header-popover { left: 0; width: min(340px, calc(100vw - 48px)); display: flex; flex-wrap: wrap; gap: 8px; }
+  #update-status { flex-basis: 100%; }
+  #update-confirm { display: flex; flex-wrap: wrap; gap: 8px; }
+  #app-header summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  @media (max-width: 760px) {
+    #app-header { gap: 12px; position: relative; }
+    #app-header .sub { order: 4; flex-basis: 100%; }
+    #app-header #update-menu { position: static; }
+    #update-menu .header-popover { left: 0; right: auto; }
+  }
+
+  .page-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin: 16px 0 12px; }
+  .page-tabs button { padding: 6px 4px 8px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); }
+  .page-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .settings-heading h2 { margin: 0; font-size: 1.2rem; }
+  .settings-heading p { margin: 4px 0 20px; }
+  #settings-page { max-width: 760px; margin: 0 auto; }
+  #translation-page section { padding: 12px; margin-bottom: 12px; }
+  #translation-page > .hint { margin: 8px 0 0; }
+  #translation-page .under { margin-top: 8px; }
+  #settings-page > details, #settings-page > aside { padding: 16px; margin: 0 0 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  #settings-page summary { color: var(--text); font-weight: 600; }
+  #desktop-settings > label { display: block; margin: 16px 0 8px; }
+  #custom-shortcut { margin-top: 12px; }
+  #shortcut-keys { max-width: 100%; }
+
+#connection-settings { margin-bottom: 16px; }
+  #connection-form { display: grid; gap: 8px; margin-top: 12px; }
+  #connection-form input { width: 100%; min-width: 0; }
+  #connection-form button { justify-self: start; }
+  #connection-form p { margin: 0; }
+#mode-welcome { max-width:800px; margin:48px auto; }
+  .mode-cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-top:24px; }
+  .mode-cards button { text-align:left; padding:24px; white-space:normal; }
+  .mode-cards strong,.mode-cards span { display:block; } .mode-cards strong { font-size:1.1rem; margin-bottom:12px; }
+  .mode-cards span { color:var(--muted); line-height:1.6; }
+  #local-settings h3 { margin-top:0; } .mode-switch,.local-actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+  .mode-switch button[aria-pressed=true] { border-color:var(--accent); color:var(--accent); }
+  #local-device { display:block; max-width:100%; margin:8px 0 20px; }
+  .local-check { display:flex; align-items:center; gap:8px; } #local-options progress { width:100%; }
+  #local-candidates li { margin:8px 0; } #local-candidates button { margin-left:8px; }
+  #local-download-confirm { max-width:520px; } #local-runtime-status { margin:8px 0; }
+  .setup-group { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); } .setup-group h4 { margin:0 0 8px; font-size:.95rem; }
+  .setup-group + .setup-group { padding-top:16px; }
+  .save-row { margin:20px 0 4px; }
+  @media(max-width:600px) { .mode-cards { grid-template-columns:1fr; } #mode-welcome { margin:24px 0; } }
+/* ここから下は確認用のツールバー。アプリ本体のデザインとは独立しています。 */
+html[data-theme="light"] { --bg:#f6f7f9;--panel:#fff;--text:#1d2330;--muted:#5d6576;--line:#dde1e8;--accent:#2f6fde;--accent-text:#fff;--ok:#1f8a4c;--warn:#b26a00;--err:#c43c3c; }
+html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9aa3b2;--line:#2e343e;--accent:#5b8ff0;--accent-text:#0d1117;--ok:#4cc283;--warn:#e3a33c;--err:#ef6b6b; }
+.preview-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
+.preview-toolbar label { display:flex; align-items:center; gap:6px; font-size:13px; }
+.preview-toolbar p { margin:0; font-size:12px; color:var(--muted); }
+#preview-frame { width:1120px; max-width:100%; min-height:760px; margin:16px auto; border:1px solid var(--line); background:var(--bg); }
+#preview-frame main { min-height:758px; }
+#preview-hint { padding:0 20px; color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<nav class="preview-toolbar" aria-label="デザイン確認ツール">
+  <strong>デザイン確認</strong>
+  <label>状態<select id="preview-scene">
+    <option value="welcome">初回のモード選択</option><option value="server">サーバー設定</option>
+    <option value="missing">モデル未取得</option><option value="confirm">ダウンロード確認</option>
+    <option value="downloading">ダウンロード中</option><option value="measuring">デバイス計測中</option>
+    <option value="candidates">デバイス候補・手動選択</option><option value="memory">メモリ自動解放</option>
+    <option value="loading">モデル読み込み中</option><option value="translation">翻訳画面</option><option value="error">取得エラー</option>
+  </select></label>
+  <label>配色<select id="preview-theme"><option value="auto">OSに合わせる</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label>
+  <label>幅<select id="preview-width"><option value="1120">1120px（既定）</option><option value="960">960px</option><option value="760">760px</option><option value="full">全幅</option></select></label>
+  <p>表示・操作のサンプルです。翻訳・通信・ダウンロードは行いません。</p>
+</nav>
+<p id="preview-hint">HTML・CSSを直接編集して保存し、ブラウザを更新してください。ロゴを含む単一ファイルです。</p>
+<div id="preview-frame"><main>
+  <header id="app-header">
+    <h1><img class="brand-mark" src="data:image/png;base64,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" width="32" height="32" alt="">PTranslate Desk</h1>
+    <div id="header-updates"><details id="update-menu"><summary id="version-badge">v0.0.0-dev · 開発用</summary><div class="header-popover"><span class="hint">デザイン確認用</span><button type="button">更新を確認</button></div></details></div>
+    <p class="sub">PLaMo 3 Translate</p>
+    <div id="header-account"><details id="account-menu"><summary><span id="who">この端末</span></summary><div class="header-popover"><button id="preview-server-switch">サーバーモードに切り替え</button></div></details></div>
+  </header>
+  <p id="local-runtime-status" class="hint" role="status" hidden></p>
+  <div class="page-tabs" role="tablist" aria-label="画面の切り替え"><button id="translation-tab" role="tab">翻訳</button><button id="settings-tab" role="tab">設定</button></div>
+  <div id="translation-page" role="tabpanel"><section>
+    <div class="langs">
+      <select id="source" aria-label="原文の言語"><option value="">自動で判定</option></select>
+      <button id="swap" title="言語を入れ替える" aria-label="言語を入れ替える">⇄</button>
+      <select id="target" aria-label="訳す先の言語"><option value="auto">日本語 ⇄ 英語 (自動)</option></select>
+      <select id="form" aria-label="文体" hidden>
+        <option value="">文体はおまかせ</option>
+        <option value="polite">です・ます</option>
+        <option value="plain">だ・である</option>
+      </select>
+    </div>
+
+    <div class="panes">
+      <div>
+        <textarea id="src" placeholder="訳したい文章を入れる (Ctrl+Enter ですぐ翻訳)" spellcheck="false"></textarea>
+        <div class="hint under"><span><span id="count">0</span> 文字</span><button id="clear" class="link" title="原文と訳を消す">空にする</button></div>
+      </div>
+      <div>
+        <div id="out" aria-live="polite"></div>
+        <div class="hint under"><span class="spacer"></span><button id="copy" class="link" title="訳をクリップボードにコピー">訳をコピー</button></div>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="go" class="primary">翻訳する</button>
+      <button id="stop" hidden>中止</button>
+      <label class="check" title="入力が止まって 1 秒たつと訳す"><input id="auto" type="checkbox" checked> 自動で翻訳</label>
+      <span id="status" class="hint"></span>
+
+    </div>
+
+    <details>
+      <summary>詳しい設定 (文脈・用語集)</summary>
+      <label for="context">文脈 (訳さない参考の文。何についての文章かなど)</label>
+      <textarea id="context" placeholder="例: プロジェクト管理ツールのヘルプページです。"></textarea>
+      <label for="glossary">用語集 (1 行に 1 つ、「原語 =&gt; 訳語」)</label>
+      <textarea id="glossary" placeholder="管理画面 =&gt; dashboard&#10;オーナー =&gt; assignee"></textarea>
+      <p class="hint">用語集・言語の選択・自動で翻訳するかは、このブラウザに覚えておきます。</p>
+    </details>
+  </section><p class="hint">長い文章は段落ごとに区切って順に訳します。</p></div>
+  <div id="settings-page" role="tabpanel"><div class="settings-heading"><h2>設定</h2><p class="hint">翻訳モードや接続先、ショートカットを管理します。</p></div>
+    <aside id="local-settings"><h3>翻訳する場所</h3>
+  <div class="mode-switch"><button id="mode-local">このPCで翻訳</button><button id="mode-server">サーバーで翻訳</button></div>
+  <div id="local-options" hidden>
+    <p class="hint">PLaMo 3 Translate 2Bをこの端末で動かします。</p>
+    <div class="setup-group">
+      <h4>モデル</h4>
+      <div id="local-download-area"><button id="local-download" class="primary">モデルをダウンロード</button><p class="hint">モデルと推論エンジンの合計：約1.85 GB</p></div>
+      <div id="local-progress-area" hidden><progress id="local-progress" max="1" value="0"></progress><p id="local-progress-label" role="status"></p><button id="local-cancel-download">ダウンロードを中止</button></div>
+      <p id="local-status" class="hint" role="status"></p>
+    </div>
+    <div id="local-setup" hidden>
+      <div class="setup-group">
+        <h4>翻訳に使うデバイス</h4>
+        <div class="local-actions"><button id="local-measure">計測して候補を確認</button><button id="local-cancel-measure" hidden>計測を中止</button><button id="local-manual" class="link">手動で選ぶ</button></div>
+        <p id="local-measure-status" class="hint" role="status"></p><ol id="local-candidates"></ol>
+        <label for="local-device">使用するデバイス</label><select id="local-device"><option value="none">CPU</option></select>
+      </div>
+      <div class="setup-group">
+        <h4>メモリ</h4>
+        <label class="local-check"><input id="local-auto-release" type="checkbox"> 使っていないときにモデルのメモリを自動解放する</label>
+        <p class="hint">無効の場合は、ローカルモードの起動直後にモデルを読み込みます。</p>
+        <p id="local-idle-setting"><label for="local-idle-minutes">解放するまでの未使用時間</label> <select id="local-idle-minutes"><option value="1">1分</option><option value="5">5分</option><option value="10">10分</option><option value="30">30分</option><option value="60">60分</option></select></p>
+      </div>
+      <div class="local-actions save-row"><button id="local-start">モデルを読み込む</button><button id="local-stop">モデルを解放</button><span class="spacer"></span><button id="local-save" class="primary">保存して再起動</button></div>
+    </div>
+  </div><p id="mode-status" class="hint" role="status"></p>
+  <dialog id="local-download-confirm" aria-labelledby="local-download-title">
+    <h2 id="local-download-title">翻訳モデルをダウンロードしますか？</h2>
+    <p>PLaMo 3 Translate 2B（Q4_K_M、約1.81 GB）と、推論エンジン（約37 MB）をこのPCに保存します。</p>
+    <p>Hugging FaceとGitHubから取得します。通信量は約1.85 GB、空き容量は少なくとも約2 GB必要です。</p>
+    <p><a href="https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF" target="_blank" rel="noreferrer">モデルの情報</a></p>
+    <div class="local-actions"><button id="local-confirm-download" class="primary">ダウンロードする</button><button id="local-decline-download" autofocus>キャンセル</button></div>
+  </dialog></aside>
+    <details id="connection-settings"><summary>接続先の設定</summary>
+  <p class="hint">自分で用意した翻訳サーバーを使う場合は、サーバーと認証の設定を入力してください。</p>
+  <form id="connection-form">
+    <label for="server-url">サーバーURL</label>
+    <input id="server-url" type="url" required placeholder="https://translate.example.com" autocomplete="off" spellcheck="false">
+    <label for="discovery-url">OIDC discovery URL</label>
+    <input id="discovery-url" type="url" required placeholder="https://auth.example.com/application/o/translator-desktop/.well-known/openid-configuration" autocomplete="off" spellcheck="false">
+    <label for="client-id">client ID（公開クライアント）</label>
+    <input id="client-id" type="text" required maxlength="256" autocomplete="off" spellcheck="false">
+    <p class="hint">保存すると現在の接続先からログアウトし、アプリを再起動します。新しい接続先でログインし直してください。</p>
+    <button id="save-connection" type="submit" class="primary">保存して再起動</button>
+    <dialog id="connection-confirm" aria-labelledby="connection-confirm-title">
+      <h2 id="connection-confirm-title">接続先の変更</h2>
+      <p>現在の接続先からログアウトして接続先を変更します。保存後にアプリを再起動してよろしいですか？</p>
+      <button id="confirm-connection" type="button" class="primary">保存して再起動する</button>
+      <button id="cancel-connection" type="button" autofocus>キャンセル</button>
+    </dialog>
+    <p id="connection-status" class="hint" role="status"></p>
+  </form></details>
+    <details id="desktop-settings"><summary>デスクトップの設定</summary>
+  <label for="shortcut">選んだ文を翻訳するショートカット</label>
+  <select id="shortcut">
+    <option value="double-copy">Ctrl+C を 0.5 秒以内に 2 回</option>
+    <option value="CommandOrControl+Shift+T">Ctrl+Shift+T</option>
+    <option value="custom">自分で指定する</option>
+  </select>
+  <div id="custom-shortcut" hidden>
+    <label for="shortcut-keys">組み合わせ（例: CommandOrControl+Alt+J）</label>
+    <input id="shortcut-keys" type="text" autocomplete="off" spellcheck="false">
+    <button id="save-shortcut">この組み合わせを使う</button>
+  </div>
+  <p class="hint" id="shortcut-status"></p>
+  <p class="hint" id="shortcut-diagnostics"></p>
+  <button id="accessibility" hidden>アクセシビリティの設定を開く</button>
+  <p class="hint">メインウィンドウを閉じても通知領域に常駐します。終了するにはトレイの「終了」を使います。組み合わせのショートカットは、キーを離すと選んだ文をコピーします。管理者権限で動くアプリからは取得できない場合があります。</p></details>
+  </div>
+  <div id="mode-welcome"><h2>翻訳する場所を選んでください</h2>
+  <p class="hint">あとから設定で切り替えられます。</p>
+  <div class="mode-cards">
+    <button id="welcome-local"><strong>このPCで翻訳</strong><span>ログインせず、この端末のモデルで翻訳します。初回に約1.85 GBをダウンロードします。</span></button>
+    <button id="welcome-server"><strong>サーバーで翻訳</strong><span>接続先を設定してログインします。モデルのダウンロードは不要です。</span></button>
+  </div><p id="welcome-status" class="hint" role="status"></p></div>
+</main></div>
+<script>
+// 確認用の状態遷移だけを再現する。アプリのネイティブAPIは使用しない。
+const $ = (id) => document.getElementById(id);
+let animation;
+function show(id, visible) { $(id).hidden = !visible; }
+function scene(name) {
+  clearInterval(animation);
+  document.querySelectorAll('dialog[open]').forEach((d) => d.close());
+  $('preview-scene').value = name;
+  const welcome = name === 'welcome';
+  const translate = name === 'translation' || name === 'loading';
+  const server = name === 'server';
+  const missing = ['missing','confirm','downloading','error'].includes(name);
+  show('mode-welcome', welcome); show('translation-page', !welcome && translate); show('settings-page', !welcome && !translate);
+  document.querySelector('.page-tabs').hidden = welcome;
+  show('header-account', !welcome && !missing && !server);
+  show('local-options', !server); show('connection-settings', server); $('connection-settings').open = server;
+  show('local-setup', !missing && !server);
+  show('local-download-area', missing && name !== 'downloading'); show('local-progress-area', name === 'downloading');
+  show('local-cancel-measure', name === 'measuring'); show('local-runtime-status', name === 'loading');
+  $('local-runtime-status').textContent = '翻訳モデルを読み込んでいます…';
+  $('local-auto-release').checked = name === 'memory'; show('local-idle-setting', name === 'memory'); $('local-idle-minutes').value = '5';
+  $('mode-local').setAttribute('aria-pressed',String(!server)); $('mode-server').setAttribute('aria-pressed',String(server));
+  $('translation-tab').setAttribute('aria-selected',String(translate)); $('settings-tab').setAttribute('aria-selected',String(!translate));
+  $('local-save').disabled = missing || name === 'measuring'; $('local-measure').disabled = missing || name === 'measuring';
+  $('local-start').disabled = missing || name === 'measuring'; $('local-stop').disabled = missing || name === 'measuring';
+  $('local-status').className = name === 'error' ? 'hint err' : 'hint';
+  $('local-status').textContent = name === 'error' ? 'ダウンロードが途切れました。やり直してください' : name === 'downloading' ? '' : missing ? 'モデルをダウンロードすると、このPCで翻訳できます。' : 'モデルの準備ができました。';
+  $('local-measure-status').textContent = name === 'measuring' ? 'AMD Radeon Graphicsを計測しています…' : ['candidates','memory'].includes(name) ? '結果を参考に使用するデバイスを選んでください。文章の長さによって速度は変わります。' : '';
+  $('local-candidates').replaceChildren();
+  if (['candidates','memory'].includes(name)) {
+    for (const [label,id] of [['NVIDIA GeForce RTX 4090：短文の翻訳 約0.06秒（おすすめ）','Vulkan0'],['CPU：短文の翻訳 約0.45秒','none'],['AMD Radeon Graphics：短文の翻訳 約3.20秒','Vulkan1']]) {
+      const li = document.createElement('li'); li.append(document.createTextNode(label));
+      const button = document.createElement('button'); button.textContent = '選択'; button.onclick = () => $('local-device').value = id; li.append(button); $('local-candidates').append(li);
+    }
+  }
+  $('local-device').innerHTML = '<option value="Vulkan0">NVIDIA GeForce RTX 4090</option><option value="Vulkan1">AMD Radeon Graphics</option><option value="none">CPU</option>';
+  $('local-progress').value = .42; $('local-progress-label').textContent = '翻訳モデル：723.9 / 1723.5 MiB（42%）';
+  $('client-id').value = 'translator-desktop'; $('shortcut-status').textContent = 'ショートカットを使えます';
+  $('header-account').querySelector('summary').title = 'アカウント';
+  $('count').textContent = String($('src').value.length);
+  $('out').textContent = name === 'loading' ? '' : 'このアプリケーションは、お使いのコンピューターで文章を翻訳します。';
+  $('copy').disabled = name === 'loading';
+  document.querySelector('#app-header .sub').textContent = welcome ? 'PLaMo 3 Translate' : server ? 'PLaMo 3 Translate · 原文と訳はサーバーに残りません' : 'PLaMo 3 Translate · このPCで翻訳';
+  if (name === 'confirm') { $('local-download-confirm').showModal(); $('local-decline-download').focus(); }
+}
+$('preview-scene').onchange = (e) => scene(e.target.value);
+$('preview-theme').onchange = (e) => document.documentElement.dataset.theme = e.target.value;
+$('preview-width').onchange = (e) => $('preview-frame').style.width = e.target.value === 'full' ? '100%' : e.target.value + 'px';
+$('welcome-local').onclick = $('mode-local').onclick = () => scene('missing');
+$('welcome-server').onclick = $('mode-server').onclick = $('preview-server-switch').onclick = () => scene('server');
+$('local-download').onclick = () => scene('confirm'); $('local-decline-download').onclick = () => scene('missing');
+$('local-confirm-download').onclick = () => {
+  scene('downloading'); let progress = .42;
+  animation = setInterval(() => { progress = Math.min(1,progress+.025); $('local-progress').value = progress; $('local-progress-label').textContent = '翻訳モデル：' + Math.floor(progress*100) + '%'; if(progress === 1) scene('candidates'); },200);
+};
+$('local-cancel-download').onclick = () => scene('missing');
+$('local-measure').onclick = () => { scene('measuring'); animation = setInterval(() => scene('candidates'),1800); };
+$('local-cancel-measure').onclick = () => scene('candidates'); $('local-manual').onclick = () => $('local-device').focus();
+$('local-auto-release').onchange = () => show('local-idle-setting',$('local-auto-release').checked);
+$('local-save').onclick = () => scene('translation'); $('local-start').onclick = () => $('local-status').textContent = 'モデルの準備ができました。';
+$('local-stop').onclick = () => $('local-status').textContent = 'モデルのメモリを解放しました。';
+$('translation-tab').onclick = () => scene('translation'); $('settings-tab').onclick = () => scene('candidates');
+$('connection-form').onsubmit = (e) => { e.preventDefault(); $('connection-confirm').showModal(); };
+$('cancel-connection').onclick = () => $('connection-confirm').close(); $('confirm-connection').onclick = () => { scene('translation'); $('who').textContent = 'サンプルユーザー'; };
+for (const id of ['source','target']) $(id).innerHTML = (id === 'source' ? '<option value="">自動で判定</option>' : '<option value="auto">日本語 ⇄ 英語（自動）</option>') + '<option value="ja">日本語</option><option value="en">英語</option>';
+$('src').value = 'This application translates text on your computer.';
+$('out').textContent = 'このアプリケーションは、お使いのコンピューターで文章を翻訳します。';
+$('go').onclick = () => $('status').textContent = '訳し終わりました（表示サンプル）';
+$('clear').onclick = () => { $('src').value = ''; $('out').textContent = ''; };
+$('shortcut').onchange = () => show('custom-shortcut',$('shortcut').value === 'custom');
+document.querySelectorAll('a[href^="http"]').forEach((link) => { link.onclick = (e) => { e.preventDefault(); $('local-status').textContent = 'モデル情報のリンク（表示サンプル）'; }; });
+scene(new URLSearchParams(location.search).get('scene') || 'welcome');
+</script>
+</body></html>

@@ -5,6 +5,7 @@
 
 mod auth;
 mod connection;
+mod local;
 #[cfg(target_os = "macos")]
 mod macos;
 mod resident;
@@ -128,6 +129,14 @@ fn change_login(app: &AppHandle, logged_in: bool) {
 
 #[tauri::command]
 async fn restore_session(app: AppHandle) -> Result<(), String> {
+    if app.state::<local::Local>().enabled() {
+        change_login(&app, true);
+        return Ok(());
+    }
+    if !app.state::<Backend>().auth.is_mock() && connection::load(&app)?.server_url.is_empty() {
+        change_login(&app, false);
+        return Ok(());
+    }
     let result = app.state::<Backend>().auth.restore().await;
     publish_auth(&app, result.as_ref().err().cloned());
     result
@@ -135,6 +144,10 @@ async fn restore_session(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn login(app: AppHandle) -> Result<auth::LoginReport, String> {
+    if app.state::<local::Local>().enabled() {
+        change_login(&app, true);
+        return Ok(auth::LoginReport::default());
+    }
     let auth = app.state::<Backend>().auth.clone();
     if auth.is_busy() {
         return Err("ログインを待っています".into());
@@ -163,6 +176,9 @@ fn cancel_login(app: AppHandle) {
 
 #[tauri::command]
 async fn logout(app: AppHandle) -> Result<(), String> {
+    if app.state::<local::Local>().enabled() {
+        return Err("設定からサーバーモードへ切り替えてください".into());
+    }
     let auth = app.state::<Backend>().auth.clone();
     // ネットワークの revoke を待つ間にも画面と翻訳を止める。
     auth.cancel_login();
@@ -239,8 +255,12 @@ fn start_request(
     let auth = backend.auth.clone();
     let app = app.clone();
     let cancel_stream = stream.clone();
+    let translation = route == "api/translate";
     let task = tauri::async_runtime::spawn(async move {
         let result: Result<(), ()> = async {
+            if app.state::<local::Local>().enabled() {
+                return local::request(&app, &route, body.as_ref(), &stream).await;
+            }
             let mut response = match auth.send(method, path, body.as_ref()).await {
                 Ok(response) => response,
                 Err(_) if !auth.is_authenticated() => {
@@ -288,7 +308,7 @@ fn start_request(
         id,
         Request {
             owner: window.label().into(),
-            translation: route == "api/translate",
+            translation,
             task,
             stream: cancel_stream,
         },
@@ -319,6 +339,12 @@ fn main() {
         .manage(resident::Resident::default())
         .manage(updates::Updates::default())
         .setup(move |app| {
+            app.manage(local::Local::load(app.handle())?);
+            if app.config().identifier.ends_with(".local-prototype") {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.set_title("PTranslate Desk Local Prototype")?;
+                }
+            }
             let connection = connection::load(app.handle())?;
             app.manage(Backend {
                 auth: Arc::new(auth::Auth::with_connection(client.clone(), connection)),
@@ -326,12 +352,16 @@ fn main() {
                 auth_error: Mutex::new(None),
             });
             resident::setup(app.handle())?;
+            local::Local::schedule(app.handle());
             updates::schedule(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
                     let auth = handle.state::<Backend>().auth.clone();
                     auth.wait_for_refresh().await;
+                    if handle.state::<local::Local>().enabled() {
+                        continue;
+                    }
                     if let Err(error) = auth.renew_if_needed().await {
                         publish_auth(&handle, Some(error));
                     }
@@ -375,6 +405,17 @@ fn main() {
         login,
         logout,
         restore_session,
+        local::local_status,
+        local::select_server_mode,
+        local::measure_local_devices,
+        local::cancel_local_measurement,
+        local::resources::local_download_info,
+        local::resources::download_local_resources,
+        local::resources::cancel_local_download,
+        local::local_devices,
+        local::save_local_settings,
+        local::start_local_engine,
+        local::stop_local_engine,
         cancel_login,
         start_request,
         stop_request,
@@ -400,6 +441,17 @@ fn main() {
             login,
             logout,
             restore_session,
+            local::local_status,
+            local::select_server_mode,
+            local::measure_local_devices,
+            local::cancel_local_measurement,
+            local::resources::local_download_info,
+            local::resources::download_local_resources,
+            local::resources::cancel_local_download,
+            local::local_devices,
+            local::save_local_settings,
+            local::start_local_engine,
+            local::stop_local_engine,
             cancel_login,
             start_request,
             stop_request,
@@ -427,7 +479,15 @@ fn main() {
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
             {
                 window
-                    .eval(include_str!("../../tests/smoke.js"))
+                    .eval(
+                        if std::env::var("PTRANSLATE_LOCAL_MEASURE_PROBE").as_deref() == Ok("1") {
+                            include_str!("../../tests/local-setup-probe.js")
+                        } else if std::env::var("PTRANSLATE_LOCAL_PROBE").as_deref() == Ok("1") {
+                            include_str!("../../tests/local-probe.js")
+                        } else {
+                            include_str!("../../tests/smoke.js")
+                        },
+                    )
                     .expect("試験を開始できませんでした");
             }
             if window.label() == "popup"
@@ -442,6 +502,9 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("翻訳アプリを起動できませんでした");
     app.run(|_app, _event| {
+        if let tauri::RunEvent::Exit = _event {
+            _app.state::<local::Local>().stop();
+        }
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = _event {
             resident::show_main(_app);

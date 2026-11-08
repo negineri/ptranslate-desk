@@ -1,0 +1,68 @@
+[
+  {
+    "name": "auto",
+    "body": {
+      "text": "こんにちは🌸\r\n世界",
+      "target_lang": "en"
+    },
+    "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>こんにちは🌸\n世界<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>",
+    "max_tokens": 256
+  },
+  {
+    "name": "all-options",
+    "body": {
+      "text": "Hello.",
+      "source_lang": "en",
+      "target_lang": "ja",
+      "form": "polite",
+      "context": "  Software documentation\r\n  ",
+      "history": [
+        {
+          "source": " previous ",
+          "target": " 前の訳 "
+        },
+        {
+          "source": "",
+          "target": "空"
+        }
+      ],
+      "glossary": [
+        {
+          "source": " software ",
+          "target": " ソフトウェア "
+        },
+        {
+          "source": "empty",
+          "target": " "
+        }
+      ]
+    },
+    "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>context<|plamo:msg|>Software documentation<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|> previous <|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|> 前の訳 <|plamo:tag|>glossary<|plamo:index|>software<|plamo:item|>ソフトウェア<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>Hello.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:key|>form<|plamo:val|>polite<|plamo:msg|>",
+    "max_tokens": 256
+  },
+  {
+    "name": "null-options",
+    "body": {
+      "text": "Thank you.",
+      "source_lang": null,
+      "target_lang": "ja",
+      "form": null,
+      "glossary": null,
+      "history": null,
+      "context": null
+    },
+    "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>Thank you.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>",
+    "max_tokens": 256
+  },
+  {
+    "name": "plain",
+    "body": {
+      "text": "This is a test.",
+      "source_lang": "en",
+      "target_lang": "ja",
+      "form": "plain"
+    },
+    "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>This is a test.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:key|>form<|plamo:val|>plain<|plamo:msg|>",
+    "max_tokens": 256
+  }
+]

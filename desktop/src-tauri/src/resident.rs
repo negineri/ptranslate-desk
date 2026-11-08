@@ -84,6 +84,7 @@ impl Resident {
 
 #[derive(Serialize)]
 pub struct Status {
+    local: bool,
     logged_in: bool,
     paused: bool,
     shortcut: String,
@@ -111,6 +112,7 @@ pub fn session_status(app: AppHandle) -> Status {
     let backend = app.state::<Backend>();
     let auth_error = backend.auth_error.lock().unwrap().clone();
     Status {
+        local: app.state::<crate::local::Local>().enabled(),
         logged_in,
         paused,
         shortcut,
@@ -440,7 +442,13 @@ pub fn refresh_menu(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let settings = MenuItem::with_id(app, "settings", "設定", true, None::<&str>)?;
-    let logout = MenuItem::with_id(app, "logout", "ログアウト", status.logged_in, None::<&str>)?;
+    let logout = MenuItem::with_id(
+        app,
+        "logout",
+        "ログアウト",
+        status.logged_in && !status.local,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "終了", true, None::<&str>)?;
     let line = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&first, &pause, &settings, &logout, &line, &quit])?;

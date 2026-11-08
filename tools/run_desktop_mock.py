@@ -95,6 +95,8 @@ def main() -> int:
             try:
                 result = app.wait(timeout=60 if args.smoke_test else None)
                 if args.smoke_test and result == 0:
+                    if (Path(config) / "inference").exists():
+                        raise RuntimeError("確認のキャンセル後にモデルの取得が始まっています")
                     deadline = time.monotonic() + 5
                     while stats["canceled"] < 3 and time.monotonic() < deadline:
                         time.sleep(0.1)

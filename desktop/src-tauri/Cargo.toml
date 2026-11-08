@@ -23,6 +23,7 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"
 tempfile = "3"
+zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tokio = { version = "1", features = ["time", "net", "io-util", "sync", "macros", "rt-multi-thread"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -34,4 +35,4 @@ objc2-app-kit = { version = "0.3", features = ["NSEvent", "block2"] }
 tauri = { version = "2", features = ["test"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_JobObjects", "Win32_Security", "Win32_System_Threading"] }
