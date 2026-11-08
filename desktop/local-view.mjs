@@ -142,9 +142,11 @@ async function devices() {
 async function measure() {
   if (measuring || downloading || !state.available) return;
   measuring = true; busy(); $("local-candidates").replaceChildren();
-  message("local-measure-status", "短い文章でデバイスを計測します…");
+  message("local-measure-status", "デバイスと大量翻訳向けの並列数を計測します。数分かかることがあります…");
   const progress = new Channel();
-  progress.onmessage = (r) => message("local-measure-status", r.milliseconds === null && !r.error ? `${r.name}を計測しています…` : `${r.name}の計測が終わりました`);
+  progress.onmessage = (r) => message("local-measure-status", r.measuring_parallel
+    ? `${r.name}：${r.measuring_parallel}並列で大量翻訳を計測しています…`
+    : r.milliseconds === null && !r.error ? `${r.name}を計測しています…` : `${r.name}の計測が終わりました`);
   try {
     const results = await invoke("measure_local_devices", { progress });
     const fastest = results.find((r) => r.milliseconds !== null);
@@ -158,10 +160,28 @@ async function measure() {
         button.onclick = () => { $("local-device").value = r.id; manual = true; };
         li.append(button);
       }
+      if (r.recommended_parallel) {
+        const result = document.createElement("p");
+        result.textContent = `大量翻訳：推奨${r.recommended_parallel}並列（約${r.bulk_per_second.toFixed(1)}件/秒）`;
+        const apply = document.createElement("button"); apply.textContent = "大量翻訳に設定";
+        apply.onclick = () => {
+          $("local-device").value = r.id; manual = true;
+          $("local-parallel").value = "manual";
+          $("local-parallel-limit").value = String(r.recommended_parallel);
+          $("local-parallel-setting").hidden = false;
+          message("local-measure-status", "大量翻訳向けの設定を選びました。「保存して再起動」で反映します。");
+        };
+        result.append(apply); li.append(result);
+      }
+      if (r.bulk_error) {
+        const note = document.createElement("p"); note.className = "hint";
+        note.textContent = r.recommended_parallel ? `完了した候補からの推奨です。${r.bulk_error}` : `大量翻訳の推奨値は取得できませんでした。${r.bulk_error}`;
+        li.append(note);
+      }
       $("local-candidates").append(li);
     }
     if (fastest && !manual) $("local-device").value = fastest.id;
-    message("local-measure-status", fastest ? "結果を参考に使用するデバイスを選んでください。文章の長さによって速度は変わります。" : "計測できませんでした。デバイスを手動で選択できます。", !fastest);
+    message("local-measure-status", fastest ? "短文の速度と大量翻訳の推奨値を参考に選んでください。CPUの並列数は計測しません。" : "計測できませんでした。デバイスを手動で選択できます。", !fastest);
   } catch (e) { message("local-measure-status", e, true); }
   finally { measuring = false; busy(); }
 }

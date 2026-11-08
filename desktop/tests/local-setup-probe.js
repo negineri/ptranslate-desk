@@ -3,7 +3,7 @@
   const { invoke } = window.__TAURI__.core;
   const $ = (id) => document.getElementById(id);
   const wait = async (check) => {
-    const end = Date.now() + 180000;
+    const end = Date.now() + 480000;
     while (!await check()) {
       if (Date.now() > end) throw new Error("タイムアウト");
       await new Promise((resolve) => setTimeout(resolve, 100));

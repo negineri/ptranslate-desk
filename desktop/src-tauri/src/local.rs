@@ -1,4 +1,5 @@
 //! ローカル翻訳。推論を別プロセスで動かし、原文・訳を保存しない。
+mod benchmark;
 mod parallel;
 pub mod resources;
 use crate::Message;
@@ -617,12 +618,17 @@ pub fn select_server_mode(app: AppHandle, window: WebviewWindow) -> Result<(), S
     local.configured.store(true, Ordering::SeqCst);
     Ok(())
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Default)]
 pub struct Measurement {
     id: String,
     name: String,
     milliseconds: Option<u64>,
     error: Option<String>,
+    measuring_parallel: Option<usize>,
+    recommended_parallel: Option<usize>,
+    bulk_per_second: Option<f64>,
+    bulk_error: Option<String>,
+    parallel_samples: Vec<benchmark::Sample>,
 }
 #[tauri::command]
 pub fn cancel_local_measurement(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
@@ -685,6 +691,7 @@ pub async fn measure_local_devices(
                 name: device.name.clone(),
                 milliseconds: None,
                 error: None,
+                ..Measurement::default()
             })
             .map_err(|_| "計測画面が閉じられました")?;
         let trial = Local::new(
@@ -719,12 +726,14 @@ pub async fn measure_local_devices(
                 name: device.name,
                 milliseconds: Some(milliseconds),
                 error: None,
+                ..Measurement::default()
             },
             Err(error) => Measurement {
                 id: device.id,
                 name: device.name,
                 milliseconds: None,
                 error: Some(error),
+                ..Measurement::default()
             },
         };
         progress
@@ -733,6 +742,16 @@ pub async fn measure_local_devices(
         results.push(measurement);
     }
     results.sort_by_key(|r| r.milliseconds.unwrap_or(u64::MAX));
+    // CPUは並列数を計測しない。短文で最速だったGPUだけ追加計測する。
+    if !local.measurement_cancel.canceled.load(Ordering::SeqCst) {
+        if let Some(index) = benchmark::target(&results) {
+            let gpu = &mut results[index];
+            benchmark::measure(&app, &progress, gpu).await?;
+            progress
+                .send(gpu.clone())
+                .map_err(|_| "計測画面が閉じられました")?;
+        }
+    }
     drop(_starting);
     if local.measurement_cancel.canceled.load(Ordering::SeqCst) {
         return Err("計測を中止しました。デバイスは手動でも選べます".into());
