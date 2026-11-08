@@ -118,6 +118,13 @@ export function mountOptions({ document = globalThis.document, chrome = globalTh
   const ready = (async () => {
     settings = await loadSettings();
     $("mode").value = settings.mode; showMode();
+    for (const id of ["source", "target"]) {
+      const select = $(id);
+      if (![...select.options].some((option) => option.value === settings[id])) {
+        select.append(new document.defaultView.Option(settings[id], settings[id]));
+      }
+      select.value = settings[id];
+    }
     $("server").value = settings.server; $("form").value = settings.form; $("glossary").value = settings.glossary;
     if (settings.mode === "local" || settings.server) {
       const mine = begin(), snapshot = { ...settings };

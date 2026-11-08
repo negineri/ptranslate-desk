@@ -30,7 +30,7 @@ test("サーバーURLは origin にそろえ、HTTPS かループバックだけ
 
 test("保存した設定は決まった項目の文字列だけを読む", () => {
   assert.deepEqual(sanitize({ server: SERVER, target: 3, text: "原文", glossary: "a => b" }),
-    { server: SERVER, mode: "server", source: "", target: "auto", form: "", glossary: "a => b" });
+    { server: SERVER, mode: "server", source: "", target: "ja", form: "", glossary: "a => b" });
 });
 
 test("送る設定: 自動の訳す先、文体は日本語のときだけ、用語集", () => {
@@ -153,4 +153,9 @@ test("連携URLには拡張自身の正しい形式のIDだけを入れる", () 
   for (const invalid of ["", "a".repeat(31), "q".repeat(32), "A".repeat(32), `${id}&extra=1`]) {
     assert.throws(() => chromeRegistrationUrl(invalid));
   }
+});
+
+test("新しい設定の翻訳先は日本語にし、保存済みの自動設定は維持する", () => {
+  assert.equal(sanitize({}).target, "ja");
+  assert.equal(sanitize({ target: "auto" }).target, "auto");
 });

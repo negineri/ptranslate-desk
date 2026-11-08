@@ -109,3 +109,13 @@ test("未ログインなら設定内にログインの案内を表示する", as
   const p = await setup(t, { stored: { server: "https://translate.example.com" }, fetch: async () => Response.json({}, { status: 401 }) });
   assert.equal(p.$("login").hidden, false); assert.equal(p.session.connectedTo, undefined);
 });
+
+test("未接続の設定画面でも翻訳先の初期値を日本語で表示する", async (t) => {
+  const p = await setup(t);
+  assert.equal(p.$("target").value, "ja");
+});
+
+test("未接続でも保存済みの自動設定やほかの言語を勝手に日本語へ変えない", async (t) => {
+  const p = await setup(t, { stored: { target: "auto" } });
+  assert.equal(p.$("target").value, "auto");
+});

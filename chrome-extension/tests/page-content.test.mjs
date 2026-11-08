@@ -111,8 +111,9 @@ test("画面外の文章も収集し、上限による未翻訳を完了時に�
   assert.equal(p.blocks.length, 2);
   p.receive({ type: "done", total: 3000, truncated: 2, omitted: 5 });
   const message = p.shadow.querySelector(".msg");
-  assert.match(message.textContent, /5 か所は訳していません/);
-  assert.match(message.textContent, /2 か所は長すぎて途中で切れました/);
+  assert.equal(message.textContent, "一部未翻訳");
+  assert.match(message.title, /未翻訳: 5件/);
+  assert.match(message.title, /途中まで: 2件/);
   assert.ok(message.classList.contains("warn"));
   p.w.close();
 });
@@ -313,6 +314,7 @@ test("翻訳中に再利用された文字ノードへ古い訳を書かず、�
 test("中止後と原文へ戻した後は、新しい文章を自動で訳さない", async () => {
   for (const action of ["stop", "restore"]) {
     const p = page("<p>First message</p>");
+    if (action === "restore") complete(p.connections[0]);
     p.shadow.querySelector(`[data-act="${action}"]`).click();
     p.w.document.querySelector("p").textContent = "Second message";
     await new Promise((r) => setTimeout(r, 200));
@@ -340,9 +342,9 @@ test("片方が終わっても枠待ちの表示を保ち、再開で通常の�
   p.receive({ type: "waiting", id: 1, waiting: true });
   p.receive({ type: "waiting", id: 1, waiting: false });
   p.receive({ type: "block", id: 1, text: "訳", done: 1, total: 2 });
-  assert.match(p.shadow.querySelector(".msg").textContent, /前の翻訳の終了を待っています \(1 \/ 2\)/);
+  assert.match(p.shadow.querySelector(".msg").textContent, /順番待ち 1 \/ 2/);
   p.receive({ type: "waiting", id: 0, waiting: false });
-  assert.match(p.shadow.querySelector(".msg").textContent, /日本語に訳しています \(1 \/ 2\)/);
+  assert.match(p.shadow.querySelector(".msg").textContent, /翻訳中 1 \/ 2/);
   p.w.close();
 });
 
@@ -413,5 +415,54 @@ test("後からattachShadowされた既存要素も見つける", async () => {
   for (let i = 0; i < 200 && p.connections.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
   assert.equal(p.connections.length, 2);
   assert.deepEqual(Array.from(p.connections[1].messages[0].blocks, (b) => b.text), ["Late shadow headline"]);
+  p.w.close();
+});
+
+function started(connection) {
+  connection.receive({ type: "start", total: connection.messages[0].blocks.length, target: "ja", targetName: "日本語" });
+}
+
+test("通常の操作ボタンは準備中・翻訳中・完了でも消さず、文言を短く保つ", () => {
+  const p = page("<p>First</p>");
+  const controls = ["stop", "restore", "again"].map((act) => p.shadow.querySelector(`[data-act="${act}"]`));
+  assert.equal(p.shadow.querySelector(".msg").textContent, "準備中");
+  assert.equal(p.shadow.querySelector("select"), null);
+  assert.ok(controls.every((button) => !button.hidden));
+  started(p.connections[0]);
+  assert.equal(p.shadow.querySelector(".msg").textContent, "翻訳中 0 / 1");
+  complete(p.connections[0]);
+  assert.equal(p.shadow.querySelector(".msg").textContent, "完了");
+  assert.ok(controls.every((button) => !button.hidden && !button.disabled));
+  p.w.close();
+});
+
+test("完了後の短い追加翻訳では状態を点滅させない", async () => {
+  const p = page("<p>First</p>");
+  started(p.connections[0]); complete(p.connections[0]);
+  p.w.document.body.append(p.w.document.createElement("p"));
+  p.w.document.body.lastChild.textContent = "Later";
+  await waitUntil(() => p.connections.length === 2);
+  started(p.connections[1]);
+  assert.equal(p.shadow.querySelector(".msg").textContent, "完了");
+  complete(p.connections[1]);
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  assert.equal(p.shadow.querySelector(".msg").textContent, "完了");
+  p.w.close();
+});
+
+test("追加翻訳が長引くと翻訳中を表示し、中止した後に遅延表示を残さない", async () => {
+  const p = page("<p>First</p>");
+  started(p.connections[0]); complete(p.connections[0]);
+  const later = p.w.document.createElement("p"); later.textContent = "Later"; p.w.document.body.append(later);
+  await waitUntil(() => p.connections.length === 2);
+  started(p.connections[1]);
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  assert.equal(p.shadow.querySelector(".msg").textContent, "翻訳中 0 / 1");
+  complete(p.connections[1]);
+  later.textContent = "Next message";
+  await waitUntil(() => p.connections.length === 3);
+  p.shadow.querySelector('[data-act="stop"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  assert.equal(p.shadow.querySelector(".msg").textContent, "中止");
   p.w.close();
 });

@@ -32,6 +32,10 @@
   let blocks = []; // { id, nodes, text }
   let port = null;
   let priorityFrame = null;
+  let finishedOnce = false;
+  let activityTimer = null;
+  let pendingActivity = null;
+  let deferActivity = false;
   let state = "idle"; // idle・running・done・stopped・error・restored
 
   function skipped(el) {
@@ -240,7 +244,7 @@
     if (!pending.length) {
       if (!port) {
         state = "done";
-        show("新しい文章を待っています", "", ["stop", ...(originals.size ? ["restore"] : [])]);
+        show(originals.size ? "完了" : "待機中", originals.size ? "ok" : "", ["stop", ...(originals.size ? ["restore", "again"] : [])]);
       }
       return;
     }
@@ -331,15 +335,20 @@
   const shadow = host.attachShadow({ mode: "closed" });
   shadow.innerHTML = `<style>
     :host { all: initial; }
-    .bar { position: fixed; top: 12px; right: 12px; z-index: 2147483647; display: flex; align-items: center; gap: 8px;
-      max-width: calc(100vw - 24px); box-sizing: border-box; padding: 8px 10px; border-radius: 10px;
+    .bar { position: fixed; top: 12px; right: 12px; z-index: 2147483647; display: grid; gap: 6px;
+      width: 300px; max-width: calc(100vw - 24px); box-sizing: border-box; padding: 8px; border-radius: 10px;
       font: 13px/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
       background: #ffffff; color: #1d2330; border: 1px solid #dde1e8; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
-    .msg { flex: 1; min-width: 0; }
+    .heading, .actions { display: flex; align-items: center; gap: 6px; }
+    .heading strong { font-size: 12px; }
+    .msg { flex: 1; min-width: 0; display: block; height: 20px; line-height: 20px; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .actions { flex-wrap: wrap; min-height: 26px; }
     .err { color: #c43c3c; } .ok { color: #1f8a4c; } .warn { color: #b26a00; }
     button { font: inherit; color: inherit; background: transparent; border: 1px solid #dde1e8; border-radius: 6px;
       padding: 2px 8px; cursor: pointer; white-space: nowrap; }
     button.primary { background: #2f6fde; color: #fff; border-color: #2f6fde; }
+    button:disabled { opacity: .45; cursor: default; }
     button[hidden] { display: none; }
     @media (prefers-color-scheme: dark) {
       .bar { background: #1d2128; color: #e7eaf0; border-color: #2e343e; }
@@ -347,27 +356,48 @@
       .err { color: #ef6b6b; } .ok { color: #4cc283; } .warn { color: #e3a33c; }
     }
   </style>
-  <div class="bar" role="status" aria-live="polite">
-    <strong>PTranslate</strong>
-    <span class="msg"></span>
-    <button data-act="stop">中止</button>
-    <button data-act="restore">原文に戻す</button>
-    <button data-act="again" class="primary">訳す</button>
-    <button data-act="login">Web版を開いてログイン</button>
-    <button data-act="options">設定</button>
-    <button data-act="close" aria-label="閉じる">×</button>
+  <div class="bar" role="region" aria-label="ページ翻訳">
+    <div class="heading"><strong>PTranslate</strong>
+      <span class="msg" role="status" aria-live="polite"></span>
+      <button data-act="close" aria-label="閉じる">×</button>
+    </div>
+    <div class="actions">
+      <button data-act="stop">中止</button>
+      <button data-act="restore">原文に戻す</button>
+      <button data-act="again" class="primary">再翻訳</button>
+      <button data-act="login">ログイン</button>
+      <button data-act="options">設定</button>
+    </div>
   </div>`;
   const $ = (sel) => shadow.querySelector(sel);
   const buttons = Object.fromEntries([...shadow.querySelectorAll("button")].map((b) => [b.dataset.act, b]));
 
-  function show(text, cls = "", visible = []) {
-    $(".msg").textContent = text;
-    $(".msg").className = "msg " + cls;
-    for (const [act, b] of Object.entries(buttons)) b.hidden = act !== "close" && !visible.includes(act);
+  function show(text, cls = "", visible = [], detail = text) {
+    const message = $(".msg");
+    if (message.textContent !== text) message.textContent = text;
+    if (message.title !== detail) message.title = detail;
+    if (message.className !== "msg " + cls) message.className = "msg " + cls;
+    // 通常のボタンは表示したままにし、状態によって位置が動かないようにする。
+    for (const act of ["stop", "restore", "again"]) buttons[act].disabled = !visible.includes(act);
+    for (const act of ["login", "options"]) buttons[act].hidden = !visible.includes(act);
     if (!host.isConnected) document.documentElement.append(host);
   }
 
+  function clearActivity() {
+    clearTimeout(activityTimer); activityTimer = null; pendingActivity = null; deferActivity = false;
+  }
+  function activity(...args) {
+    if (!deferActivity) return show(...args);
+    pendingActivity = args;
+    // 完了後の短い追加翻訳では、完了→準備中→完了の点滅を出さない。
+    if (activityTimer === null) activityTimer = setTimeout(() => {
+      const latest = pendingActivity;
+      clearActivity();
+      if (latest && port) show(...latest);
+    }, 400);
+  }
   function stopPort() {
+    clearActivity();
     removeEventListener("scroll", schedulePriority, true);
     removeEventListener("resize", schedulePriority);
     if (priorityFrame !== null) cancelAnimationFrame(priorityFrame);
@@ -385,6 +415,7 @@
     stopFollowing();
     stopPort();
     restore();
+    finishedOnce = false;
     blocks = [];
     following = true;
     state = "idle";
@@ -392,29 +423,28 @@
     observer.observe(document.body, observeOptions);
     // attachShadow 自体は MutationObserver に通知されないので、遅れて作られた境界も探す。
     rootsTimer = setInterval(() => { if (watchRoots()) scheduleScan(); }, 1000);
-    if (!blocks.length) show("新しい文章を待っています", "", ["stop"]);
+    if (!blocks.length) show("待機中", "", ["stop"]);
   }
 
   function launch() {
     state = "running";
-    show("訳す準備をしています", "", ["stop"]);
+    deferActivity = finishedOnce;
+    activity("準備中", "", ["stop", ...(originals.size ? ["restore"] : [])]);
     const visibleIds = visibleBlocks().map((b) => b.id);
     const ordered = orderedPending();
     const mine = chrome.runtime.connect({ name: "page-translate" });
     port = mine;
     let total = 0;
     let done = 0;
-    let target = "";
     const waiting = new Set();
-    const progress = () => show(waiting.size
-      ? `前の翻訳の終了を待っています (${done} / ${total})`
-      : `${target}に訳しています (${done} / ${total})`, "", ["stop", ...(originals.size ? ["restore"] : [])]);
+    const progress = () => activity(waiting.size
+      ? `順番待ち ${done} / ${total}`
+      : `翻訳中 ${done} / ${total}`, "", ["stop", ...(originals.size ? ["restore"] : [])]);
     mine.onMessage.addListener((msg) => {
       if (port !== mine) return;
       if (msg.type === "start") {
         total = msg.total;
-        target = msg.targetName;
-        show(total ? `${target}に訳しています (0 / ${total})` : "訳す段落がありませんでした", total ? "" : "ok",
+        activity(total ? `翻訳中 0 / ${total}` : "対象なし", total ? "" : "ok",
           total ? ["stop"] : []);
       } else if (msg.type === "waiting") {
         if (msg.waiting) waiting.add(msg.id);
@@ -437,10 +467,11 @@
         state = "done";
         stopPort();
         const warnings = [];
-        if (msg.truncated) warnings.push(`${msg.truncated} か所は長すぎて途中で切れました`);
-        if (msg.omitted) warnings.push(`上限のため ${msg.omitted} か所は訳していません`);
-        if (warnings.length) show(`翻訳を終了しました (${warnings.join("、")})`, "warn", ["stop", "restore"]);
-        else show("訳し終わりました (新しい文章も自動で訳します)", "ok", ["stop", "restore"]);
+        finishedOnce = true;
+        if (msg.truncated) warnings.push(`途中まで: ${msg.truncated}件`);
+        if (msg.omitted) warnings.push(`未翻訳: ${msg.omitted}件`);
+        if (warnings.length) show("一部未翻訳", "warn", ["stop", "restore", "again"], warnings.join(" / "));
+        else show("完了", "ok", ["stop", "restore", "again"]);
         if (msg.omitted) {
           for (const b of blocks) if (!b.done) b.skipped = true;
         } else if (following && blocks.some((b) => !b.done && !b.skipped)) {
@@ -453,7 +484,8 @@
         stopFollowing();
         stopPort();
         const fix = msg.code === "login" ? ["login"] : msg.remedy === "options" ? ["options"] : [];
-        show(msg.message, "err", [...fix, ...(originals.size ? ["restore"] : []), "again"]);
+        const text = msg.code === "login" ? "ログインが必要です" : msg.remedy === "options" || msg.code === "local" ? "接続を確認してください" : msg.code === "same-lang" ? "原文と同じ言語です" : "翻訳できません";
+        show(text, "err", [...fix, ...(originals.size ? ["restore"] : []), "again"], msg.message);
       }
     });
     mine.onDisconnect.addListener(() => {
@@ -461,7 +493,7 @@
       stopPort();
       stopFollowing();
       state = "error";
-      show("翻訳サーバーに接続できません", "err", [...(originals.size ? ["restore"] : []), "again"]);
+      show("接続できません", "err", ["options", ...(originals.size ? ["restore"] : []), "again"]);
     });
     mine.postMessage({ blocks: ordered.map(({ id, text }) => ({ id, text })), visibleIds });
     // scroll はバブルしないので capture で、ページ内のスクロール領域も受ける。
@@ -473,7 +505,7 @@
     stopFollowing();
     stopPort();
     state = "stopped";
-    show("中止しました", "", [...(originals.size ? ["restore"] : []), "again"]);
+    show("中止", "", [...(originals.size ? ["restore"] : []), "again"]);
   });
   buttons.restore.addEventListener("click", () => {
     stopFollowing();
