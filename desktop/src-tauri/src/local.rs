@@ -446,6 +446,7 @@ impl Local {
 
 #[derive(Serialize)]
 pub struct Status {
+    chrome_error: Option<String>,
     enabled: bool,
     ready: bool,
     available: bool,
@@ -465,6 +466,7 @@ pub fn local_status(app: AppHandle) -> Status {
     let resources = installation(&app);
     let error = local.error.lock().unwrap().clone();
     Status {
+        chrome_error: crate::chrome_bridge::error(&app),
         enabled: local.enabled(),
         ready: local.ready.load(Ordering::SeqCst),
         available: resources.is_ok(),

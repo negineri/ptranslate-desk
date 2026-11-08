@@ -152,6 +152,26 @@ def main():
             if errors:
                 raise errors[0]
             assert not worker.is_alive()
+        # 同じEXEのパイプがすでに存在する状況を作り、本体起動への波及を確認する。
+        pipe = kernel.CreateNamedPipeW(name, 3, 0, 1, 65536, 65536, 0, None)
+        if pipe == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            probe_env = dict(
+                env,
+                PTRANSLATE_MOCK="1",
+                PTRANSLATE_SMOKE_CONFIG=directory,
+                PTRANSLATE_BRIDGE_FAILURE_PROBE="1",
+            )
+            probe_env.pop("PTRANSLATE_EXTENSION_PROBE", None)
+            subprocess.run([str(BINARY)], env=probe_env, check=True, timeout=30)
+            assert not (Path(directory) / "inference").exists()
+            assert json.loads(manifest.read_text(encoding="utf-8")) == {
+                "path": str(BINARY),
+                "allowed_origins": [ORIGIN],
+            }, "利用できないアプリが連携の登録を書き換えています"
+        finally:
+            kernel.CloseHandle(pipe)
     print("中継EXE: フレーム・日本語・完了・切断による中止 PASS")
 
 

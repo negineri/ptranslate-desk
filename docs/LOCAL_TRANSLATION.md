@@ -177,12 +177,18 @@ Windows版の同じEXEをChromeが中継専用モードで起動する。中継�
 インストーラーからの通常のアンインストールでは、自身のEXEが登録した連携だけを解除する。
 自動更新中は登録を維持する。開発版はそのEXEを `--unregister-chrome` 付きで起動すると解除できる。
 
+Chrome連携のパイプを作れなくても、デスクトップ本体は起動し、サーバー翻訳と本体でのローカル翻訳を利用できる。
+連携の設定欄に失敗と再起動の案内を表示し、連携を利用できない状態では登録を変更しない。
+同じEXEがすでに起動している場合、Chromeは先に起動したアプリへ接続する。
+後から起動したアプリでChrome連携を使うには、同じアプリをすべて終了して起動し直す。
+
 中継の送信待ち行列は256メッセージまで保持し、満杯なら推論応答の読み取り側が非同期で空きを待つ。
 混雑を接続失敗として扱わず、応答を欠落させない。Chromeが接続を閉じた場合は待機も含めて中止する。
 
 中継の試験は `cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml` と、
 Windowsで `cargo build --locked --features smoke-test --manifest-path desktop/src-tauri/Cargo.toml` の後に
 `python tools/test_chrome_bridge.py` を実行する。試験は一時的なホスト定義とモックのパイプを使い、
+中継の完了・中止と、パイプが占有されている場合の本体起動・失敗通知を確認する。
 Chromeの登録・既存設定・実モデルには触れない。
 
 実Chromeと取得済みモデルで確認する場合は、`smoke-test`付きビルドの後に、

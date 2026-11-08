@@ -1,5 +1,21 @@
 //! Chromeの起動する同じEXEを、中継専用モードで使う。
 //! 原文・訳は保存せず、利用者限定の名前付きパイプで起動中のアプリへ渡す。
+use tauri::Manager;
+
+#[derive(Default)]
+pub struct Status(std::sync::Mutex<Option<String>>);
+
+pub fn error(app: &tauri::AppHandle) -> Option<String> {
+    app.state::<Status>().0.lock().unwrap().clone()
+}
+
+#[cfg(target_os = "windows")]
+fn unavailable(app: &tauri::AppHandle) {
+    *app.state::<Status>().0.lock().unwrap() = Some(
+        "Chrome連携を起動できませんでした。同じアプリが起動中なら終了してから、このアプリを起動し直してください。デスクトップでの翻訳は利用できます。".into(),
+    );
+}
+
 #[tauri::command]
 pub fn register_chrome(window: tauri::WebviewWindow, extension_id: String) -> Result<(), String> {
     if window.label() != "main" {
@@ -7,6 +23,9 @@ pub fn register_chrome(window: tauri::WebviewWindow, extension_id: String) -> Re
     }
     #[cfg(target_os = "windows")]
     {
+        if let Some(error) = error(window.app_handle()) {
+            return Err(error);
+        }
         windows::register(&extension_id).map_err(|_| "Chrome連携の登録に失敗しました".into())
     }
     #[cfg(not(target_os = "windows"))]
@@ -256,17 +275,27 @@ mod windows {
             Box::pin(async move { self.0.send(message).await.map_err(|_| ()) })
         }
     }
-    pub fn schedule(app: &AppHandle) -> io::Result<()> {
-        let mut listener = tauri::async_runtime::block_on(async { create_pipe(true) })?;
+    pub fn schedule(app: &AppHandle) {
+        let mut listener = match tauri::async_runtime::block_on(async { create_pipe(true) }) {
+            Ok(listener) => listener,
+            Err(_) => {
+                super::unavailable(app);
+                return;
+            }
+        };
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             loop {
                 if listener.connect().await.is_err() {
+                    super::unavailable(&app);
                     break;
                 }
                 let next = match create_pipe(false) {
                     Ok(p) => p,
-                    Err(_) => break,
+                    Err(_) => {
+                        super::unavailable(&app);
+                        break;
+                    }
                 };
                 let pipe = std::mem::replace(&mut listener, next);
                 let app = app.clone();
@@ -275,7 +304,6 @@ mod windows {
                 });
             }
         });
-        Ok(())
     }
     async fn serve(
         app: AppHandle,

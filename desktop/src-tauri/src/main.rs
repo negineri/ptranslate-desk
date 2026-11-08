@@ -341,15 +341,11 @@ fn main() {
                 })
                 .build(),
         )
+        .manage(chrome_bridge::Status::default())
         .manage(resident::Resident::default())
         .manage(updates::Updates::default())
         .setup(move |app| {
             app.manage(local::Local::load(app.handle())?);
-            if app.config().identifier.ends_with(".local-prototype") {
-                if let Some(window) = app.get_webview_window("main") {
-                    window.set_title("PTranslate Desk Local Prototype")?;
-                }
-            }
             let connection = connection::load(app.handle())?;
             app.manage(Backend {
                 auth: Arc::new(auth::Auth::with_connection(client.clone(), connection)),
@@ -359,7 +355,7 @@ fn main() {
             resident::setup(app.handle())?;
             local::Local::schedule(app.handle());
             #[cfg(target_os = "windows")]
-            chrome_bridge::schedule(app.handle())?;
+            chrome_bridge::schedule(app.handle());
             updates::schedule(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -374,6 +370,15 @@ fn main() {
                     }
                 }
             });
+            // IPCを受け付ける画面は、状態と常駐機能の初期化が終わってから作る。
+            for config in &app.config().app.windows {
+                tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+            }
+            if app.config().identifier.ends_with(".local-prototype") {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.set_title("PTranslate Desk Local Prototype")?;
+                }
+            }
             if std::env::args().any(|arg| arg == "--verify-login") {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -490,7 +495,11 @@ fn main() {
             {
                 window
                     .eval(
-                        if std::env::var("PTRANSLATE_LOCAL_MEASURE_PROBE").as_deref() == Ok("1") {
+                        if std::env::var("PTRANSLATE_BRIDGE_FAILURE_PROBE").as_deref() == Ok("1") {
+                            include_str!("../../tests/bridge-failure-probe.js")
+                        } else if std::env::var("PTRANSLATE_LOCAL_MEASURE_PROBE").as_deref()
+                            == Ok("1")
+                        {
                             include_str!("../../tests/local-setup-probe.js")
                         } else if std::env::var("PTRANSLATE_LOCAL_PROBE").as_deref() == Ok("1") {
                             include_str!("../../tests/local-probe.js")

@@ -209,6 +209,7 @@ $("local-start").onclick = async () => {
 };
 
 state = await invoke("local_status");
+if (state.chrome_error) message("chrome-status", state.chrome_error, true);
 $("local-parallel").value = String(state.parallel);
 $("local-auto-release").checked = state.auto_release;
 if (![...$("local-idle-minutes").options].some((o) => Number(o.value) === state.idle_minutes)) $("local-idle-minutes").add(new Option(`${state.idle_minutes}分`, String(state.idle_minutes)));
@@ -225,7 +226,9 @@ if (!state.configured) {
 busy();
 if (state.enabled && state.available && state.supported) void devices();
 async function refreshRuntime() {
-  state = await invoke("local_status"); runtime.hidden = !state.enabled;
+  state = await invoke("local_status");
+  if (state.chrome_error) message("chrome-status", state.chrome_error, true);
+  runtime.hidden = !state.enabled;
   header.querySelector(".sub").textContent = state.enabled ? "PLaMo 3 Translate · このPCで翻訳" : state.configured ? "PLaMo 3 Translate · 原文と訳はサーバーに残りません" : "PLaMo 3 Translate";
   runtime.textContent = state.error || (state.loading ? "翻訳モデルを読み込んでいます…" : state.ready ? "ローカル翻訳の準備ができました" : state.auto_release ? "翻訳するときにモデルを読み込みます" : "モデルは解放されています。次の翻訳時に読み込みます");
   runtime.className = state.error ? "hint err" : "hint"; busy();
