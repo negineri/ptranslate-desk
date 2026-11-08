@@ -342,8 +342,9 @@
     .heading, .actions { display: flex; align-items: center; gap: 4px; }
     .heading strong { font-size: 12px; }
     .msg { flex: 1; min-width: 0; display: block; height: 20px; line-height: 20px; overflow: hidden; text-overflow: ellipsis;
-      white-space: nowrap; font-variant-numeric: tabular-nums; }
+      white-space: nowrap; text-align: center; font-variant-numeric: tabular-nums; }
     .actions { flex-wrap: wrap; min-height: 26px; }
+    .actions button { flex: 1; }
     .err { color: #c43c3c; } .ok { color: #1f8a4c; } .warn { color: #b26a00; }
     button { font: inherit; color: inherit; background: transparent; border: 1px solid #dde1e8; border-radius: 6px;
       padding: 2px 6px; cursor: pointer; white-space: nowrap; }
