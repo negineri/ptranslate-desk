@@ -28,16 +28,14 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
     <div id="local-setup" hidden>
       <div class="setup-group">
         <h4>翻訳に使うデバイス</h4>
-        <div class="local-actions"><button id="local-measure">計測して候補を確認</button><button id="local-measure-long">長文も調べる</button><button id="local-cancel-measure" hidden>計測を中止</button><button id="local-manual" class="link">手動で選ぶ</button></div>
+        <div class="local-actions"><button id="local-measure">計測して候補を確認</button><button id="local-cancel-measure" hidden>計測を中止</button></div>
         <p id="local-measure-status" class="hint" role="status"></p><ol id="local-candidates"></ol>
         <label for="local-device">使用するデバイス</label><select id="local-device"><option value="none">CPU</option></select>
       </div>
       <div class="setup-group">
         <h4>同時に訳す数</h4>
-        <label for="local-parallel">推論の並列数</label><select id="local-parallel"><option value="auto">自動</option><option value="manual">手動</option></select>
-        <p id="local-parallel-setting" hidden><label for="local-parallel-limit">同時に訳す数</label> <input id="local-parallel-limit" type="number" min="1" max="64" value="1" style="width:6em"></p>
-        <p id="local-parallel-status" class="hint" role="status"></p>
-        <p class="hint">自動では空きメモリとモデルに合わせて調整します。手動では1〜64件を指定できます。保存して再起動すると反映されます。</p>
+        <label for="local-parallel-limit">推論の並列数</label><input id="local-parallel-limit" type="number" min="1" max="64" value="1" style="width:6em">
+        <p class="hint">1〜64件を指定できます。計測すると推奨値が入ります。保存して再起動すると反映されます。</p>
       </div>
       <div class="setup-group">
         <h4>メモリ</h4>
@@ -99,23 +97,23 @@ style.textContent = `#mode-welcome { max-width:800px; margin:48px auto; }
   @media(max-width:600px) { .mode-cards { grid-template-columns:1fr; } #mode-welcome { margin:24px 0; } }`;
 document.head.append(style);
 const $ = (id) => document.getElementById(id);
-let state, downloading = false, measuring = false, manual = false, detecting = 0, draftLocal = false, modeVersion = 0;
+let state, downloading = false, measuring = false, detecting = 0, draftLocal = false, modeVersion = 0;
 function message(id, text, failed = false) {
   $(id).textContent = String(text); $(id).className = failed ? "hint err" : "hint";
   $(id).setAttribute("role", failed ? "alert" : "status");
 }
 function error(e) { message("local-status", e, true); }
 function settings() {
-  const automatic = $("local-parallel").value === "auto";
   return { enabled: true, device: $("local-device").value, auto_release: $("local-auto-release").checked,
-    idle_minutes: Number($("local-idle-minutes").value), parallel: automatic ? 1 : Number($("local-parallel-limit").value), auto_parallel: automatic };
+    idle_minutes: Number($("local-idle-minutes").value), parallel: Number($("local-parallel-limit").value) };
 }
 function busy() {
   $("local-setup").hidden = !state?.available;
   $("local-save").disabled = downloading || measuring || detecting > 0 || !state?.available;
   $("local-download").disabled = downloading || measuring;
   $("local-measure").disabled = downloading || measuring || detecting > 0 || !state?.available;
-  $("local-measure-long").disabled = $("local-measure").disabled || !/^(Vulkan|MTL)\d{1,3}$/.test($("local-device").value);
+  $("local-device").disabled = measuring || downloading;
+  $("local-parallel-limit").disabled = measuring || downloading;
   $("local-cancel-measure").hidden = !measuring;
   $("local-start").disabled = !state?.enabled || downloading || measuring || state?.loading;
   $("mode-server").disabled = downloading || measuring;
@@ -141,41 +139,26 @@ async function devices() {
   if (!options.some((o) => o.value === value)) options.push(new Option(value === "auto" ? "自動（エンジンに任せる）" : value, value));
   $("local-device").replaceChildren(...options); $("local-device").value = value;
 }
-async function measure(longText = false) {
+async function measure() {
   if (measuring || downloading || !state.available) return;
   measuring = true; busy(); $("local-candidates").replaceChildren();
-  message("local-measure-status", longText ? "選択したGPUを長文で追加計測します…" : "短文でデバイスを比較し、ページ翻訳に近い条件で並列数を計測します…");
+  message("local-measure-status", "短文でデバイスを比較し、ページ翻訳に近い条件で並列数を計測します…");
   const progress = new Channel();
   progress.onmessage = (r) => message("local-measure-status", r.measuring_parallel
-    ? `${r.name}：${r.measuring_parallel}並列で${longText ? "長文" : "ページ相当の短文"}を計測しています…`
+    ? `${r.name}：${r.measuring_parallel}並列でページ相当の短文を計測しています…`
     : r.milliseconds === null && !r.error ? `${r.name}を計測しています…` : `${r.name}の計測が終わりました`);
   try {
-    const results = await invoke("measure_local_devices", { progress, longText, device: longText ? $("local-device").value : null });
+    const results = await invoke("measure_local_devices", { progress });
     const fastest = results.find((r) => r.milliseconds !== null);
     for (const r of results) {
       if (![...$("local-device").options].some((o) => o.value === r.id)) $("local-device").add(new Option(r.name, r.id));
       const li = document.createElement("li");
       const seconds = r.milliseconds === null ? r.error : `短文の翻訳 約${(r.milliseconds / 1000).toFixed(2)}秒${r === fastest ? "（おすすめ）" : ""}`;
       li.append(document.createTextNode(`${r.name}：${seconds}`));
-      if (r.milliseconds !== null) {
-        const button = document.createElement("button"); button.textContent = "選択";
-        button.onclick = () => { $("local-device").value = r.id; manual = true; busy(); };
-        li.append(button);
-      }
       if (r.recommended_parallel) {
         const result = document.createElement("p");
-        result.textContent = r.long_text
-          ? `長文の推奨：${r.recommended_parallel}並列（約${r.bulk_per_second.toFixed(1)}件/秒）`
-          : `推奨${r.recommended_parallel}並列（ページ相当の計測${r.measured_parallel}並列の3/4、端数切り捨て・最低1）`;
-        const apply = document.createElement("button"); apply.textContent = "大量翻訳に設定";
-        apply.onclick = () => {
-          $("local-device").value = r.id; manual = true;
-          $("local-parallel").value = "manual";
-          $("local-parallel-limit").value = String(r.recommended_parallel);
-          $("local-parallel-setting").hidden = false;
-          message("local-measure-status", "大量翻訳向けの設定を選びました。「保存して再起動」で反映します。");
-        };
-        result.append(apply); li.append(result);
+        result.textContent = `推奨${r.recommended_parallel}並列（約${r.bulk_per_second.toFixed(1)}件/秒）`;
+        li.append(result);
       }
       if (r.bulk_error) {
         const note = document.createElement("p"); note.className = "hint";
@@ -184,13 +167,16 @@ async function measure(longText = false) {
       }
       $("local-candidates").append(li);
     }
-    if (fastest && !manual) $("local-device").value = fastest.id;
-    message("local-measure-status", fastest ? longText ? "長文での計測が終わりました。設定を選んで保存すると反映します。" : "ページ翻訳に近い条件で推奨値を求めました。GPUを選ぶと長文も追加で調べられます。" : "計測できませんでした。デバイスを手動で選択できます。", !fastest);
+    if (fastest) {
+      $("local-device").value = fastest.id;
+      $("local-parallel-limit").value = String(fastest.recommended_parallel ?? 1);
+    }
+    message("local-measure-status", fastest ? "推奨値を設定欄に反映しました。「保存して再起動」で適用します。" : "計測できませんでした。設定欄からデバイスと並列数を指定できます。", !fastest);
   } catch (e) { message("local-measure-status", e, true); }
   finally { measuring = false; busy(); }
 }
 async function chooseLocal() {
-  hideWelcome(); selectDraft(true); manual = false;
+  hideWelcome(); selectDraft(true);
   const version = modeVersion;
   if (!state.configured) accountSlot.hidden = true;
   if (state.available) { await devices(); if (draftLocal && modeVersion === version) await measure(); }
@@ -215,14 +201,7 @@ $("chrome-register").onclick = async () => {
     await invoke("register_chrome", { extensionId }); message("chrome-status", "登録しました。拡張の設定から接続を確かめてください。");
   } catch (e) { message("chrome-status", e, true); }
 };
-$("local-measure").onclick = () => { manual = false; void measure(); };
-$("local-measure-long").onclick = () => { void measure(true); };
-$("local-manual").onclick = async () => {
-  manual = true;
-  if (measuring) await invoke("cancel_local_measurement").catch(error);
-  if (state.available) await devices(); $("local-device").focus();
-};
-$("local-device").onchange = () => { manual = true; busy(); };
+$("local-measure").onclick = () => { void measure(); };
 $("local-cancel-measure").onclick = () => void invoke("cancel_local_measurement").catch(error);
 $("local-auto-release").onchange = () => { $("local-idle-setting").hidden = !$("local-auto-release").checked; };
 $("local-download").onclick = () => { $("local-download-confirm").showModal(); $("local-decline-download").focus(); };
@@ -248,7 +227,7 @@ $("local-confirm-download").onclick = async () => {
     $("local-download-area").hidden = state.available; message("local-status", "モデルの準備ができました。");
   } catch (e) { error(e); }
   finally { downloading = false; $("local-progress-area").hidden = true; busy(); }
-  if (state.available) { await devices(); if (!manual) await measure(); }
+  if (state.available) { await devices(); await measure(); }
 };
 $("local-cancel-download").onclick = () => void invoke("cancel_local_download").catch(error);
 $("local-save").onclick = async () => {
@@ -262,10 +241,7 @@ $("local-start").onclick = async () => {
 
 state = await invoke("local_status");
 if (state.chrome_error) message("chrome-status", state.chrome_error, true);
-$("local-parallel").value = state.auto_parallel ? "auto" : "manual";
-$("local-parallel-limit").value = String(state.configured_parallel);
-$("local-parallel-setting").hidden = state.auto_parallel;
-$("local-parallel").onchange = () => { $("local-parallel-setting").hidden = $("local-parallel").value === "auto"; };
+$("local-parallel-limit").value = String(state.parallel);
 $("local-auto-release").checked = state.auto_release;
 if (![...$("local-idle-minutes").options].some((o) => Number(o.value) === state.idle_minutes)) $("local-idle-minutes").add(new Option(`${state.idle_minutes}分`, String(state.idle_minutes)));
 $("local-idle-minutes").value = String(state.idle_minutes); $("local-idle-setting").hidden = !state.auto_release;
@@ -286,9 +262,6 @@ async function refreshRuntime() {
   runtime.hidden = !state.enabled;
   header.querySelector(".sub").textContent = state.enabled ? "PLaMo 3 Translate · このPCで翻訳" : state.configured ? "PLaMo 3 Translate · 原文と訳はサーバーに残りません" : "PLaMo 3 Translate";
   runtime.textContent = state.error || (state.loading ? "翻訳モデルを読み込んでいます…" : state.ready ? "ローカル翻訳の準備ができました" : state.auto_release ? "翻訳するときにモデルを読み込みます" : "モデルは解放されています。次の翻訳時に読み込みます");
-  $("local-parallel-status").textContent = state.auto_parallel
-    ? state.parallel_adjusting ? "自動（次の読み込み時に調整）" : `自動（最大${state.parallel}件）`
-    : `手動（最大${state.parallel}件）`;
   runtime.className = state.error ? "hint err" : "hint"; busy();
 }
 void refreshRuntime().catch(error);

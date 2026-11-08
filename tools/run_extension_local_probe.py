@@ -20,8 +20,8 @@ def main():
         "--parallel",
         type=int,
         choices=range(1, 65),
-        default=None,
-        help="省略時は自動調整。指定時は手動固定",
+        default=1,
+        help="同時に訳す数（既定1）",
     )
     parser.add_argument("--device", default="none")
     parser.add_argument("--port", type=int, default=0)
@@ -68,8 +68,7 @@ def main():
                 {
                     "enabled": True,
                     "device": args.device,
-                    "parallel": args.parallel or 1,
-                    "auto_parallel": args.parallel is None,
+                    "parallel": args.parallel,
                     "auto_release": True,
                     "idle_minutes": 1,
                 }
@@ -88,7 +87,7 @@ def main():
             try:
                 print(f"通し確認ページ: {state['url']}", flush=True)
                 print(
-                    f"一時設定で開始: device={args.device}, parallel={args.parallel if args.parallel is not None else 'auto'}",
+                    f"一時設定で開始: device={args.device}, parallel={args.parallel}",
                     flush=True,
                 )
                 return app.wait()

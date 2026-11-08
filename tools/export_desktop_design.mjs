@@ -100,15 +100,16 @@ function scene(name) {
   $('local-start').disabled = missing || name === 'measuring';
   $('local-status').className = name === 'error' ? 'hint err' : 'hint';
   $('local-status').textContent = name === 'error' ? 'ダウンロードが途切れました。やり直してください' : name === 'downloading' ? '' : missing ? 'モデルをダウンロードすると、このPCで翻訳できます。' : 'モデルの準備ができました。';
-  $('local-measure-status').textContent = name === 'measuring' ? 'AMD Radeon Graphicsを計測しています…' : ['candidates','memory'].includes(name) ? '結果を参考に使用するデバイスを選んでください。文章の長さによって速度は変わります。' : '';
+  $('local-measure-status').textContent = name === 'measuring' ? 'AMD Radeon Graphicsを計測しています…' : ['candidates','memory'].includes(name) ? '推奨値を設定欄に反映しました。「保存して再起動」で適用します。' : '';
   $('local-candidates').replaceChildren();
   if (['candidates','memory'].includes(name)) {
     for (const [label,id] of [['NVIDIA GeForce RTX 4090：短文の翻訳 約0.06秒（おすすめ）','Vulkan0'],['CPU：短文の翻訳 約0.45秒','none'],['AMD Radeon Graphics：短文の翻訳 約3.20秒','Vulkan1']]) {
       const li = document.createElement('li'); li.append(document.createTextNode(label));
-      const button = document.createElement('button'); button.textContent = '選択'; button.onclick = () => $('local-device').value = id; li.append(button); $('local-candidates').append(li);
+      $('local-candidates').append(li);
     }
   }
   $('local-device').innerHTML = '<option value="Vulkan0">NVIDIA GeForce RTX 4090</option><option value="Vulkan1">AMD Radeon Graphics</option><option value="none">CPU</option>';
+  $('local-parallel-limit').value = '8';
   $('local-progress').value = .42; $('local-progress-label').textContent = '翻訳モデル：723.9 / 1723.5 MiB（42%）';
   $('client-id').value = 'translator-desktop'; $('shortcut-status').textContent = 'ショートカットを使えます';
   $('header-account').querySelector('summary').title = 'アカウント';
@@ -130,7 +131,7 @@ $('local-confirm-download').onclick = () => {
 };
 $('local-cancel-download').onclick = () => scene('missing');
 $('local-measure').onclick = () => { scene('measuring'); animation = setInterval(() => scene('candidates'),1800); };
-$('local-cancel-measure').onclick = () => scene('candidates'); $('local-manual').onclick = () => $('local-device').focus();
+$('local-cancel-measure').onclick = () => scene('candidates');
 $('local-auto-release').onchange = () => show('local-idle-setting',$('local-auto-release').checked);
 $('local-save').onclick = () => scene('translation'); $('local-start').onclick = () => $('local-status').textContent = 'モデルの準備ができました。';
 $('translation-tab').onclick = () => scene('translation'); $('settings-tab').onclick = () => scene('candidates');

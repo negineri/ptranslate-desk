@@ -221,16 +221,14 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
     <div id="local-setup" hidden>
       <div class="setup-group">
         <h4>翻訳に使うデバイス</h4>
-        <div class="local-actions"><button id="local-measure">計測して候補を確認</button><button id="local-measure-long">長文も調べる</button><button id="local-cancel-measure" hidden>計測を中止</button><button id="local-manual" class="link">手動で選ぶ</button></div>
+        <div class="local-actions"><button id="local-measure">計測して候補を確認</button><button id="local-cancel-measure" hidden>計測を中止</button></div>
         <p id="local-measure-status" class="hint" role="status"></p><ol id="local-candidates"></ol>
         <label for="local-device">使用するデバイス</label><select id="local-device"><option value="none">CPU</option></select>
       </div>
       <div class="setup-group">
         <h4>同時に訳す数</h4>
-        <label for="local-parallel">推論の並列数</label><select id="local-parallel"><option value="auto">自動</option><option value="manual">手動</option></select>
-        <p id="local-parallel-setting" hidden><label for="local-parallel-limit">同時に訳す数</label> <input id="local-parallel-limit" type="number" min="1" max="64" value="1" style="width:6em"></p>
-        <p id="local-parallel-status" class="hint" role="status"></p>
-        <p class="hint">自動では空きメモリとモデルに合わせて調整します。手動では1〜64件を指定できます。保存して再起動すると反映されます。</p>
+        <label for="local-parallel-limit">推論の並列数</label><input id="local-parallel-limit" type="number" min="1" max="64" value="1" style="width:6em">
+        <p class="hint">1〜64件を指定できます。計測すると推奨値が入ります。保存して再起動すると反映されます。</p>
       </div>
       <div class="setup-group">
         <h4>メモリ</h4>
@@ -327,15 +325,16 @@ function scene(name) {
   $('local-start').disabled = missing || name === 'measuring';
   $('local-status').className = name === 'error' ? 'hint err' : 'hint';
   $('local-status').textContent = name === 'error' ? 'ダウンロードが途切れました。やり直してください' : name === 'downloading' ? '' : missing ? 'モデルをダウンロードすると、このPCで翻訳できます。' : 'モデルの準備ができました。';
-  $('local-measure-status').textContent = name === 'measuring' ? 'AMD Radeon Graphicsを計測しています…' : ['candidates','memory'].includes(name) ? '結果を参考に使用するデバイスを選んでください。文章の長さによって速度は変わります。' : '';
+  $('local-measure-status').textContent = name === 'measuring' ? 'AMD Radeon Graphicsを計測しています…' : ['candidates','memory'].includes(name) ? '推奨値を設定欄に反映しました。「保存して再起動」で適用します。' : '';
   $('local-candidates').replaceChildren();
   if (['candidates','memory'].includes(name)) {
     for (const [label,id] of [['NVIDIA GeForce RTX 4090：短文の翻訳 約0.06秒（おすすめ）','Vulkan0'],['CPU：短文の翻訳 約0.45秒','none'],['AMD Radeon Graphics：短文の翻訳 約3.20秒','Vulkan1']]) {
       const li = document.createElement('li'); li.append(document.createTextNode(label));
-      const button = document.createElement('button'); button.textContent = '選択'; button.onclick = () => $('local-device').value = id; li.append(button); $('local-candidates').append(li);
+      $('local-candidates').append(li);
     }
   }
   $('local-device').innerHTML = '<option value="Vulkan0">NVIDIA GeForce RTX 4090</option><option value="Vulkan1">AMD Radeon Graphics</option><option value="none">CPU</option>';
+  $('local-parallel-limit').value = '8';
   $('local-progress').value = .42; $('local-progress-label').textContent = '翻訳モデル：723.9 / 1723.5 MiB（42%）';
   $('client-id').value = 'translator-desktop'; $('shortcut-status').textContent = 'ショートカットを使えます';
   $('header-account').querySelector('summary').title = 'アカウント';
@@ -357,7 +356,7 @@ $('local-confirm-download').onclick = () => {
 };
 $('local-cancel-download').onclick = () => scene('missing');
 $('local-measure').onclick = () => { scene('measuring'); animation = setInterval(() => scene('candidates'),1800); };
-$('local-cancel-measure').onclick = () => scene('candidates'); $('local-manual').onclick = () => $('local-device').focus();
+$('local-cancel-measure').onclick = () => scene('candidates');
 $('local-auto-release').onchange = () => show('local-idle-setting',$('local-auto-release').checked);
 $('local-save').onclick = () => scene('translation'); $('local-start').onclick = () => $('local-status').textContent = 'モデルの準備ができました。';
 $('translation-tab').onclick = () => scene('translation'); $('settings-tab').onclick = () => scene('candidates');

@@ -69,19 +69,6 @@ const SHORT_TEXTS: &[&str] = &[
     "Local authorities will review the findings before deciding how to distribute the budget.",
 ];
 
-fn adjusted_parallel(measured: usize, long_text: bool) -> usize {
-    if long_text {
-        measured
-    } else {
-        (measured * 3 / 4).max(1)
-    }
-}
-
-const TEXTS: [&str; 2] = [
-    "The city council approved a plan to improve public transport. The new routes will connect residential areas with schools, hospitals, and the central railway station. Construction is expected to begin next spring, although residents have asked officials to provide more detailed information about the cost and schedule.",
-    "The research team published a report on energy use in public buildings. They compared schools, libraries, and hospitals over several years, taking local weather conditions into account. Better insulation reduced heating costs, while regular maintenance helped keep equipment working efficiently. The report recommends gradual improvements and careful monitoring rather than replacing every system at once. Local authorities will review the findings before deciding how to distribute next year's budget. Residents can attend a public meeting to ask questions and share their views.",
-];
-
 pub(super) fn target(results: &[Measurement]) -> Option<usize> {
     results
         .iter()
@@ -114,10 +101,9 @@ async fn translate(
     client: &reqwest::Client,
     endpoint: &Endpoint,
     index: usize,
-    long_text: bool,
     history: Option<(String, String)>,
 ) -> Result<String, String> {
-    let texts: &[&str] = if long_text { &TEXTS } else { SHORT_TEXTS };
+    let texts = SHORT_TEXTS;
     let text = texts[index % texts.len()];
     let history: Vec<_> = history
         .into_iter()
@@ -157,11 +143,10 @@ async fn batch(
     client: &reqwest::Client,
     endpoint: &Endpoint,
     parallel: usize,
-    long_text: bool,
 ) -> Result<f64, String> {
     // 短文は3文×64セッション。同じ192件をすべての並列数で処理する。
-    let requests = if long_text { 96 } else { 192 };
-    let session_size = if long_text { 1 } else { 3 };
+    let requests = 192;
+    let session_size = 3;
     let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let previous = Arc::new(Mutex::new(None));
     let started = Instant::now();
@@ -180,9 +165,8 @@ async fn batch(
                 for index in start..start + session_size {
                     // page-task.mjsと同様に、送信時点で最後に完了した訳を全ワーカーで共有。
                     let history = previous.lock().unwrap().clone();
-                    let translated =
-                        translate(&client, &endpoint, index, long_text, history).await?;
-                    let texts: &[&str] = if long_text { &TEXTS } else { SHORT_TEXTS };
+                    let translated = translate(&client, &endpoint, index, history).await?;
+                    let texts = SHORT_TEXTS;
                     *previous.lock().unwrap() =
                         Some((texts[index % texts.len()].to_owned(), translated));
                 }
@@ -219,13 +203,13 @@ async fn sweep(
         // 起動直後の初回推論を計測から除外。準備完了後の異常終了もここで検出する。
         tokio::time::timeout(
             Duration::from_secs(15),
-            translate(&trial.client, &endpoint, 1000, measurement.long_text, None),
+            translate(&trial.client, &endpoint, 1000, None),
         )
         .await
         .map_err(|_| "並列計測の準備がタイムアウトしました")??;
         let speed = tokio::time::timeout(Duration::from_secs(60), async {
-            let first = batch(&trial.client, &endpoint, parallel, measurement.long_text).await?;
-            let second = batch(&trial.client, &endpoint, parallel, measurement.long_text).await?;
+            let first = batch(&trial.client, &endpoint, parallel).await?;
+            let second = batch(&trial.client, &endpoint, parallel).await?;
             Ok::<_, String>(2. / (1. / first + 1. / second))
         })
         .await
@@ -257,7 +241,6 @@ pub async fn measure(
         Settings {
             enabled: true,
             device: measurement.id.clone(),
-            auto_parallel: false,
             ..Settings::default()
         },
         true,
@@ -275,9 +258,7 @@ pub async fn measure(
         return Err("計測を中止しました".into());
     }
     if let Some(best) = recommendation(&samples) {
-        measurement.measured_parallel = Some(best.parallel);
-        measurement.recommended_parallel =
-            Some(adjusted_parallel(best.parallel, measurement.long_text));
+        measurement.recommended_parallel = Some(best.parallel);
         measurement.bulk_per_second = Some(best.requests_per_second);
     }
     measurement.bulk_error = result.err();
@@ -288,13 +269,6 @@ pub async fn measure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn short_recommendation_is_three_quarters_rounded_down_and_long_is_unchanged() {
-        for (measured, expected) in [(1, 1), (2, 1), (4, 3), (24, 18), (32, 24), (64, 48)] {
-            assert_eq!(adjusted_parallel(measured, false), expected);
-            assert_eq!(adjusted_parallel(measured, true), measured);
-        }
-    }
     #[test]
     fn fastest_successful_gpu_is_measured_even_if_cpu_is_faster() {
         let results = [
@@ -348,11 +322,9 @@ mod tests {
                 .await
                 .unwrap();
         });
-        assert!(
-            translate(&reqwest::Client::new(), &endpoint, 0, false, None)
-                .await
-                .is_err()
-        );
+        assert!(translate(&reqwest::Client::new(), &endpoint, 0, None)
+            .await
+            .is_err());
         server.await.unwrap();
     }
     #[test]
@@ -378,27 +350,26 @@ mod tests {
     #[tokio::test]
     async fn batch_runs_real_concurrent_requests_against_a_local_mock() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        for long_text in [false, true] {
-            for parallel in [1, 12, 64] {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let endpoint = Endpoint {
-                    url: format!("http://{}", listener.local_addr().unwrap()),
-                    key: "test".into(),
-                };
-                let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let seen = Arc::new(Mutex::new(std::collections::HashMap::<String, usize>::new()));
-                let history_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let (seen_server, history_server) = (seen.clone(), history_count.clone());
-                let (a, p, c) = (active.clone(), peak.clone(), count.clone());
-                let server = tokio::spawn(async move {
-                    let mut connections = tokio::task::JoinSet::new();
-                    for _ in 0..if long_text { 96 } else { 192 } {
-                        let (mut stream, _) = listener.accept().await.unwrap();
-                        let (a, p, c) = (a.clone(), p.clone(), c.clone());
-                        let (seen, history_count) = (seen_server.clone(), history_server.clone());
-                        connections.spawn(async move {
+        for parallel in [1, 12, 64] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = Endpoint {
+                url: format!("http://{}", listener.local_addr().unwrap()),
+                key: "test".into(),
+            };
+            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = Arc::new(Mutex::new(std::collections::HashMap::<String, usize>::new()));
+            let history_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (seen_server, history_server) = (seen.clone(), history_count.clone());
+            let (a, p, c) = (active.clone(), peak.clone(), count.clone());
+            let server = tokio::spawn(async move {
+                let mut connections = tokio::task::JoinSet::new();
+                for _ in 0..192 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let (a, p, c) = (a.clone(), p.clone(), c.clone());
+                    let (seen, history_count) = (seen_server.clone(), history_server.clone());
+                    connections.spawn(async move {
                         let mut data = Vec::new();
                         let mut buffer = [0; 4096];
                         loop {
@@ -422,8 +393,7 @@ mod tests {
                                         serde_json::from_slice(&data[end + 4..end + 4 + length])
                                             .unwrap();
                                     let prompt = body["prompt"].as_str().unwrap();
-                                    let texts: &[&str] =
-                                        if long_text { &TEXTS } else { SHORT_TEXTS };
+                                    let texts = SHORT_TEXTS;
                                     assert_eq!(body["stream"], true);
                                     assert!(body.get("cache_prompt").is_none());
                                     assert!(texts.iter().any(|text| prompt.contains(text)));
@@ -449,38 +419,31 @@ mod tests {
                         stream.write_all(response.as_bytes()).await.unwrap();
                         c.fetch_add(1, Ordering::SeqCst);
                     });
-                    }
-                    while let Some(result) = connections.join_next().await {
-                        result.unwrap();
-                    }
-                });
-                assert!(
-                    batch(&reqwest::Client::new(), &endpoint, parallel, long_text)
-                        .await
-                        .unwrap()
-                        > 0.
-                );
-                server.await.unwrap();
-                assert_eq!(
-                    count.load(Ordering::SeqCst),
-                    if long_text { 96 } else { 192 }
-                );
-                assert!(peak.load(Ordering::SeqCst) >= 1);
-                if parallel > 1 {
-                    assert!(peak.load(Ordering::SeqCst) > 1);
                 }
-                assert!(peak.load(Ordering::SeqCst) <= parallel);
-                let texts: &[&str] = if long_text { &TEXTS } else { SHORT_TEXTS };
-                let counts = seen.lock().unwrap();
-                assert_eq!(counts.len(), texts.len());
-                for text in texts {
-                    assert_eq!(counts.get(*text), Some(&(if long_text { 48 } else { 3 })));
+                while let Some(result) = connections.join_next().await {
+                    result.unwrap();
                 }
-                assert!(
-                    history_count.load(Ordering::SeqCst)
-                        >= (if long_text { 96 } else { 192 }) - parallel
-                );
+            });
+            assert!(
+                batch(&reqwest::Client::new(), &endpoint, parallel)
+                    .await
+                    .unwrap()
+                    > 0.
+            );
+            server.await.unwrap();
+            assert_eq!(count.load(Ordering::SeqCst), 192);
+            assert!(peak.load(Ordering::SeqCst) >= 1);
+            if parallel > 1 {
+                assert!(peak.load(Ordering::SeqCst) > 1);
             }
+            assert!(peak.load(Ordering::SeqCst) <= parallel);
+            let texts = SHORT_TEXTS;
+            let counts = seen.lock().unwrap();
+            assert_eq!(counts.len(), texts.len());
+            for text in texts {
+                assert_eq!(counts.get(*text), Some(&3));
+            }
+            assert!(history_count.load(Ordering::SeqCst) >= (192) - parallel);
         }
     }
 }

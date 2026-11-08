@@ -29,7 +29,6 @@ pub struct Settings {
     #[serde(default = "default_idle_minutes")]
     pub idle_minutes: u64,
     pub parallel: usize,
-    pub auto_parallel: bool,
 }
 fn default_idle_minutes() -> u64 {
     5
@@ -45,7 +44,6 @@ impl Default for Settings {
             auto_release: false,
             idle_minutes: default_idle_minutes(),
             parallel: 1,
-            auto_parallel: true,
         }
     }
 }
@@ -124,8 +122,6 @@ pub struct Local {
     measurement_cancel: Operation,
     downloads: resources::Downloads,
     slots: parallel::Slots,
-    parallel_planned: AtomicBool,
-    planning: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -255,13 +251,7 @@ impl Local {
             return Err("同時に訳す数は1〜64で指定してください".into());
         }
         Ok(Self {
-            slots: parallel::Slots::new(if settings.auto_parallel {
-                1
-            } else {
-                settings.parallel
-            }),
-            parallel_planned: AtomicBool::new(!settings.auto_parallel),
-            planning: tokio::sync::Mutex::new(()),
+            slots: parallel::Slots::new(settings.parallel),
             settings,
             process: Mutex::new(None),
             starting: tokio::sync::Mutex::new(()),
@@ -291,8 +281,6 @@ impl Local {
         Lease(self)
     }
     pub fn stop(&self) {
-        self.parallel_planned
-            .store(!self.settings.auto_parallel, Ordering::SeqCst);
         self.ready.store(false, Ordering::SeqCst);
         self.process.lock().unwrap().take();
     }
@@ -316,9 +304,6 @@ impl Local {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let local = app.state::<Local>();
-            if local.enabled() {
-                local.prepare_parallel(&app).await;
-            }
             if local.enabled() && !local.settings.auto_release {
                 if let Err(error) = local.start(&app).await {
                     *local.error.lock().unwrap() = Some(error);
@@ -344,85 +329,13 @@ impl Local {
             slot.take();
         }
         self.ready.store(false, Ordering::SeqCst);
-        self.prepare_parallel(app).await;
         self.loading.store(true, Ordering::SeqCst);
         let _loading = Loading(self);
         *self.error.lock().unwrap() = None;
-        let result =
-            parallel::start_with_fallback(&self.slots, self.settings.auto_parallel, |count| {
-                self.start_engine(app, count)
-            })
-            .await;
-        if result.is_ok() {
-            self.parallel_planned.store(true, Ordering::SeqCst);
-        }
-        result
+        self.start_engine(app, self.slots.limit()).await
     }
 
-    async fn prepare_parallel(&self, app: &AppHandle) {
-        if !self.settings.auto_parallel
-            || self.parallel_planned.load(Ordering::SeqCst)
-            || self.loading.load(Ordering::SeqCst)
-            || self.ready.load(Ordering::SeqCst)
-        {
-            return;
-        }
-        let _planning = self.planning.lock().await;
-        if self.parallel_planned.load(Ordering::SeqCst)
-            || self.loading.load(Ordering::SeqCst)
-            || self.ready.load(Ordering::SeqCst)
-        {
-            return;
-        }
-        let model = installation(app)
-            .ok()
-            .map(|installation| installation.model);
-        let memory = tauri::async_runtime::spawn_blocking(move || {
-            let host = parallel::available_memory();
-            let size = model
-                .as_ref()
-                .and_then(|path| fs::metadata(path).ok())
-                .map_or(0, |meta| meta.len());
-            let kv = model
-                .as_ref()
-                .and_then(|path| parallel::model_kv_per_slot(path).ok());
-            (host, size, kv)
-        })
-        .await
-        .unwrap_or((None, 0, None));
-        let cpu = self.settings.device == "none";
-        let free = if cpu {
-            memory.0
-        } else {
-            let devices = list_devices(app.clone()).await.unwrap_or_default();
-            let selected: Vec<_> = devices
-                .iter()
-                .filter(|device| {
-                    self.settings.device == "auto" || device.id == self.settings.device
-                })
-                .collect();
-            let gpu = if selected.is_empty() {
-                None
-            } else {
-                selected
-                    .iter()
-                    .map(|device| parallel::device_free_bytes(&device.name))
-                    .collect::<Option<Vec<_>>>()
-                    .and_then(|values| values.into_iter().min())
-            };
-            gpu.map(|gpu| memory.0.map_or(gpu, |host| host.min(gpu)))
-        };
-        let threads = cpu.then(|| std::thread::available_parallelism().map_or(1, usize::from));
-        self.slots
-            .resize(parallel::choose_parallel(free, memory.1, memory.2, threads));
-        self.parallel_planned.store(true, Ordering::SeqCst);
-    }
-
-    async fn start_engine(
-        &self,
-        app: &AppHandle,
-        count: usize,
-    ) -> Result<Endpoint, parallel::StartupFailure> {
+    async fn start_engine(&self, app: &AppHandle, count: usize) -> Result<Endpoint, String> {
         let install = installation(app)?;
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|_| "推論エンジンのポートを確保できませんでした")?;
@@ -494,11 +407,7 @@ impl Local {
                 .is_none_or(|p| !matches!(p.child.try_wait(), Ok(None)))
             {
                 self.stop();
-                return Err(parallel::StartupFailure {
-                    message: "推論エンジンが終了しました。CPUまたは別のGPUを選択してください"
-                        .into(),
-                    reduce_parallel: true,
-                });
+                return Err("推論エンジンが終了しました。並列数を減らすか、CPUまたは別のGPUを選択してください".into());
             }
             if self
                 .client
@@ -553,9 +462,6 @@ pub struct Status {
     auto_release: bool,
     idle_minutes: u64,
     parallel: usize,
-    configured_parallel: usize,
-    auto_parallel: bool,
-    parallel_adjusting: bool,
     error: Option<String>,
 }
 #[tauri::command]
@@ -577,10 +483,6 @@ pub fn local_status(app: AppHandle) -> Status {
         auto_release: local.settings.auto_release,
         idle_minutes: local.settings.idle_minutes,
         parallel: local.slots.limit(),
-        configured_parallel: local.settings.parallel,
-        auto_parallel: local.settings.auto_parallel,
-        parallel_adjusting: local.settings.auto_parallel
-            && !local.parallel_planned.load(Ordering::SeqCst),
         error,
     }
 }
@@ -633,8 +535,6 @@ pub struct Measurement {
     error: Option<String>,
     measuring_parallel: Option<usize>,
     recommended_parallel: Option<usize>,
-    measured_parallel: Option<usize>,
-    long_text: bool,
     bulk_per_second: Option<f64>,
     bulk_error: Option<String>,
     parallel_samples: Vec<benchmark::Sample>,
@@ -650,15 +550,9 @@ pub async fn measure_local_devices(
     app: AppHandle,
     window: WebviewWindow,
     progress: Channel<Measurement>,
-    long_text: Option<bool>,
-    device: Option<String>,
 ) -> Result<Vec<Measurement>, String> {
     require_main(&window)?;
     installation(&app)?;
-    let long_text = long_text.unwrap_or(false);
-    if long_text && !device.as_deref().is_some_and(gpu_device) {
-        return Err("長文の追加計測にはGPUを選択してください".into());
-    }
     if !resources::supported() {
         return Err(
             "デバイスの計測はWindows x64とmacOS 13.3以降（Apple Silicon・Intel）に対応しています"
@@ -694,17 +588,10 @@ pub async fn measure_local_devices(
         devices = list_devices(app.clone()) => devices.unwrap_or_default(),
     };
     devices.truncate(8);
-    if long_text {
-        devices.retain(|gpu| Some(&gpu.id) == device.as_ref());
-        if devices.is_empty() {
-            return Err("選択したGPUが見つかりませんでした".into());
-        }
-    } else {
-        devices.push(Device {
-            id: "none".into(),
-            name: "CPU".into(),
-        });
-    }
+    devices.push(Device {
+        id: "none".into(),
+        name: "CPU".into(),
+    });
     let mut results = Vec::new();
     for device in devices {
         progress
@@ -720,7 +607,6 @@ pub async fn measure_local_devices(
             Settings {
                 enabled: true,
                 device: device.id.clone(),
-                auto_parallel: false,
                 ..Settings::default()
             },
             true,
@@ -768,7 +654,6 @@ pub async fn measure_local_devices(
     if !local.measurement_cancel.canceled.load(Ordering::SeqCst) {
         if let Some(index) = benchmark::target(&results) {
             let gpu = &mut results[index];
-            gpu.long_text = long_text;
             benchmark::measure(&app, &progress, gpu).await?;
             progress
                 .send(gpu.clone())
@@ -1040,7 +925,6 @@ pub async fn request(
 ) -> Result<(), ()> {
     let local = app.state::<Local>();
     if route == "api/config" {
-        local.prepare_parallel(app).await;
         return json_response(stream, 200, configuration(&local)).await;
     }
     if route != "api/translate" {
@@ -1134,6 +1018,17 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn legacy_auto_flag_does_not_override_the_explicit_parallel_count() {
+        let settings: super::Settings =
+            serde_json::from_str(r#"{"enabled":true,"parallel":12,"auto_parallel":true}"#).unwrap();
+        assert_eq!(settings.parallel, 12);
+        assert!(serde_json::to_value(&settings)
+            .unwrap()
+            .get("auto_parallel")
+            .is_none());
+        assert_eq!(super::Local::new(settings, true).unwrap().slots.limit(), 12);
+    }
+    #[test]
     fn gpu_device_matches_platform() {
         let prefix = if cfg!(target_os = "macos") {
             "MTL"
@@ -1168,7 +1063,6 @@ mod tests {
     fn config_announces_the_runtime_limit_instead_of_the_saved_manual_value() {
         let local = Local::new(
             Settings {
-                auto_parallel: true,
                 parallel: 1,
                 ..Settings::default()
             },
@@ -1190,7 +1084,6 @@ mod tests {
             let local = Local::new(
                 Settings {
                     parallel,
-                    auto_parallel: false,
                     ..Settings::default()
                 },
                 true,
@@ -1217,7 +1110,6 @@ mod tests {
             assert!(Local::new(
                 Settings {
                     parallel,
-                    auto_parallel: false,
                     ..Settings::default()
                 },
                 true
@@ -1328,7 +1220,6 @@ mod tests {
         assert!(!settings.auto_release);
         assert_eq!(settings.idle_minutes, 5);
         assert_eq!(settings.parallel, 1);
-        assert!(settings.auto_parallel);
         let local = Local::new(settings, true).unwrap();
         let now = Instant::now();
         let old = now - Duration::from_secs(301);
