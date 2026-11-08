@@ -43,7 +43,7 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
         <p class="hint">無効の場合は、ローカルモードの起動直後にモデルを読み込みます。</p>
         <p id="local-idle-setting"><label for="local-idle-minutes">解放するまでの未使用時間</label> <select id="local-idle-minutes"><option value="1">1分</option><option value="5">5分</option><option value="10">10分</option><option value="30">30分</option><option value="60">60分</option></select></p>
       </div>
-      <div class="local-actions save-row"><button id="local-start">モデルを読み込む</button><button id="local-stop">モデルを解放</button><span class="spacer"></span><button id="local-save" class="primary">保存して再起動</button></div>
+      <div class="local-actions save-row"><button id="local-start">モデルを読み込む</button><span class="spacer"></span><button id="local-save" class="primary">保存して再起動</button></div>
     </div>
     <div class="setup-group">
       <h4>Chrome連携</h4>
@@ -95,7 +95,6 @@ function busy() {
   $("local-measure").disabled = downloading || measuring || detecting > 0 || !state?.available;
   $("local-cancel-measure").hidden = !measuring;
   $("local-start").disabled = !state?.enabled || downloading || measuring || state?.loading;
-  $("local-stop").disabled = !state?.enabled || downloading || measuring || state?.loading;
   $("mode-server").disabled = downloading || measuring;
 }
 function selectDraft(local) {
@@ -208,9 +207,7 @@ $("local-start").onclick = async () => {
   message("local-status", "モデルを読み込んでいます…");
   try { await invoke("start_local_engine"); message("local-status", "モデルの準備ができました。"); } catch (e) { error(e); }
 };
-$("local-stop").onclick = async () => {
-  try { await invoke("stop_local_engine"); message("local-status", "モデルのメモリを解放しました。"); } catch (e) { error(e); }
-};
+
 state = await invoke("local_status");
 $("local-parallel").value = String(state.parallel);
 $("local-auto-release").checked = state.auto_release;

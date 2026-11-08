@@ -27,7 +27,9 @@ import logging
 import os
 import queue
 import re
+import select
 import signal
+import socket
 import socketserver
 import sys
 import threading
@@ -299,7 +301,57 @@ def max_tokens(text: str) -> int:
     return max(256, min(8000, int(len(text) * 1.5) + 64))
 
 
-def upstream_stream(prompt: str, limit: int, events: queue.Queue, cancel: threading.Event):
+class UpstreamCancellation:
+    """読み取り待ちでも中止できるよう、上流ソケットを保持する。"""
+
+    def __init__(self):
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._socket = None
+
+    def is_set(self):
+        return self._event.is_set()
+
+    def set(self):
+        self._event.set()
+        with self._lock:
+            if self._socket is not None:
+                self._shutdown(self._socket)
+
+    def attach(self, sock):
+        with self._lock:
+            self._socket = sock
+            if self._event.is_set():
+                self._shutdown(sock)
+
+    def detach(self):
+        with self._lock:
+            self._socket = None
+
+    @staticmethod
+    def _shutdown(sock):
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # 既に切断されている。
+
+
+def release_active(user):
+    with active_lock:
+        active[user] -= 1
+        if not active[user]:
+            del active[user]
+
+
+def run_upstream_for_user(user, prompt, limit, events, cancel):
+    try:
+        upstream_stream(prompt, limit, events, cancel)
+    finally:
+        # HTTPハンドラーではなく、上流通信の終了時点で枠を返す。
+        release_active(user)
+
+
+def upstream_stream(prompt: str, limit: int, events: queue.Queue, cancel: UpstreamCancellation):
     """翻訳エンジンに投げ、届いた訳の断片を events に入れる。最後に ("done", 理由) か
     ("error", 文) を入れる。cancel が立ったら接続を切る (llama-server は生成を止める)。"""
     url = urllib.parse.urlsplit(UPSTREAM_URL)
@@ -316,8 +368,18 @@ def upstream_stream(prompt: str, limit: int, events: queue.Queue, cancel: thread
         ensure_ascii=False,
     ).encode()
     conn_cls = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
-    conn = conn_cls(url.hostname, url.port, timeout=UPSTREAM_TIMEOUT)
+    # 接続確立までの待ちを短くし、確立後は通常の読み取り時限に戻す。
+    conn = conn_cls(url.hostname, url.port, timeout=min(5, UPSTREAM_TIMEOUT))
+    resp = None
     try:
+        if cancel.is_set():
+            return
+        conn.connect()
+        cancel.attach(conn.sock)
+        if cancel.is_set():
+            return
+        conn.sock.settimeout(UPSTREAM_TIMEOUT)
+        conn.timeout = UPSTREAM_TIMEOUT
         conn.request(
             "POST",
             url.path,
@@ -359,6 +421,9 @@ def upstream_stream(prompt: str, limit: int, events: queue.Queue, cancel: thread
             log.warning("upstream failed: %s", e)
             events.put(("error", "翻訳サーバーに接続できませんでした"))
     finally:
+        cancel.detach()
+        if resp is not None:
+            resp.close()
         conn.close()
 
 
@@ -439,7 +504,6 @@ class Handler(BaseHTTPRequestHandler):
                         "max_glossary": MAX_GLOSSARY,
                         "concurrency": {
                             "max_in_flight": MAX_ACTIVE_PER_USER,
-                            "recommended_in_flight": MAX_ACTIVE_PER_USER,
                             "scope": "user",
                         },
                         "desktop_connection": {
@@ -485,6 +549,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(line.encode())
         self.wfile.flush()
 
+    def client_disconnected(self):
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and not self.connection.recv(1, socket.MSG_PEEK)
+        except (OSError, ValueError):
+            return True
+
     def translate(self, user: str) -> None:
         req = parse_request(self.read_json_body())
         with active_lock:
@@ -496,12 +567,17 @@ class Handler(BaseHTTPRequestHandler):
             active[user] = active.get(user, 0) + 1
         started = time.monotonic()
         events: queue.Queue = queue.Queue()
-        cancel = threading.Event()
-        threading.Thread(
-            target=upstream_stream,
-            args=(build_prompt(req), max_tokens(req["text"]), events, cancel),
+        cancel = UpstreamCancellation()
+        worker = threading.Thread(
+            target=run_upstream_for_user,
+            args=(user, build_prompt(req), max_tokens(req["text"]), events, cancel),
             daemon=True,
-        ).start()
+        )
+        try:
+            worker.start()
+        except Exception:
+            release_active(user)
+            raise
         finish, out_chars = "error", 0
         try:
             self.send_response(200)
@@ -512,15 +588,23 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.close_connection = True
             self.end_headers()
+            next_ping = time.monotonic() + HEARTBEAT_SECONDS
             while True:
+                # 上流が無応答でも、pingの間隔を待たずにクライアントの切断を拾う。
+                if self.client_disconnected():
+                    finish = "canceled"
+                    break
                 try:
-                    kind, value = events.get(timeout=HEARTBEAT_SECONDS)
+                    kind, value = events.get(timeout=min(0.1, max(0, next_ping - time.monotonic())))
                 except queue.Empty:
-                    self.sse(None)
+                    if time.monotonic() >= next_ping:
+                        self.sse(None)
+                        next_ping = time.monotonic() + HEARTBEAT_SECONDS
                     continue
                 if kind == "text":
                     out_chars += len(value)
                     self.sse({"t": value})
+                    next_ping = time.monotonic() + HEARTBEAT_SECONDS
                 elif kind == "done":
                     finish = value
                     self.sse({"done": True, "finish": value})
@@ -532,10 +616,6 @@ class Handler(BaseHTTPRequestHandler):
             finish = "canceled"
         finally:
             cancel.set()
-            with active_lock:
-                active[user] -= 1
-                if not active[user]:
-                    del active[user]
             # 原文と訳は残さない (長さと言語だけ)
             log.info(
                 "user=%s %s->%s chars=%d out=%d glossary=%d history=%d finish=%s seconds=%.1f",

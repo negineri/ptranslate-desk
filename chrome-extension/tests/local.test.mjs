@@ -8,11 +8,11 @@ import { portPair } from "./helpers.mjs";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
 
-test("通知の上限・推奨値に従い、旧接続先と不正な値は安全に扱う", () => {
+test("通知の上限に従い、旧接続先と不正な値は安全に扱う", () => {
   assert.equal(concurrencyLimit({}), 1);
   for (const value of [0, -1, 1.5, "2", Infinity, null]) assert.equal(concurrencyLimit({ concurrency: { max_in_flight: value } }), 1);
-  assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 4, recommended_in_flight: 2 } }), 2);
-  assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 2, recommended_in_flight: 4 } }), 2);
+  assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 4 } }), 4);
+  assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 2 } }), 2);
   assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 1000 } }), 8);
 });
 

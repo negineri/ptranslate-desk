@@ -11,9 +11,7 @@ export const PAGE_CONCURRENCY = 8;
 export function concurrencyLimit(config) {
   const c = config?.concurrency;
   if (!Number.isSafeInteger(c?.max_in_flight) || c.max_in_flight < 1) return 1;
-  const recommended = Number.isSafeInteger(c.recommended_in_flight) && c.recommended_in_flight > 0
-    ? c.recommended_in_flight : c.max_in_flight;
-  return Math.min(PAGE_CONCURRENCY, c.max_in_flight, recommended);
+  return Math.min(PAGE_CONCURRENCY, c.max_in_flight);
 }
 const BUSY_TIMEOUT_MS = 60_000;
 const BUSY_RETRY_MS = 500;

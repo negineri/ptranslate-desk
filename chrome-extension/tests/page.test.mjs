@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { concurrencyLimit, runPageTask, shouldTranslate } from "../dist/page-task.mjs";
 import { portPair, SERVER, sse } from "./helpers.mjs";
 
-const CONFIG = { concurrency: { max_in_flight: 2, recommended_in_flight: 2, scope: "user" }, user: "test", max_glossary: 200, languages: [{ code: "ja", name: "日本語" }, { code: "en", name: "英語" }] };
+const CONFIG = { concurrency: { max_in_flight: 2, scope: "user" }, user: "test", max_glossary: 200, languages: [{ code: "ja", name: "日本語" }, { code: "en", name: "英語" }] };
 const SETTINGS = { server: SERVER, source: "", target: "auto", form: "", glossary: "" };
 
 // 訳を "[訳す先] 原文" で返すサーバー。受けた要求を requests に残す
@@ -309,7 +309,7 @@ for (const advertised of [undefined, 1, 4]) {
     let active = 0, maximum = 0;
     const config = { ...CONFIG };
     if (advertised === undefined) delete config.concurrency;
-    else config.concurrency = { max_in_flight: advertised, recommended_in_flight: advertised };
+    else config.concurrency = { max_in_flight: advertised };
     const server = fakeServer({
       config: () => Response.json(config),
       translate: async (body) => {

@@ -97,7 +97,7 @@ function scene(name) {
   $('mode-local').setAttribute('aria-pressed',String(!server)); $('mode-server').setAttribute('aria-pressed',String(server));
   $('translation-tab').setAttribute('aria-selected',String(translate)); $('settings-tab').setAttribute('aria-selected',String(!translate));
   $('local-save').disabled = missing || name === 'measuring'; $('local-measure').disabled = missing || name === 'measuring';
-  $('local-start').disabled = missing || name === 'measuring'; $('local-stop').disabled = missing || name === 'measuring';
+  $('local-start').disabled = missing || name === 'measuring';
   $('local-status').className = name === 'error' ? 'hint err' : 'hint';
   $('local-status').textContent = name === 'error' ? 'ダウンロードが途切れました。やり直してください' : name === 'downloading' ? '' : missing ? 'モデルをダウンロードすると、このPCで翻訳できます。' : 'モデルの準備ができました。';
   $('local-measure-status').textContent = name === 'measuring' ? 'AMD Radeon Graphicsを計測しています…' : ['candidates','memory'].includes(name) ? '結果を参考に使用するデバイスを選んでください。文章の長さによって速度は変わります。' : '';
@@ -133,7 +133,6 @@ $('local-measure').onclick = () => { scene('measuring'); animation = setInterval
 $('local-cancel-measure').onclick = () => scene('candidates'); $('local-manual').onclick = () => $('local-device').focus();
 $('local-auto-release').onchange = () => show('local-idle-setting',$('local-auto-release').checked);
 $('local-save').onclick = () => scene('translation'); $('local-start').onclick = () => $('local-status').textContent = 'モデルの準備ができました。';
-$('local-stop').onclick = () => $('local-status').textContent = 'モデルのメモリを解放しました。';
 $('translation-tab').onclick = () => scene('translation'); $('settings-tab').onclick = () => scene('candidates');
 $('connection-form').onsubmit = (e) => { e.preventDefault(); $('connection-confirm').showModal(); };
 $('cancel-connection').onclick = () => $('connection-confirm').close(); $('confirm-connection').onclick = () => { scene('translation'); $('who').textContent = 'サンプルユーザー'; };

@@ -282,6 +282,22 @@ impl Local {
         self.ready.store(false, Ordering::SeqCst);
         self.process.lock().unwrap().take();
     }
+    fn release_if_idle(&self, now: Instant) -> bool {
+        if !self.enabled() || !self.settings.auto_release {
+            return false;
+        }
+        let Ok(_starting) = self.starting.try_lock() else {
+            return false;
+        };
+        // 判定から停止まで同じロックを保持し、新しい要求のlease取得との隙間をなくす。
+        // leaseは実行枠の待機前に取得するため、拡張を含む待機中の要求も保護する。
+        let activity = self.activity.lock().unwrap();
+        if !should_release(activity.0, activity.1, now, self.settings.idle_minutes) {
+            return false;
+        }
+        self.stop();
+        true
+    }
     pub fn schedule(app: &AppHandle) {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -293,23 +309,7 @@ impl Local {
             }
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                if !local.enabled() || !local.settings.auto_release {
-                    continue;
-                }
-                if let Ok(_starting) = local.starting.try_lock() {
-                    let idle = {
-                        let activity = local.activity.lock().unwrap();
-                        should_release(
-                            activity.0,
-                            activity.1,
-                            Instant::now(),
-                            local.settings.idle_minutes,
-                        )
-                    };
-                    if idle {
-                        local.stop();
-                    }
-                }
+                local.release_if_idle(Instant::now());
             }
         });
     }
@@ -750,15 +750,6 @@ pub async fn start_local_engine(app: AppHandle, window: WebviewWindow) -> Result
     }
     result
 }
-#[tauri::command]
-pub fn stop_local_engine(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
-    require_main(&window)?;
-    crate::cancel_all(&app);
-    let local = app.state::<Local>();
-    local.stop();
-    *local.error.lock().unwrap() = None;
-    Ok(())
-}
 
 fn field(body: &Value, name: &str, limit: usize, required: bool) -> Result<String, String> {
     let value = match body.get(name) {
@@ -887,7 +878,7 @@ pub async fn request(
         return json_response(
             stream,
             200,
-            json!({"user":"この端末", "languages":languages(), "max_chars":4000, "max_glossary":200, "concurrency":{"max_in_flight":local.settings.parallel,"recommended_in_flight":local.settings.parallel,"scope":"application"}}),
+            json!({"user":"この端末", "languages":languages(), "max_chars":4000, "max_glossary":200, "concurrency":{"max_in_flight":local.settings.parallel,"scope":"application"}}),
         );
     }
     if route != "api/translate" {
@@ -1044,6 +1035,101 @@ mod tests {
                 true
             )
             .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_release_preserves_running_and_queued_work_and_resets_after_cancel() {
+        let local = Arc::new(
+            Local::new(
+                Settings {
+                    enabled: true,
+                    auto_release: true,
+                    idle_minutes: 1,
+                    ..Settings::default()
+                },
+                true,
+            )
+            .unwrap(),
+        );
+        local.ready.store(true, Ordering::SeqCst);
+        // デスクトップが実行枠を使い、拡張が同じ枠を待っている状態を作る。
+        let desktop = local.lease();
+        let slot = local.slots.acquire().await.unwrap();
+        let (waiting, received) = tokio::sync::oneshot::channel();
+        let bridge_local = local.clone();
+        let bridge = tokio::spawn(async move {
+            let _lease = bridge_local.lease();
+            waiting.send(()).unwrap();
+            let _slot = bridge_local.slots.acquire().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        received.await.unwrap();
+        let now = Instant::now();
+        local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
+        assert_eq!(local.activity.lock().unwrap().0, 2);
+        assert!(!local.release_if_idle(now));
+        assert!(local.ready.load(Ordering::SeqCst));
+        drop(slot);
+        drop(desktop);
+        assert_eq!(local.activity.lock().unwrap().0, 1);
+        assert!(!local.release_if_idle(now + Duration::from_secs(120)));
+        // Port切断によるタスクの中止でもleaseと実行枠を返し、ここから未使用時間を数える。
+        bridge.abort();
+        assert!(bridge.await.unwrap_err().is_cancelled());
+        let last = {
+            let activity = local.activity.lock().unwrap();
+            assert_eq!(activity.0, 0);
+            assert!(activity.1 >= now);
+            activity.1
+        };
+        assert_eq!(local.slots.available_permits(), 1);
+        assert!(!local.release_if_idle(last + Duration::from_secs(59)));
+        assert!(local.ready.load(Ordering::SeqCst));
+        assert!(local.release_if_idle(last + Duration::from_secs(60)));
+        assert!(!local.ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn idle_release_waits_for_model_start_and_measurement() {
+        let local = Local::new(
+            Settings {
+                enabled: true,
+                auto_release: true,
+                idle_minutes: 1,
+                ..Settings::default()
+            },
+            true,
+        )
+        .unwrap();
+        local.ready.store(true, Ordering::SeqCst);
+        let now = Instant::now();
+        local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
+        let starting = local.starting.try_lock().unwrap();
+        assert!(!local.release_if_idle(now));
+        assert!(local.ready.load(Ordering::SeqCst));
+        drop(starting);
+        assert!(local.release_if_idle(now));
+        assert!(!local.ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn idle_release_respects_mode_and_auto_release_setting() {
+        for (enabled, auto_release) in [(false, true), (true, false)] {
+            let local = Local::new(
+                Settings {
+                    enabled,
+                    auto_release,
+                    ..Settings::default()
+                },
+                true,
+            )
+            .unwrap();
+            local.ready.store(true, Ordering::SeqCst);
+            let now = Instant::now();
+            local.activity.lock().unwrap().1 = now - Duration::from_secs(3600);
+            assert!(!local.release_if_idle(now));
+            assert!(local.ready.load(Ordering::SeqCst));
         }
     }
 
