@@ -29,6 +29,7 @@ pub struct Settings {
     #[serde(default = "default_idle_minutes")]
     pub idle_minutes: u64,
     pub parallel: usize,
+    pub measurement_completed: bool,
 }
 fn default_idle_minutes() -> u64 {
     5
@@ -44,6 +45,7 @@ impl Default for Settings {
             auto_release: false,
             idle_minutes: default_idle_minutes(),
             parallel: 1,
+            measurement_completed: false,
         }
     }
 }
@@ -450,6 +452,7 @@ impl Local {
 
 #[derive(Serialize)]
 pub struct Status {
+    measurement_completed: bool,
     chrome_error: Option<String>,
     enabled: bool,
     ready: bool,
@@ -470,6 +473,7 @@ pub fn local_status(app: AppHandle) -> Status {
     let resources = installation(&app);
     let error = local.error.lock().unwrap().clone();
     Status {
+        measurement_completed: local.settings.measurement_completed,
         chrome_error: crate::chrome_bridge::error(&app),
         enabled: local.enabled(),
         ready: local.ready.load(Ordering::SeqCst),

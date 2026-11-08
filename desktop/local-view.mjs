@@ -88,6 +88,7 @@ style.textContent = `#mode-welcome { max-width:800px; margin:48px auto; }
   #local-settings h3 { margin-top:0; } .mode-switch,.local-actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
   .mode-switch button[aria-pressed=true] { border-color:var(--accent); color:var(--accent); }
   #local-device { display:block; max-width:100%; margin:8px 0 20px; }
+  label[for="local-parallel-limit"] { margin-inline-end:8px; }
   .local-check { display:flex; align-items:center; gap:8px; } #local-options progress { width:100%; }
   #local-candidates li { margin:8px 0; } #local-candidates button { margin-left:8px; }
   #local-download-confirm { max-width:520px; } #local-runtime-status { margin:8px 0; }
@@ -98,6 +99,7 @@ style.textContent = `#mode-welcome { max-width:800px; margin:48px auto; }
 document.head.append(style);
 const $ = (id) => document.getElementById(id);
 let state, downloading = false, measuring = false, detecting = 0, draftLocal = false, modeVersion = 0;
+let measurementCompleted = false;
 function message(id, text, failed = false) {
   $(id).textContent = String(text); $(id).className = failed ? "hint err" : "hint";
   $(id).setAttribute("role", failed ? "alert" : "status");
@@ -105,7 +107,7 @@ function message(id, text, failed = false) {
 function error(e) { message("local-status", e, true); }
 function settings() {
   return { enabled: true, device: $("local-device").value, auto_release: $("local-auto-release").checked,
-    idle_minutes: Number($("local-idle-minutes").value), parallel: Number($("local-parallel-limit").value) };
+    idle_minutes: Number($("local-idle-minutes").value), parallel: Number($("local-parallel-limit").value), measurement_completed: measurementCompleted };
 }
 function busy() {
   $("local-setup").hidden = !state?.available;
@@ -168,6 +170,7 @@ async function measure() {
       $("local-candidates").append(li);
     }
     if (fastest) {
+      measurementCompleted = true;
       $("local-device").value = fastest.id;
       $("local-parallel-limit").value = String(fastest.recommended_parallel ?? 1);
     }
@@ -179,7 +182,7 @@ async function chooseLocal() {
   hideWelcome(); selectDraft(true);
   const version = modeVersion;
   if (!state.configured) accountSlot.hidden = true;
-  if (state.available) { await devices(); if (draftLocal && modeVersion === version) await measure(); }
+  if (state.available) { await devices(); if (draftLocal && modeVersion === version && !measurementCompleted) await measure(); }
   else message("local-status", "モデルをダウンロードすると、このPCで翻訳できます。");
 }
 async function chooseServer() {
@@ -240,6 +243,8 @@ $("local-start").onclick = async () => {
 };
 
 state = await invoke("local_status");
+// 古い版で保存した明示的なデバイス設定も、モード切り替えで上書きしない。
+measurementCompleted = state.measurement_completed || (state.configured && state.device !== "auto");
 if (state.chrome_error) message("chrome-status", state.chrome_error, true);
 $("local-parallel-limit").value = String(state.parallel);
 $("local-auto-release").checked = state.auto_release;
