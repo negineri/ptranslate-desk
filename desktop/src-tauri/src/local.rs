@@ -527,7 +527,10 @@ pub async fn measure_local_devices(
     require_main(&window)?;
     installation(&app)?;
     if !resources::supported() {
-        return Err("デバイスの計測はWindows x64に対応しています".into());
+        return Err(
+            "デバイスの計測はWindows x64とmacOS 13.3以降（Apple Silicon・Intel）に対応しています"
+                .into(),
+        );
     }
     let local = app.state::<Local>();
     let _measuring = local
@@ -622,6 +625,28 @@ pub async fn measure_local_devices(
     }
     Ok(results)
 }
+fn gpu_device(id: &str) -> bool {
+    id.strip_prefix(if cfg!(target_os = "macos") {
+        "MTL"
+    } else {
+        "Vulkan"
+    })
+    .is_some_and(|n| !n.is_empty() && n.len() < 4 && n.chars().all(|c| c.is_ascii_digit()))
+}
+fn parse_devices(text: &str) -> Vec<Device> {
+    text.lines()
+        .filter_map(|line| {
+            let (id, name) = line.trim().split_once(':')?;
+            if !gpu_device(id) {
+                return None;
+            }
+            Some(Device {
+                id: id.into(),
+                name: name.trim().into(),
+            })
+        })
+        .collect()
+}
 async fn list_devices(app: AppHandle) -> Result<Vec<Device>, String> {
     let install = installation(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -660,22 +685,7 @@ async fn list_devices(app: AppHandle) -> Result<Vec<Device>, String> {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        Ok(text
-            .lines()
-            .filter_map(|line| {
-                let (id, name) = line.trim().split_once(':')?;
-                if !id
-                    .strip_prefix("Vulkan")
-                    .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
-                {
-                    return None;
-                }
-                Some(Device {
-                    id: id.into(),
-                    name: name.trim().into(),
-                })
-            })
-            .collect())
+        Ok(parse_devices(&text))
     })
     .await
     .map_err(|_| "GPUの一覧を取得できませんでした".to_string())?
@@ -692,18 +702,15 @@ pub async fn save_local_settings(
     settings: Settings,
 ) -> Result<(), String> {
     require_main(&window)?;
-    if settings.device != "auto"
-        && settings.device != "none"
-        && !settings
-            .device
-            .strip_prefix("Vulkan")
-            .is_some_and(|n| !n.is_empty() && n.len() < 4 && n.chars().all(|c| c.is_ascii_digit()))
-    {
+    if settings.device != "auto" && settings.device != "none" && !gpu_device(&settings.device) {
         return Err("GPUの指定が不正です".into());
     }
     if settings.enabled {
         if !resources::supported() {
-            return Err("ローカル翻訳はWindows x64に対応しています".into());
+            return Err(
+                "ローカル翻訳はWindows x64とmacOS 13.3以降（Apple Silicon・Intel）に対応しています"
+                    .into(),
+            );
         }
         installation(&app)?;
     }
@@ -944,6 +951,35 @@ impl Decoder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gpu_device_matches_platform() {
+        let prefix = if cfg!(target_os = "macos") {
+            "MTL"
+        } else {
+            "Vulkan"
+        };
+        assert!(super::gpu_device(&format!("{prefix}0")));
+        for suffix in ["", "-1", "0 extra", "1000"] {
+            assert!(!super::gpu_device(&format!("{prefix}{suffix}")));
+        }
+        assert!(!super::gpu_device(if cfg!(target_os = "macos") {
+            "Vulkan0"
+        } else {
+            "Metal0"
+        }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn m2_device_list_uses_mtl_identifier() {
+        let devices = super::parse_devices("Available devices:\n  MTL0: Apple M2 (10922 MiB, 10922 MiB free)\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, "MTL0");
+        assert!(devices[0].name.starts_with("Apple M2"));
+        assert!(super::gpu_device(&devices[0].id));
+        assert!(!super::gpu_device("Metal0"));
+    }
+
     use super::*;
 
     #[test]

@@ -10,7 +10,7 @@
 PLaMo 3 Translate (llama.cpp の llama-server) を裏側にした、Web とデスクトップの翻訳アプリ。
 文章を貼って訳す画面と、選んだ文をショートカットキーで訳す翻訳ポップアップが含まれます。
 
-Windowsでは初回に、このPCで翻訳する[ローカルモード](docs/LOCAL_TRANSLATION.md)と、サーバーモードを選べます。
+WindowsとmacOSでは初回に、このPCで翻訳する[ローカルモード](docs/LOCAL_TRANSLATION.md)と、サーバーモードを選べます。
 サーバーモードには翻訳サーバーと、そのサーバーがログインに使うOIDCのIdP（Pocket ID、Authentikなど）の
 アカウントが必要です。サーバーを自分で用意する場合は[サーバーを自分で用意する](#サーバーを自分で用意する)、
 コードの変更や試験を行う場合は[開発ガイド](docs/DEVELOPMENT.md)を参照してください。
