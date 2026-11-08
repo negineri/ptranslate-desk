@@ -95,5 +95,5 @@ python3 tools/run_extension_mock.py
 ```sh
 npm ci --prefix chrome-extension --ignore-scripts
 node chrome-extension/build.mjs
-node --test chrome-extension/tests/
+node --test chrome-extension/tests/*.test.mjs
 ```
