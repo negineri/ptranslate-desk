@@ -252,8 +252,8 @@ mod windows {
     }
     struct Output(tokio::sync::mpsc::Sender<Message>);
     impl local::Output for Output {
-        fn send(&self, message: Message) -> Result<(), ()> {
-            self.0.try_send(message).map_err(|_| ())
+        fn send(&self, message: Message) -> local::SendResult<'_> {
+            Box::pin(async move { self.0.send(message).await.map_err(|_| ()) })
         }
     }
     pub fn schedule(app: &AppHandle) -> io::Result<()> {
@@ -349,6 +349,73 @@ mod windows {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[tokio::test]
+        async fn burst_waits_for_capacity_and_preserves_all_events_in_order() {
+            use local::Output as _;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+            let output = Output(tx);
+            // 1回の読み取りに300イベントがまとめて届く場合。
+            let wire: String = (0..300)
+                .map(|i| format!("data: {}\n\n", json!({"choices":[{"text":i.to_string()}]})))
+                .collect();
+            let events = local::Decoder::default().feed(wire.as_bytes()).unwrap();
+            assert_eq!(events.len(), 300);
+            let producer = tokio::spawn(async move {
+                for event in events {
+                    output
+                        .send(Message::Bytes {
+                            bytes: serde_json::to_vec(&event).unwrap(),
+                        })
+                        .await
+                        .unwrap();
+                }
+                output.send(Message::End).await.unwrap();
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while rx.len() < 256 {
+                    assert!(!producer.is_finished());
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(rx.len(), 256);
+            assert!(!producer.is_finished());
+            for i in 0..300 {
+                let Some(Message::Bytes { bytes }) = rx.recv().await else {
+                    panic!("イベントが欠落しました")
+                };
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&bytes).unwrap(),
+                    json!({"t":i.to_string()})
+                );
+            }
+            assert!(matches!(rx.recv().await, Some(Message::End)));
+            producer.await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn disconnect_interrupts_output_waiting_for_capacity() {
+            use local::Output as _;
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let output = Output(tx);
+            output.send(Message::Start { status: 200 }).await.unwrap();
+            let pending = output.send(Message::End);
+            tokio::pin!(pending);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(20), &mut pending)
+                    .await
+                    .is_err()
+            );
+            drop(rx);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+        }
+
         #[test]
         fn frames_reject_invalid_sizes_and_preserve_unicode() {
             let body = serde_json::to_vec(&json!({"text":"日本語"})).unwrap();

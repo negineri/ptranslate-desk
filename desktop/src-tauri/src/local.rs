@@ -844,27 +844,34 @@ pub fn prompt(body: &Value) -> Result<(String, usize), String> {
     Ok((value, (text.chars().count() * 3 / 2 + 64).clamp(256, 8000)))
 }
 
+pub type SendResult<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ()>> + Send + 'a>>;
 pub trait Output: Send + Sync {
-    fn send(&self, message: Message) -> Result<(), ()>;
+    fn send(&self, message: Message) -> SendResult<'_>;
 }
 impl Output for Channel<Message> {
-    fn send(&self, message: Message) -> Result<(), ()> {
-        Channel::send(self, message).map_err(|_| ())
+    fn send(&self, message: Message) -> SendResult<'_> {
+        Box::pin(async move { Channel::send(self, message).map_err(|_| ()) })
     }
 }
-fn bytes(stream: &dyn Output, data: Value) -> Result<(), ()> {
+async fn bytes(stream: &dyn Output, data: Value) -> Result<(), ()> {
     stream
         .send(Message::Bytes {
             bytes: format!("data: {data}\n\n").into_bytes(),
         })
+        .await
         .map_err(|_| ())
 }
-fn json_response(stream: &dyn Output, status: u16, data: Value) -> Result<(), ()> {
-    stream.send(Message::Start { status }).map_err(|_| ())?;
+async fn json_response(stream: &dyn Output, status: u16, data: Value) -> Result<(), ()> {
+    stream
+        .send(Message::Start { status })
+        .await
+        .map_err(|_| ())?;
     stream
         .send(Message::Bytes {
             bytes: serde_json::to_vec(&data).map_err(|_| ())?,
         })
+        .await
         .map_err(|_| ())
 }
 pub async fn request(
@@ -879,21 +886,21 @@ pub async fn request(
             stream,
             200,
             json!({"user":"この端末", "languages":languages(), "max_chars":4000, "max_glossary":200, "concurrency":{"max_in_flight":local.settings.parallel,"scope":"application"}}),
-        );
+        ).await;
     }
     if route != "api/translate" {
-        return json_response(stream, 404, json!({"error":"不明なAPIです"}));
+        return json_response(stream, 404, json!({"error":"不明なAPIです"})).await;
     }
     let (prompt, limit) = match body.ok_or("原文がありません".to_string()).and_then(prompt)
     {
         Ok(value) => value,
-        Err(error) => return json_response(stream, 400, json!({"error":error})),
+        Err(error) => return json_response(stream, 400, json!({"error":error})).await,
     };
     let _lease = local.lease();
     let _slot = local.slots.acquire().await.map_err(|_| ())?;
     let endpoint = match local.start(app).await {
         Ok(e) => e,
-        Err(error) => return json_response(stream, 503, json!({"error":error})),
+        Err(error) => return json_response(stream, 503, json!({"error":error})).await,
     };
     let response = local.client.post(format!("{}/v1/completions", endpoint.url)).bearer_auth(&endpoint.key)
         .json(&json!({"prompt":prompt,"max_tokens":limit,"temperature":0,"stop":["<|plamo:tag|>","<|plamo:bos|>"],"add_special_tokens":true,"stream":true})).send().await;
@@ -905,15 +912,17 @@ pub async fn request(
                 502,
                 json!({"error":"ローカル推論エンジンから応答を取得できませんでした"}),
             )
+            .await
         }
     };
     stream
         .send(Message::Start { status: 200 })
+        .await
         .map_err(|_| ())?;
     let mut decoder = Decoder::default();
     while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
         for event in decoder.feed(&chunk).map_err(|_| ())? {
-            bytes(stream, event)?;
+            bytes(stream, event).await?;
         }
         if decoder.done {
             return Ok(());
@@ -923,6 +932,7 @@ pub async fn request(
         stream,
         json!({"error":"ローカル翻訳の接続が途中で切れました"}),
     )
+    .await
 }
 
 #[derive(Default)]

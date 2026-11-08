@@ -177,6 +177,9 @@ Windows版の同じEXEをChromeが中継専用モードで起動する。中継�
 インストーラーからの通常のアンインストールでは、自身のEXEが登録した連携だけを解除する。
 自動更新中は登録を維持する。開発版はそのEXEを `--unregister-chrome` 付きで起動すると解除できる。
 
+中継の送信待ち行列は256メッセージまで保持し、満杯なら推論応答の読み取り側が非同期で空きを待つ。
+混雑を接続失敗として扱わず、応答を欠落させない。Chromeが接続を閉じた場合は待機も含めて中止する。
+
 中継の試験は `cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml` と、
 Windowsで `cargo build --locked --features smoke-test --manifest-path desktop/src-tauri/Cargo.toml` の後に
 `python tools/test_chrome_bridge.py` を実行する。試験は一時的なホスト定義とモックのパイプを使い、
