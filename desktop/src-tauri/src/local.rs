@@ -596,6 +596,13 @@ fn require_main(window: &WebviewWindow) -> Result<(), String> {
         Err("メインウィンドウで操作してください".into())
     }
 }
+#[tauri::command]
+pub fn open_model_information(window: WebviewWindow) -> Result<(), String> {
+    require_main(&window)?;
+    let url = reqwest::Url::parse("https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF")
+        .map_err(|_| "モデル情報のURLが不正です")?;
+    crate::auth::open_browser(&url)
+}
 fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let path = settings_path(app)?;
     let dir = path.parent().ok_or("設定の保存先が不正です")?;

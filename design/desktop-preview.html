@@ -252,7 +252,8 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
     <h2 id="local-download-title">翻訳モデルをダウンロードしますか？</h2>
     <p>PLaMo 3 Translate 2B（Q4_K_M、約1.81 GB）と、推論エンジン（約37 MB）をこのPCに保存します。</p>
     <p>Hugging FaceとGitHubから取得します。通信量は約1.85 GB、空き容量は少なくとも約2 GB必要です。</p>
-    <p><a href="https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF" target="_blank" rel="noreferrer">モデルの情報</a></p>
+    <p><a id="local-model-information" href="https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF" target="_blank" rel="noreferrer">モデルの情報</a></p>
+    <p id="local-model-information-status" class="hint" role="status"></p>
     <div class="local-actions"><button id="local-confirm-download" class="primary">ダウンロードする</button><button id="local-decline-download" autofocus>キャンセル</button></div>
   </dialog></aside>
     <details id="connection-settings"><summary>接続先の設定</summary>

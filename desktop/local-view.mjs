@@ -59,7 +59,8 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
     <h2 id="local-download-title">翻訳モデルをダウンロードしますか？</h2>
     <p>PLaMo 3 Translate 2B（Q4_K_M、約1.81 GB）と、推論エンジン（約37 MB）をこのPCに保存します。</p>
     <p>Hugging FaceとGitHubから取得します。通信量は約1.85 GB、空き容量は少なくとも約2 GB必要です。</p>
-    <p><a href="https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF" target="_blank" rel="noreferrer">モデルの情報</a></p>
+    <p><a id="local-model-information" href="https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF" target="_blank" rel="noreferrer">モデルの情報</a></p>
+    <p id="local-model-information-status" class="hint" role="status"></p>
     <div class="local-actions"><button id="local-confirm-download" class="primary">ダウンロードする</button><button id="local-decline-download" autofocus>キャンセル</button></div>
   </dialog>`;
 settingsPage.querySelector(".settings-heading").after(panel);
@@ -225,6 +226,12 @@ $("local-device").onchange = () => { manual = true; busy(); };
 $("local-cancel-measure").onclick = () => void invoke("cancel_local_measurement").catch(error);
 $("local-auto-release").onchange = () => { $("local-idle-setting").hidden = !$("local-auto-release").checked; };
 $("local-download").onclick = () => { $("local-download-confirm").showModal(); $("local-decline-download").focus(); };
+$("local-model-information").onclick = async (event) => {
+  event.preventDefault();
+  message("local-model-information-status", "");
+  try { await invoke("open_model_information"); }
+  catch (e) { message("local-model-information-status", e, true); }
+};
 $("local-decline-download").onclick = () => $("local-download-confirm").close();
 $("local-confirm-download").onclick = async () => {
   $("local-download-confirm").close(); message("local-status", ""); downloading = true; busy(); $("local-progress-area").hidden = false;
