@@ -304,7 +304,7 @@ test("認証や要求エラーは枠待ちとして再試行しない", async ()
   }
 });
 
-for (const advertised of [undefined, 1, 4]) {
+for (const advertised of [undefined, 1, 4, 12]) {
   test(`接続先の通知に応じてページ翻訳を実行する (${advertised ?? "通知なし"})`, async () => {
     let active = 0, maximum = 0;
     const config = { ...CONFIG };
@@ -319,10 +319,10 @@ for (const advertised of [undefined, 1, 4]) {
         return sse([{ t: body.text }, { done: true, finish: "stop" }]);
       },
     });
-    const messages = await runPage(Array.from({ length: 8 }, (_, id) => ({ id, text: `Paragraph ${id}` })), server).finished;
+    const messages = await runPage(Array.from({ length: 16 }, (_, id) => ({ id, text: `Paragraph ${id}` })), server).finished;
     assert.equal(messages.at(-1).type, "done");
     assert.equal(maximum, advertised ?? 1);
-    assert.equal(server.requests.length, 8);
+    assert.equal(server.requests.length, 16);
   });
 }
 

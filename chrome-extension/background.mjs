@@ -58,7 +58,7 @@ chrome.action.onClicked.addListener(async (tab) => {
   const settings = await loadSettings();
   if (settings.mode !== "local" && !settings.server) return chrome.runtime.openOptionsPage();
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), 5000);
+  const timer = setTimeout(() => abort.abort(), 15000);
   try {
     const key = connectionKey(settings);
     const connected = await chrome.storage.session.get("connectedTo");

@@ -34,8 +34,10 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
       </div>
       <div class="setup-group">
         <h4>同時に訳す数</h4>
-        <label for="local-parallel">推論の並列数</label><select id="local-parallel"><option value="1">1件</option><option value="2">2件</option><option value="4">4件</option></select>
-        <p class="hint">増やすとメモリ使用量も増えます。保存して再起動すると反映されます。</p>
+        <label for="local-parallel">推論の並列数</label><select id="local-parallel"><option value="auto">自動</option><option value="manual">手動</option></select>
+        <p id="local-parallel-setting" hidden><label for="local-parallel-limit">同時に訳す数</label> <input id="local-parallel-limit" type="number" min="1" max="64" value="1" style="width:6em"></p>
+        <p id="local-parallel-status" class="hint" role="status"></p>
+        <p class="hint">自動では空きメモリとモデルに合わせて調整します。手動では1〜64件を指定できます。保存して再起動すると反映されます。</p>
       </div>
       <div class="setup-group">
         <h4>メモリ</h4>
@@ -102,7 +104,11 @@ function message(id, text, failed = false) {
   $(id).setAttribute("role", failed ? "alert" : "status");
 }
 function error(e) { message("local-status", e, true); }
-function settings() { return { enabled: true, device: $("local-device").value, auto_release: $("local-auto-release").checked, idle_minutes: Number($("local-idle-minutes").value), parallel: Number($("local-parallel").value) }; }
+function settings() {
+  const automatic = $("local-parallel").value === "auto";
+  return { enabled: true, device: $("local-device").value, auto_release: $("local-auto-release").checked,
+    idle_minutes: Number($("local-idle-minutes").value), parallel: automatic ? 1 : Number($("local-parallel-limit").value), auto_parallel: automatic };
+}
 function busy() {
   $("local-setup").hidden = !state?.available;
   $("local-save").disabled = downloading || measuring || detecting > 0 || !state?.available;
@@ -225,7 +231,10 @@ $("local-start").onclick = async () => {
 
 state = await invoke("local_status");
 if (state.chrome_error) message("chrome-status", state.chrome_error, true);
-$("local-parallel").value = String(state.parallel);
+$("local-parallel").value = state.auto_parallel ? "auto" : "manual";
+$("local-parallel-limit").value = String(state.configured_parallel);
+$("local-parallel-setting").hidden = state.auto_parallel;
+$("local-parallel").onchange = () => { $("local-parallel-setting").hidden = $("local-parallel").value === "auto"; };
 $("local-auto-release").checked = state.auto_release;
 if (![...$("local-idle-minutes").options].some((o) => Number(o.value) === state.idle_minutes)) $("local-idle-minutes").add(new Option(`${state.idle_minutes}分`, String(state.idle_minutes)));
 $("local-idle-minutes").value = String(state.idle_minutes); $("local-idle-setting").hidden = !state.auto_release;
@@ -246,6 +255,9 @@ async function refreshRuntime() {
   runtime.hidden = !state.enabled;
   header.querySelector(".sub").textContent = state.enabled ? "PLaMo 3 Translate · このPCで翻訳" : state.configured ? "PLaMo 3 Translate · 原文と訳はサーバーに残りません" : "PLaMo 3 Translate";
   runtime.textContent = state.error || (state.loading ? "翻訳モデルを読み込んでいます…" : state.ready ? "ローカル翻訳の準備ができました" : state.auto_release ? "翻訳するときにモデルを読み込みます" : "モデルは解放されています。次の翻訳時に読み込みます");
+  $("local-parallel-status").textContent = state.auto_parallel
+    ? state.parallel_adjusting ? "自動（次の読み込み時に調整）" : `自動（最大${state.parallel}件）`
+    : `手動（最大${state.parallel}件）`;
   runtime.className = state.error ? "hint err" : "hint"; busy();
 }
 void refreshRuntime().catch(error);

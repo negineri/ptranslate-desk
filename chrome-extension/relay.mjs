@@ -1,5 +1,5 @@
 import { nativeFetch } from "./native.mjs";
-import { Scheduler } from "./scheduler.mjs";
+import { MAX_IN_FLIGHT, Scheduler } from "./scheduler.mjs";
 const scheduler = new Scheduler();
 const limits = new Map();
 
@@ -98,7 +98,7 @@ export async function apiFetch(route, body, deps, abort) {
       const text = await response.text();
       try {
         const c = JSON.parse(text).concurrency;
-        limits.set(key, Number.isSafeInteger(c?.max_in_flight) && c.max_in_flight > 0 ? Math.min(c.max_in_flight, 8) : 1);
+        limits.set(key, Number.isSafeInteger(c?.max_in_flight) && c.max_in_flight > 0 ? Math.min(c.max_in_flight, MAX_IN_FLIGHT) : 1);
       } catch { limits.set(key, 1); }
       return { status: res.status, body: new Response(text).body };
     }

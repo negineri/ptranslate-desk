@@ -13,7 +13,7 @@ test("通知の上限に従い、旧接続先と不正な値は安全に扱う",
   for (const value of [0, -1, 1.5, "2", Infinity, null]) assert.equal(concurrencyLimit({ concurrency: { max_in_flight: value } }), 1);
   assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 4 } }), 4);
   assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 2 } }), 2);
-  assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 1000 } }), 8);
+  assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 1000 } }), 64);
 });
 
 test("Native Messagingのバイト列から分割された日本語も復元する", async () => {
@@ -62,7 +62,7 @@ test("ローカルモードはHTTP・Cookie・接続権限を使わない", asyn
   assert.equal(calls, 1);
 });
 
-for (const limit of [1, 2, 4]) {
+for (const limit of [1, 2, 4, 12, 64]) {
   test(`共有枠${limit}件で応答を読み終えるまで保持し、待機中の中止は送信しない`, async () => {
     const scheduler = new Scheduler();
     const abort = new AbortController();
@@ -102,4 +102,25 @@ test("Chromeのホスト未検出を、登録と完全再起動の案内にす�
     host.disconnect();
     await assert.rejects(pending, (error) => error.code === "local" && error.message.includes("Chromeを完全に終了"));
   } finally { globalThis.chrome = previous; }
+});
+
+test("中継全体も12件の通知に従い、応答が終わるまで13件目を送らない", async () => {
+  let calls = 0;
+  const deps = {
+    settings: async () => ({ mode: "local" }),
+    nativeFetch: async (route) => {
+      if (route === "api/config") return { status: 200, body: Response.json({ concurrency: { max_in_flight: 12 } }).body };
+      calls++;
+      return { status: 200, body: new Response("translation").body };
+    },
+  };
+  const abort = new AbortController();
+  await (await apiFetch("api/config", null, deps, abort)).body.cancel();
+  const active = await Promise.all(Array.from({ length: 12 }, () => apiFetch("api/translate", "{}", deps, abort)));
+  const pending = apiFetch("api/translate", "{}", deps, abort);
+  await tick(); assert.equal(calls, 12);
+  await new Response(active[0].body).text();
+  const last = await pending; assert.equal(calls, 13);
+  await last.body.cancel();
+  for (const res of active.slice(1)) await res.body.cancel();
 });

@@ -4,7 +4,7 @@ import { extensionFetch } from "./transport.mjs";
 
 export function mountOptions({ document = globalThis.document, chrome = globalThis.chrome,
   fetch = extensionFetch, openDesktop = (url) => { location.href = url; },
-  retryMs = 1000, registrationTimeoutMs = 120_000, checkTimeoutMs = 5000 } = {}) {
+  retryMs = 1000, registrationTimeoutMs = 120_000, checkTimeoutMs = 15000 } = {}) {
   const $ = (id) => document.getElementById(id);
   let settings = null, operation = null, localReady = false;
   const setStatus = (id, { text, cls = "" }) => {

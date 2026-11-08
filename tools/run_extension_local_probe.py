@@ -16,7 +16,13 @@ REGISTRY = r"Software\Google\Chrome\NativeMessagingHosts\com.witenp.ptranslate"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--parallel", type=int, choices=[1, 2, 4], default=1)
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        choices=range(1, 65),
+        default=None,
+        help="省略時は自動調整。指定時は手動固定",
+    )
     parser.add_argument("--device", default="none")
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
@@ -62,7 +68,8 @@ def main():
                 {
                     "enabled": True,
                     "device": args.device,
-                    "parallel": args.parallel,
+                    "parallel": args.parallel or 1,
+                    "auto_parallel": args.parallel is None,
                     "auto_release": True,
                     "idle_minutes": 1,
                 }
@@ -80,7 +87,10 @@ def main():
         with subprocess.Popen([str(binary)], env=env, cwd=ROOT) as app:
             try:
                 print(f"通し確認ページ: {state['url']}", flush=True)
-                print(f"一時設定で開始: device={args.device}, parallel={args.parallel}", flush=True)
+                print(
+                    f"一時設定で開始: device={args.device}, parallel={args.parallel if args.parallel is not None else 'auto'}",
+                    flush=True,
+                )
                 return app.wait()
             finally:
                 if app.poll() is None:

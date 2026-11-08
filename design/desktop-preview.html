@@ -227,8 +227,10 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
       </div>
       <div class="setup-group">
         <h4>同時に訳す数</h4>
-        <label for="local-parallel">推論の並列数</label><select id="local-parallel"><option value="1">1件</option><option value="2">2件</option><option value="4">4件</option></select>
-        <p class="hint">増やすとメモリ使用量も増えます。保存して再起動すると反映されます。</p>
+        <label for="local-parallel">推論の並列数</label><select id="local-parallel"><option value="auto">自動</option><option value="manual">手動</option></select>
+        <p id="local-parallel-setting" hidden><label for="local-parallel-limit">同時に訳す数</label> <input id="local-parallel-limit" type="number" min="1" max="64" value="1" style="width:6em"></p>
+        <p id="local-parallel-status" class="hint" role="status"></p>
+        <p class="hint">自動では空きメモリとモデルに合わせて調整します。手動では1〜64件を指定できます。保存して再起動すると反映されます。</p>
       </div>
       <div class="setup-group">
         <h4>メモリ</h4>

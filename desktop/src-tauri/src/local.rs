@@ -1,4 +1,5 @@
 //! ローカル翻訳。推論を別プロセスで動かし、原文・訳を保存しない。
+mod parallel;
 pub mod resources;
 use crate::Message;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -27,6 +28,7 @@ pub struct Settings {
     #[serde(default = "default_idle_minutes")]
     pub idle_minutes: u64,
     pub parallel: usize,
+    pub auto_parallel: bool,
 }
 fn default_idle_minutes() -> u64 {
     5
@@ -42,6 +44,7 @@ impl Default for Settings {
             auto_release: false,
             idle_minutes: default_idle_minutes(),
             parallel: 1,
+            auto_parallel: true,
         }
     }
 }
@@ -119,7 +122,9 @@ pub struct Local {
     measuring: tokio::sync::Mutex<()>,
     measurement_cancel: Operation,
     downloads: resources::Downloads,
-    slots: tokio::sync::Semaphore,
+    slots: parallel::Slots,
+    parallel_planned: AtomicBool,
+    planning: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -245,11 +250,17 @@ impl Local {
         Self::new(settings, configured)
     }
     fn new(settings: Settings, configured: bool) -> Result<Self, Box<dyn std::error::Error>> {
-        if ![1, 2, 4].contains(&settings.parallel) {
-            return Err("同時に訳す数は1・2・4から選んでください".into());
+        if !(1..=parallel::MAX_PARALLEL).contains(&settings.parallel) {
+            return Err("同時に訳す数は1〜64で指定してください".into());
         }
         Ok(Self {
-            slots: tokio::sync::Semaphore::new(settings.parallel),
+            slots: parallel::Slots::new(if settings.auto_parallel {
+                1
+            } else {
+                settings.parallel
+            }),
+            parallel_planned: AtomicBool::new(!settings.auto_parallel),
+            planning: tokio::sync::Mutex::new(()),
             settings,
             process: Mutex::new(None),
             starting: tokio::sync::Mutex::new(()),
@@ -279,6 +290,8 @@ impl Local {
         Lease(self)
     }
     pub fn stop(&self) {
+        self.parallel_planned
+            .store(!self.settings.auto_parallel, Ordering::SeqCst);
         self.ready.store(false, Ordering::SeqCst);
         self.process.lock().unwrap().take();
     }
@@ -302,6 +315,9 @@ impl Local {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let local = app.state::<Local>();
+            if local.enabled() {
+                local.prepare_parallel(&app).await;
+            }
             if local.enabled() && !local.settings.auto_release {
                 if let Err(error) = local.start(&app).await {
                     *local.error.lock().unwrap() = Some(error);
@@ -327,9 +343,85 @@ impl Local {
             slot.take();
         }
         self.ready.store(false, Ordering::SeqCst);
+        self.prepare_parallel(app).await;
         self.loading.store(true, Ordering::SeqCst);
         let _loading = Loading(self);
         *self.error.lock().unwrap() = None;
+        let result =
+            parallel::start_with_fallback(&self.slots, self.settings.auto_parallel, |count| {
+                self.start_engine(app, count)
+            })
+            .await;
+        if result.is_ok() {
+            self.parallel_planned.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+
+    async fn prepare_parallel(&self, app: &AppHandle) {
+        if !self.settings.auto_parallel
+            || self.parallel_planned.load(Ordering::SeqCst)
+            || self.loading.load(Ordering::SeqCst)
+            || self.ready.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        let _planning = self.planning.lock().await;
+        if self.parallel_planned.load(Ordering::SeqCst)
+            || self.loading.load(Ordering::SeqCst)
+            || self.ready.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        let model = installation(app)
+            .ok()
+            .map(|installation| installation.model);
+        let memory = tauri::async_runtime::spawn_blocking(move || {
+            let host = parallel::available_memory();
+            let size = model
+                .as_ref()
+                .and_then(|path| fs::metadata(path).ok())
+                .map_or(0, |meta| meta.len());
+            let kv = model
+                .as_ref()
+                .and_then(|path| parallel::model_kv_per_slot(path).ok());
+            (host, size, kv)
+        })
+        .await
+        .unwrap_or((None, 0, None));
+        let cpu = self.settings.device == "none";
+        let free = if cpu {
+            memory.0
+        } else {
+            let devices = list_devices(app.clone()).await.unwrap_or_default();
+            let selected: Vec<_> = devices
+                .iter()
+                .filter(|device| {
+                    self.settings.device == "auto" || device.id == self.settings.device
+                })
+                .collect();
+            let gpu = if selected.is_empty() {
+                None
+            } else {
+                selected
+                    .iter()
+                    .map(|device| parallel::device_free_bytes(&device.name))
+                    .collect::<Option<Vec<_>>>()
+                    .and_then(|values| values.into_iter().min())
+            };
+            gpu.map(|gpu| memory.0.map_or(gpu, |host| host.min(gpu)))
+        };
+        let threads = cpu.then(|| std::thread::available_parallelism().map_or(1, usize::from));
+        self.slots
+            .resize(parallel::choose_parallel(free, memory.1, memory.2, threads));
+        self.parallel_planned.store(true, Ordering::SeqCst);
+    }
+
+    async fn start_engine(
+        &self,
+        app: &AppHandle,
+        count: usize,
+    ) -> Result<Endpoint, parallel::StartupFailure> {
         let install = installation(app)?;
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|_| "推論エンジンのポートを確保できませんでした")?;
@@ -353,9 +445,9 @@ impl Local {
                 "--port",
                 &port.to_string(),
                 "--ctx-size",
-                &(32768 * self.settings.parallel).to_string(),
+                &(parallel::CONTEXT_PER_SLOT * count).to_string(),
                 "--parallel",
-                &self.settings.parallel.to_string(),
+                &count.to_string(),
                 "--flash-attn",
                 "on",
                 "--no-webui",
@@ -382,7 +474,7 @@ impl Local {
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(error);
+                return Err(error.into());
             }
         };
         *self.process.lock().unwrap() = Some(Process {
@@ -401,9 +493,11 @@ impl Local {
                 .is_none_or(|p| !matches!(p.child.try_wait(), Ok(None)))
             {
                 self.stop();
-                return Err(
-                    "推論エンジンが終了しました。CPUまたは別のGPUを選択してください".into(),
-                );
+                return Err(parallel::StartupFailure {
+                    message: "推論エンジンが終了しました。CPUまたは別のGPUを選択してください"
+                        .into(),
+                    reduce_parallel: true,
+                });
             }
             if self
                 .client
@@ -458,6 +552,9 @@ pub struct Status {
     auto_release: bool,
     idle_minutes: u64,
     parallel: usize,
+    configured_parallel: usize,
+    auto_parallel: bool,
+    parallel_adjusting: bool,
     error: Option<String>,
 }
 #[tauri::command]
@@ -478,7 +575,11 @@ pub fn local_status(app: AppHandle) -> Status {
         loading: local.loading.load(Ordering::SeqCst),
         auto_release: local.settings.auto_release,
         idle_minutes: local.settings.idle_minutes,
-        parallel: local.settings.parallel,
+        parallel: local.slots.limit(),
+        configured_parallel: local.settings.parallel,
+        auto_parallel: local.settings.auto_parallel,
+        parallel_adjusting: local.settings.auto_parallel
+            && !local.parallel_planned.load(Ordering::SeqCst),
         error,
     }
 }
@@ -590,6 +691,7 @@ pub async fn measure_local_devices(
             Settings {
                 enabled: true,
                 device: device.id.clone(),
+                auto_parallel: false,
                 ..Settings::default()
             },
             true,
@@ -729,8 +831,8 @@ pub async fn save_local_settings(
     if !(1..=60).contains(&settings.idle_minutes) {
         return Err("メモリを解放するまでの時間は1〜60分で指定してください".into());
     }
-    if ![1, 2, 4].contains(&settings.parallel) {
-        return Err("同時に訳す数は1・2・4から選んでください".into());
+    if !(1..=parallel::MAX_PARALLEL).contains(&settings.parallel) {
+        return Err("同時に訳す数は1〜64で指定してください".into());
     }
     persist_settings(&app, &settings)?;
     crate::cancel_all(&app);
@@ -876,6 +978,9 @@ async fn json_response(stream: &dyn Output, status: u16, data: Value) -> Result<
         .await
         .map_err(|_| ())
 }
+fn configuration(local: &Local) -> Value {
+    json!({"user":"この端末", "languages":languages(), "max_chars":4000, "max_glossary":200, "concurrency":{"max_in_flight":local.slots.limit(),"scope":"application"}})
+}
 pub async fn request(
     app: &AppHandle,
     route: &str,
@@ -884,11 +989,8 @@ pub async fn request(
 ) -> Result<(), ()> {
     let local = app.state::<Local>();
     if route == "api/config" {
-        return json_response(
-            stream,
-            200,
-            json!({"user":"この端末", "languages":languages(), "max_chars":4000, "max_glossary":200, "concurrency":{"max_in_flight":local.settings.parallel,"scope":"application"}}),
-        ).await;
+        local.prepare_parallel(app).await;
+        return json_response(stream, 200, configuration(&local)).await;
     }
     if route != "api/translate" {
         return json_response(stream, 404, json!({"error":"不明なAPIです"})).await;
@@ -899,11 +1001,11 @@ pub async fn request(
         Err(error) => return json_response(stream, 400, json!({"error":error})).await,
     };
     let _lease = local.lease();
-    let _slot = local.slots.acquire().await.map_err(|_| ())?;
     let endpoint = match local.start(app).await {
         Ok(e) => e,
         Err(error) => return json_response(stream, 503, json!({"error":error})).await,
     };
+    let _slot = local.slots.acquire().await.map_err(|_| ())?;
     let response = local.client.post(format!("{}/v1/completions", endpoint.url)).bearer_auth(&endpoint.key)
         .json(&json!({"prompt":prompt,"max_tokens":limit,"temperature":0,"stop":["<|plamo:tag|>","<|plamo:bos|>"],"add_special_tokens":true,"stream":true})).send().await;
     let mut response = match response {
@@ -1010,12 +1112,33 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn config_announces_the_runtime_limit_instead_of_the_saved_manual_value() {
+        let local = Local::new(
+            Settings {
+                auto_parallel: true,
+                parallel: 1,
+                ..Settings::default()
+            },
+            true,
+        )
+        .unwrap();
+        local.slots.resize(12);
+        assert_eq!(
+            configuration(&local)["concurrency"],
+            json!({"max_in_flight":12,"scope":"application"})
+        );
+        local.slots.resize(3);
+        assert_eq!(configuration(&local)["concurrency"]["max_in_flight"], 3);
+    }
+
     #[tokio::test]
     async fn shared_slots_limit_concurrent_work_and_release_canceled_waiters() {
-        for parallel in [1, 2, 4] {
+        for parallel in [1, 2, 3, 4, 8, 12, 64] {
             let local = Local::new(
                 Settings {
                     parallel,
+                    auto_parallel: false,
                     ..Settings::default()
                 },
                 true,
@@ -1038,10 +1161,11 @@ mod tests {
             drop(permits);
             assert_eq!(local.slots.available_permits(), parallel);
         }
-        for parallel in [0, 3, 5, usize::MAX] {
+        for parallel in [0, 65, usize::MAX] {
             assert!(Local::new(
                 Settings {
                     parallel,
+                    auto_parallel: false,
                     ..Settings::default()
                 },
                 true
@@ -1152,6 +1276,7 @@ mod tests {
         assert!(!settings.auto_release);
         assert_eq!(settings.idle_minutes, 5);
         assert_eq!(settings.parallel, 1);
+        assert!(settings.auto_parallel);
         let local = Local::new(settings, true).unwrap();
         let now = Instant::now();
         let old = now - Duration::from_secs(301);

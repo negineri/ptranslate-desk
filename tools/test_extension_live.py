@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--extension-id", required=True)
-    parser.add_argument("--parallel", type=int, choices=[1, 2, 4], required=True)
+    parser.add_argument("--parallel", type=int, choices=range(1, 65), required=True)
     args = parser.parse_args()
     if not re.fullmatch("[a-p]{32}", args.extension_id):
         parser.error("拡張IDが不正です")

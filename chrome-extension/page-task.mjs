@@ -1,12 +1,13 @@
 // ページ全体の翻訳 (background 側)。ページの content script (page-content.js) から段落の一覧を受け取り、
 // 接続先が通知する並列数に合わせて訳し、portで返す
+import { MAX_IN_FLIGHT } from "./scheduler.mjs";
 import { splitText, translateChunk } from "./translation.mjs";
 import { apiFetch, pinConnection, RelayError } from "./relay.mjs";
 import { requestSettings } from "./settings.mjs";
 import { ensureOk, LoginRequired } from "./translate.mjs";
 
 export const MAX_BLOCKS = 3000;
-export const PAGE_CONCURRENCY = 8;
+export const PAGE_CONCURRENCY = MAX_IN_FLIGHT;
 // 古い接続先や不正な通知は1件。通知値をそのままワーカー数に使わない。
 export function concurrencyLimit(config) {
   const c = config?.concurrency;

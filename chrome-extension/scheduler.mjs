@@ -1,3 +1,5 @@
+// ブラウザー側の保護上限。実際の同時実行数は接続先の通知で決まる。
+export const MAX_IN_FLIGHT = 64;
 // background全体で共有する枠。応答の読み終わりまで保持し、待機中の中止にも対応する。
 export class Scheduler {
   constructor() { this.groups = new Map(); }
