@@ -1,4 +1,4 @@
-# ローカル翻訳 (Windows x64)
+# ローカル翻訳 (Windows x64 / macOS)
 
 翻訳サーバーなしで、この端末のPLaMo 3 Translate 2Bを使えます。
 デスクトップアプリがllama.cppの`llama-server`を子プロセスとして管理します。
@@ -11,7 +11,7 @@
 
 1. 「このPCで翻訳」を選ぶ。
 2. モデルがない場合は「モデルをダウンロード」を押し、容量と取得元を確認して「ダウンロードする」を押す。
-   モデル約1.81 GBと推論エンジン約37 MBを取得する。空き容量の目安は約2 GB。
+   モデル約1.81 GBと推論エンジン（Windows約37 MB、Mac約12〜16 MB）を取得する。空き容量の目安は約2 GB。
 3. ダウンロード中はファイルごとの取得量と割合を表示する。中止でき、失敗時はやり直せる。
 4. 取得後は短い文章でGPUとCPUを順番に計測し、速い候補を「おすすめ」として表示する。
    モデル読み込み時間を除く短文翻訳の時間を比べる。各デバイスは最大45秒。
@@ -38,8 +38,12 @@ WindowsではJob Objectを使い、アプリが強制終了した場合にも推
 
 ## 取得するファイル
 
-llama.cpp b11804のWindows Vulkan版と、PLaMo 3 Translate 2BのQ4_K_M版を、固定URLから取得してSHA-256を検証します。
-保存先は`%LOCALAPPDATA%/com.witenp.ptranslate-desk/inference/`です。
+llama.cpp b11804のWindows Vulkan版またはmacOS Metal版と、PLaMo 3 Translate 2BのQ4_K_M版を、固定URLから取得してSHA-256を検証します。
+Windowsの保存先は`%LOCALAPPDATA%/com.witenp.ptranslate-desk/inference/`です。
+macOS 13.3以降（Apple Silicon・Intel）では`~/Library/Application Support/com.witenp.ptranslate-desk/inference/`に保存します。
+実行中のアプリのCPUアーキテクチャに合うMetal版（tar.gz）を取得します。GPU（Metal）とCPUを選べます。
+macOSでのアプリ終了時は推論プロセスを終了します。強制終了時の連動終了はWindowsのみです。
+Macでの初回取得もアプリの「モデルをダウンロード」から行います。以下のPython準備スクリプトはWindows専用です。
 検証が完了するまで新しいファイルを有効にせず、取得や展開の途中で失敗しても既存ファイルは維持します。
 やり直す場合は、取得・検証済みのファイルを再利用します。中止した取得途中のファイルは破棄します。
 別のアプリから同時に取得しないよう、保存先をロックします。
@@ -147,4 +151,4 @@ RTX 4090・CPU・内蔵GPUの結果は[計測記録](LOCAL_BENCHMARK.md)に掲�
 - モデルの削除とバージョン更新を画面から行えるようにする。
 - 長文、用語集の多い入力、GPUメモリ不足時の挙動と翻訳品質を評価する。
 - GPUが使えない端末での案内とCPUへの切り替えを改善する。
-- macOS向けのMetal版など、他OSの導入経路を用意する。ローカルモードはWindows x64向け。
+- Linux向けの導入経路は未対応。

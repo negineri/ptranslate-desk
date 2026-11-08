@@ -200,7 +200,7 @@ $("local-idle-minutes").value = String(state.idle_minutes); $("local-idle-settin
 if (![...$("local-device").options].some((o) => o.value === state.device)) $("local-device").add(new Option(state.device === "auto" ? "自動（エンジンに任せる）" : state.device, state.device));
 $("local-device").value = state.device; $("local-download-area").hidden = state.available;
 $("welcome-local").disabled = $("mode-local").disabled = !state.supported;
-if (!state.supported) message("welcome-status", "このPCでの翻訳はWindows x64に対応しています。");
+if (!state.supported) message("welcome-status", "このPCでの翻訳はWindows x64とmacOS 13.3以降（Apple Silicon・Intel）に対応しています。");
 selectDraft(state.enabled);
 if (!state.configured) {
   welcome.hidden = false; showPage(true); settingsPage.hidden = true;

@@ -2753,6 +2753,7 @@ version = "0.0.0-dev"
 dependencies = [
  "base64 0.22.1",
  "block2",
+ "flate2",
  "getrandom 0.3.4",
  "keyring",
  "objc2",
@@ -2761,6 +2762,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
