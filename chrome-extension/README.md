@@ -62,5 +62,5 @@ python3 tools/run_extension_mock.py
 
 ```sh
 node chrome-extension/build.mjs
-node --test chrome-extension/tests/
+node --test chrome-extension/tests/*.test.mjs
 ```
