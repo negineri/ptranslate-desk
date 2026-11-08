@@ -110,12 +110,13 @@
 
   // 文字そのものの位置を、画面と祖先のスクロール領域で切り取って判定する。
   // 大きな親要素の矩形だけを見ると、その中の画面外の文まで見えている扱いになる。
-  function onScreen(block, clipCache) {
+  function onScreen(block, clipCache, viewportElements) {
     return block.nodes.some((node) => {
       const el = node.assignedSlot || textContainer(node);
       if (!node.isConnected || !textVisible(el, clipCache)) return false;
       let left = 0, top = 0, right = innerWidth, bottom = innerHeight;
       for (let parent = el; parent; parent = composedParent(parent)) {
+        if (viewportElements.has(parent)) continue;
         const style = getComputedStyle(parent);
         if (style.display === "contents") continue;
         const clipX = /^(auto|scroll|hidden|clip|overlay)$/.test(style.overflowX);
@@ -152,7 +153,15 @@
 
   function visibleBlocks() {
     const clipCache = new WeakMap();
-    return blocks.filter((block) => onScreen(block, clipCache)).sort((a, b) => contentPriority(a) - contentPriority(b));
+    // rootのoverflow、またrootがvisibleのときのbodyのoverflowは、画面全体へ適用される。
+    // スクロール後のbodyの矩形（topが負）で再度切ると、画面内の文字まで消えてしまう。
+    const root = document.documentElement;
+    const viewportElements = new Set([root, document.scrollingElement]);
+    const style = getComputedStyle(root);
+    if ((!style.overflowX || style.overflowX === "visible") && (!style.overflowY || style.overflowY === "visible")) {
+      viewportElements.add(document.body);
+    }
+    return blocks.filter((block) => onScreen(block, clipCache, viewportElements)).sort((a, b) => contentPriority(a) - contentPriority(b));
   }
 
   function schedulePriority() {

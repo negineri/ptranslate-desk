@@ -135,6 +135,63 @@ test("縦横のスクロール領域で隠れた文より、実際に見えて�
   p.w.close();
 });
 
+test("ページ途中から開始しても、画面全体へ適用されるbodyのoverflowで表示中の段落を除外しない", async () => {
+  let visibleId = 200;
+  const p = page(Array.from({ length: 250 }, (_, id) => `<p>Paragraph ${id}</p>`).join(""), (w) => {
+    const root = w.document.documentElement, body = w.document.body;
+    root.style.overflow = "visible";
+    body.style.overflowX = "hidden"; body.style.overflowY = "auto";
+    Object.defineProperty(w.document, "scrollingElement", { value: root });
+    for (const el of [root, body]) {
+      el.getBoundingClientRect = () => rect(0, -5000, 1024, w.innerHeight);
+      Object.defineProperties(el, { clientWidth: { value: 1024 }, clientHeight: { value: w.innerHeight } });
+    }
+    w.Range.prototype.getClientRects = function () {
+      const id = Number(this.startContainer.data.split(" ")[1]);
+      return [rect(0, (id - visibleId) * 1000 + 10, 100, 20)];
+    };
+  });
+  assert.equal(p.blocks[0].text, "Paragraph 200");
+  assert.deepEqual(Array.from(p.messages[0].visibleIds), [200]);
+  visibleId = 220;
+  p.w.dispatchEvent(new p.w.Event("scroll"));
+  await new Promise((resolve) => p.w.requestAnimationFrame(resolve));
+  assert.deepEqual(Array.from(p.messages.at(-1).ids), [220]);
+  p.w.close();
+});
+
+test("rootにoverflowがあるページでもroot自身は画面の矩形で判定する", () => {
+  const p = page('<p>Visible paragraph</p><p>Outside paragraph</p>', (w) => {
+    const root = w.document.documentElement;
+    root.style.overflow = "auto";
+    root.getBoundingClientRect = () => rect(0, -5000, 1024, w.innerHeight);
+    Object.defineProperty(w.document, "scrollingElement", { value: root });
+    Object.defineProperties(root, { clientWidth: { value: 1024 }, clientHeight: { value: w.innerHeight } });
+    w.Range.prototype.getClientRects = function () {
+      return [rect(0, this.startContainer.data.startsWith("Visible") ? 10 : -1000, 100, 20)];
+    };
+  });
+  assert.deepEqual(Array.from(p.messages[0].visibleIds), [0]);
+  p.w.close();
+});
+
+test("body自体が独立したスクロール枠の場合は、その枠の外の文字を優先しない", () => {
+  const p = page('<p>Clipped above</p><p>Visible paragraph</p>', (w) => {
+    w.document.documentElement.style.overflowX = "hidden";
+    w.document.documentElement.style.overflowY = "hidden";
+    const body = w.document.body;
+    body.style.overflowX = "hidden"; body.style.overflowY = "auto";
+    body.getBoundingClientRect = () => rect(100, 100, 300, 200);
+    Object.defineProperties(body, { clientWidth: { value: 300 }, clientHeight: { value: 200 } });
+    w.Range.prototype.getClientRects = function () {
+      return [rect(110, this.startContainer.data.startsWith("Visible") ? 110 : 50, 100, 20)];
+    };
+  });
+  assert.equal(p.blocks[0].text, "Visible paragraph");
+  assert.deepEqual(Array.from(p.messages[0].visibleIds), [1]);
+  p.w.close();
+});
+
 test("親要素が画面内でも、文字自体が画面外なら優先しない", () => {
   const p = page('<div id="large">Outside text<span>Visible text</span></div>', (w) => {
     w.document.querySelector("#large").getBoundingClientRect = () => rect(0, 0, 300, 3000);

@@ -21,7 +21,7 @@ function fakeServer({ config = () => Response.json(CONFIG), translate } = {}) {
 }
 
 // ページの側の port を作って blocks を送り、done か error まで受けたメッセージを返す
-function runPage(blocks, server, deps = {}) {
+function runPage(blocks, server, deps = {}, visibleIds) {
   const [page, background] = portPair();
   runPageTask(background, {
     fetch: server.fetch, server: async () => SERVER, hasPermission: async () => true, settings: async () => SETTINGS,
@@ -34,7 +34,7 @@ function runPage(blocks, server, deps = {}) {
       if (msg.type === "done" || msg.type === "error") resolve(messages);
     });
   });
-  page.postMessage({ blocks });
+  page.postMessage({ blocks, visibleIds });
   return { page, messages, finished };
 }
 
@@ -364,3 +364,12 @@ for (const mode of ["local", "server"]) {
     assert.ok(messages.some((msg) => msg.type === "block" && msg.id === 2));
   });
 }
+
+test("ページ途中の表示IDを初回要求から優先し、画面外の200段落を先に送らない", async () => {
+  const server = fakeServer({ config: () => Response.json({ ...CONFIG, concurrency: { max_in_flight: 1 } }) });
+  const blocks = Array.from({ length: 250 }, (_, id) => ({ id, text: `Paragraph ${id}` }));
+  const messages = await runPage(blocks, server, {}, [200, 201]).finished;
+  assert.deepEqual(server.requests.slice(0, 3).map((request) => request.body.text), ["Paragraph 200", "Paragraph 201", "Paragraph 0"]);
+  assert.equal(messages.at(-1).type, "done");
+  assert.equal(server.requests.length, 250);
+});
