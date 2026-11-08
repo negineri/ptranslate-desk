@@ -1,11 +1,25 @@
-このReleaseは、macOSの接続先保存の不具合を修正し、Web版からクライアントの接続設定を確認できるようにします。
+このReleaseでは、Chrome拡張のZIP配布と、Windows・macOSのローカル翻訳モードを追加します。
 
-## v0.3.2 の変更
+## Chrome拡張
 
-- macOSで「保存して再起動」が動作しない問題を修正しました。保存確認を画面内のモーダルダイアログで表示します。
-- Web版のヘッダー右上に「クライアントの接続設定」を追加しました。サーバーURL、OIDC discovery URL、client IDを表示・コピーできます。
-- 公開する接続設定はサーバーの `TR_PUBLIC_SERVER_URL`、`TR_DESKTOP_DISCOVERY_URL`、`TR_DESKTOP_CLIENT_ID` で指定します。Pocket IDのCompose構成にも設定を追加しました。
-- デスクトップの認証処理から固定の接続先情報を削除しました。旧形式の認証情報を使っていた場合は、ログインし直してください。
+Assetsの `PTranslate.Chrome_` で始まるZIPを展開し、ChromeまたはEdgeの拡張管理画面で
+「パッケージ化されていない拡張機能を読み込む」から導入してください。
+導入と手動更新の手順: https://github.com/negineri/ptranslate-desk/blob/main/docs/CHROME_EXTENSION_RELEASE.md
+
+- 選択した文章、ページ全体の翻訳に対応します。表示中の本文を優先し、最大2か所を並列に訳します。
+- チャンネル切り替えや新着文章、open Shadow DOM内の文章にも追従します。
+  「中止」「原文に戻す」で停止します。バーを閉じるだけでは追従は止まりません。
+- 利用にはPTranslateサーバーと、同じブラウザーでのWeb版へのログインが必要です。
+  拡張単体のローカル翻訳、ストアからの導入、自動更新には対応していません。
+- 任意で `.zip.sha256` を使ってファイルの一致を確認できます。Chrome拡張へのコード署名は付けていません。
+
+## デスクトップのローカル翻訳
+
+- 初回設定で「このPCで翻訳」と「サーバーで翻訳」を選べます。
+- Windows x64はVulkan GPU・CPU、macOS 13.3以降のApple Silicon・IntelはMetal GPU・CPUに対応します。
+- モデルと推論エンジンは取得前に確認を求め、取得後にSHA-256を検証します。
+  デバイスの計測・手動選択、起動時の読み込み、未使用時のメモリ解放を設定できます。
+- macOSの実モデル翻訳は実機未確認です。macOSでアプリを強制終了した場合の推論プロセスの連動終了は未対応です。
 
 ## Pocket IDとかんたん構築
 

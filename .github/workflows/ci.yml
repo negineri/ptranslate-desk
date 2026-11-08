@@ -129,6 +129,33 @@ jobs:
           path: desktop/macos-app.zip
           if-no-files-found: error
 
+  chrome-extension-release-build:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Chrome拡張の配布物を作成
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          python3 tools/package_chrome_extension.py --tag "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chrome-extension-release
+          path: dist/chrome-extension/*
+          if-no-files-found: error
+
   desktop-release-build:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [desktop-macos, image]
@@ -216,7 +243,7 @@ jobs:
 
   desktop-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [desktop-release-build, desktop-windows-release-build]
+    needs: [desktop-release-build, desktop-windows-release-build, chrome-extension-release-build]
     runs-on: macos-latest
     environment: release-signing
     permissions:
@@ -293,11 +320,19 @@ jobs:
       - name: 署名用一時ファイルを削除
         if: always()
         run: python3 tools/macos_signing.py cleanup --directory "$RUNNER_TEMP/ptranslate-signing"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: chrome-extension-release
+          path: ${{ runner.temp }}/chrome-extension-release
+      - name: Chrome拡張の配布物を検査
+        run: python3 tools/package_chrome_extension.py --tag "$RELEASE_TAG" --verify "$RUNNER_TEMP/chrome-extension-release"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
       - name: 検証済みのReleaseを公開
         run: |
           args=()
           if [[ "$RELEASE_TAG" == *-* ]]; then args+=(--prerelease); fi
-          gh release create "$RELEASE_TAG" --verify-tag --draft --title "PTranslate Desk $RELEASE_TAG" --notes-file docs/RELEASE_NOTES.md "${args[@]}" "$RUNNER_TEMP/ptranslate-release/output/"*
+          gh release create "$RELEASE_TAG" --verify-tag --draft --title "PTranslate Desk $RELEASE_TAG" --notes-file docs/RELEASE_NOTES.md "${args[@]}" "$RUNNER_TEMP/ptranslate-release/output/"* "$RUNNER_TEMP/chrome-extension-release/"*
           gh release edit "$RELEASE_TAG" --draft=false
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

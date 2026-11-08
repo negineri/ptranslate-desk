@@ -1,8 +1,8 @@
-# PTranslate Desk の macOS・Windows 配布
+# PTranslate Desk と Chrome拡張の配布
 
 ## タグとバージョン
 
-`v*` のタグをpushすると、サーバーイメージとmacOS・Windowsクライアントを同じタグで配布します。
+`v*` のタグをpushすると、サーバーイメージ、macOS・Windowsクライアント、Chrome拡張を同じタグで配布します。
 配布バージョンはビルド対象のHEADに付いたgitタグから取得します。例えば `v0.2.2` ならアプリは `0.2.2` です。
 設定ファイルやnpm・Cargoのバージョンは `0.0.0-dev` のままで、リリースごとの書き換えは不要です。
 
@@ -41,6 +41,7 @@ macOS 13以降のApple Silicon・Intelに対応する `universal-apple-darwin` �
 - `.dmg`: 利用者が最初にインストールするファイル
 - `.app.tar.gz` と `.sig`: Tauri updaterが使うアーカイブと署名
 - `latest.json`: 同じuniversalアーカイブを `darwin-aarch64` と `darwin-x86_64` に割り当てた更新情報
+- `PTranslate.Chrome_<version>.zip` と `.zip.sha256`: Chrome拡張とZIPのSHA-256
 - `_x64-setup.exe` と `.exe.sig`: Windows 10 / 11（x64）のNSISインストーラーとTauri更新署名。
   `latest.json` の `windows-x86_64` に割り当てる
 
@@ -48,6 +49,31 @@ Release作成後にも `latest.json` のバージョン、HTTPS、署名、両�
 公開先は [GitHub Releases](https://github.com/negineri/ptranslate-desk/releases) です。
 Windowsも空白・`+`を含まない固定の配布名に揃え、URLと実際のファイル名の一致を試験します。
 Windowsの配布物や更新署名が欠けている場合は公開しません。共通の `latest.json` は1回だけ生成します。
+
+## Chrome拡張のZIP
+
+`chrome-extension-release-build` はサーバー試験の成功後、mainに含まれるタグから
+`tools/package_chrome_extension.py --tag "$RELEASE_TAG"` で配布物を作ります。
+`desktop-release` は受け取ったZIPのSHA-256、manifestのバージョン、必要なファイルを確認し、
+デスクトップ版と同じReleaseへ次の2ファイルを添付します。拡張の成果物が欠ける場合は公開しません。
+
+- `PTranslate.Chrome_<version>.zip`: manifest.jsonが直下にある拡張本体
+- `PTranslate.Chrome_<version>.zip.sha256`: ZIPのSHA-256
+
+Chromeの数値バージョンにはタグのmajor.minor.patch、表示用のversion_nameにはSemVer全体を使います。
+`v1.2.3-beta.1` は `version: 1.2.3`、`version_name: 1.2.3-beta.1` となります。
+各数値は0〜65535で、すべて0の配布版は拒否します。プレリリースと正式版の区別は表示名に残し、
+導入・更新はZIPを使って手動で行います。ストアの自動更新には対応していません。
+通常ビルドのmanifestは開発用の数値 `0.0.1`・表示名 `0.0.0-dev` のままです。
+
+ローカルでも、変更をコミットし、HEADに配布タグを付けてから同じコマンドを使えます。
+出力先は既定で `dist/chrome-extension/` です。別版のファイルが残っている場合は
+`--output-dir` で空の出力先を指定してください。梱包中にソースのバージョンは書き換えません。
+
+公開前にZIPを展開して、Chrome/Edgeでの読み込み、表示バージョン、設定、ログイン、
+選択文・ページ全体の翻訳、中止、原文への復元をモックで確認してください。
+CIは梱包・バージョン・ハッシュ検査を自動試験します。Chromeウェブストアの公開作業は含みません。
+利用者向けの[導入・更新手順](CHROME_EXTENSION_RELEASE.md)も参照してください。
 
 ## Windows の署名と配布前確認
 
