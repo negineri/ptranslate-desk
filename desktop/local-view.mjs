@@ -144,10 +144,10 @@ async function devices() {
 async function measure(longText = false) {
   if (measuring || downloading || !state.available) return;
   measuring = true; busy(); $("local-candidates").replaceChildren();
-  message("local-measure-status", longText ? "選択したGPUを長文で追加計測します…" : "短文でデバイスと並列数を計測します…");
+  message("local-measure-status", longText ? "選択したGPUを長文で追加計測します…" : "短文でデバイスを比較し、ページ翻訳に近い条件で並列数を計測します…");
   const progress = new Channel();
   progress.onmessage = (r) => message("local-measure-status", r.measuring_parallel
-    ? `${r.name}：${r.measuring_parallel}並列で${longText ? "長文" : "短文"}を計測しています…`
+    ? `${r.name}：${r.measuring_parallel}並列で${longText ? "長文" : "ページ相当の短文"}を計測しています…`
     : r.milliseconds === null && !r.error ? `${r.name}を計測しています…` : `${r.name}の計測が終わりました`);
   try {
     const results = await invoke("measure_local_devices", { progress, longText, device: longText ? $("local-device").value : null });
@@ -166,7 +166,7 @@ async function measure(longText = false) {
         const result = document.createElement("p");
         result.textContent = r.long_text
           ? `長文の推奨：${r.recommended_parallel}並列（約${r.bulk_per_second.toFixed(1)}件/秒）`
-          : `推奨${r.recommended_parallel}並列（短文計測${r.measured_parallel}並列の3/4、端数切り捨て・最低1）`;
+          : `推奨${r.recommended_parallel}並列（ページ相当の計測${r.measured_parallel}並列の3/4、端数切り捨て・最低1）`;
         const apply = document.createElement("button"); apply.textContent = "大量翻訳に設定";
         apply.onclick = () => {
           $("local-device").value = r.id; manual = true;
@@ -185,7 +185,7 @@ async function measure(longText = false) {
       $("local-candidates").append(li);
     }
     if (fastest && !manual) $("local-device").value = fastest.id;
-    message("local-measure-status", fastest ? longText ? "長文での計測が終わりました。設定を選んで保存すると反映します。" : "短文の結果から推奨値を求めました。GPUを選ぶと長文も追加で調べられます。" : "計測できませんでした。デバイスを手動で選択できます。", !fastest);
+    message("local-measure-status", fastest ? longText ? "長文での計測が終わりました。設定を選んで保存すると反映します。" : "ページ翻訳に近い条件で推奨値を求めました。GPUを選ぶと長文も追加で調べられます。" : "計測できませんでした。デバイスを手動で選択できます。", !fastest);
   } catch (e) { message("local-measure-status", e, true); }
   finally { measuring = false; busy(); }
 }

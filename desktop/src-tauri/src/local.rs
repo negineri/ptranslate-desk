@@ -1023,6 +1023,15 @@ async fn json_response(stream: &dyn Output, status: u16, data: Value) -> Result<
 fn configuration(local: &Local) -> Value {
     json!({"user":"この端末", "languages":languages(), "max_chars":4000, "max_glossary":200, "concurrency":{"max_in_flight":local.slots.limit(),"scope":"application"}})
 }
+fn completion_request(
+    client: &reqwest::Client,
+    endpoint: &Endpoint,
+    prompt: String,
+    limit: usize,
+) -> reqwest::RequestBuilder {
+    client.post(format!("{}/v1/completions", endpoint.url)).bearer_auth(&endpoint.key)
+        .json(&json!({"prompt":prompt,"max_tokens":limit,"temperature":0,"stop":["<|plamo:tag|>","<|plamo:bos|>"],"add_special_tokens":true,"stream":true}))
+}
 pub async fn request(
     app: &AppHandle,
     route: &str,
@@ -1048,8 +1057,9 @@ pub async fn request(
         Err(error) => return json_response(stream, 503, json!({"error":error})).await,
     };
     let _slot = local.slots.acquire().await.map_err(|_| ())?;
-    let response = local.client.post(format!("{}/v1/completions", endpoint.url)).bearer_auth(&endpoint.key)
-        .json(&json!({"prompt":prompt,"max_tokens":limit,"temperature":0,"stop":["<|plamo:tag|>","<|plamo:bos|>"],"add_special_tokens":true,"stream":true})).send().await;
+    let response = completion_request(&local.client, &endpoint, prompt, limit)
+        .send()
+        .await;
     let mut response = match response {
         Ok(r) if r.status().is_success() => r,
         _ => {

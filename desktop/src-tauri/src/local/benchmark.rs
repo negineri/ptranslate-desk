@@ -1,10 +1,72 @@
 //! 初期設定用のGPU並列数計測。利用者の文章は使わない。
 use super::*;
 
-const SHORT_TEXTS: [&str; 3] = [
-    "This application translates text on your computer.",
+// ページの短い項目・見出し・短い段落を混ぜた合成データ。外部サイトの本文は保存しない。
+const SHORT_TEXTS: &[&str] = &[
+    "Home",
+    "Search",
+    "Sign in",
+    "Create account",
+    "Help",
+    "Contact us",
+    "About this site",
+    "Latest updates",
+    "Read more",
+    "Next page",
+    "Previous page",
+    "Contents",
+    "Discussion",
+    "Page history",
+    "Related articles",
+    "Privacy policy",
+    "Terms of use",
+    "Share this page",
+    "Print version",
+    "Download",
+    "Edit page",
+    "View source",
+    "Back to top",
+    "All categories",
+    "Recent changes",
+    "Community",
+    "Support",
+    "Settings",
+    "Language",
+    "Accessibility",
+    "Overview",
+    "Introduction",
+    "Background",
+    "Summary",
+    "References",
+    "Further reading",
+    "New research",
+    "Local news",
+    "Public transport",
+    "Education",
+    "Science",
+    "Technology",
+    "Open today",
+    "Updated yesterday",
+    "Published this week",
+    "More information",
+    "Frequently asked questions",
+    "Return to the article",
+    "Library extends its opening hours",
+    "New bus routes will connect local schools",
+    "Researchers publish their latest findings",
+    "Community meeting scheduled for next month",
+    "Public gardens reopen after maintenance",
+    "Weather conditions may affect weekend services",
     "The library opens at nine in the morning. Please return your books on time.",
     "This application translates text on your computer while keeping the original links and formatting.",
+    "Residents can attend the public meeting to ask questions and share their views.",
+    "The research team compared energy use in schools, libraries, and hospitals over several years.",
+    "The new routes will connect residential areas with schools and the central railway station.",
+    "Please check the revised schedule before planning your journey to the city centre.",
+    "The report recommends gradual improvements and regular maintenance of existing equipment.",
+    "Readers can follow the links below to find the original report and supporting documents.",
+    "Construction is expected to begin next spring after the public consultation has finished.",
+    "Local authorities will review the findings before deciding how to distribute the budget.",
 ];
 
 fn adjusted_parallel(measured: usize, long_text: bool) -> usize {
@@ -53,31 +115,42 @@ async fn translate(
     endpoint: &Endpoint,
     index: usize,
     long_text: bool,
-) -> Result<(), String> {
-    let texts: &[&str] = if long_text { &TEXTS } else { &SHORT_TEXTS };
-    let text = format!("{} Reference number: {index}.", texts[index % texts.len()]);
-    let (prompt, limit) = prompt(&json!({"text":text,"target_lang":"ja"}))?;
-    let response = client
-        .post(format!("{}/v1/completions", endpoint.url))
-        .bearer_auth(&endpoint.key)
-        .json(&json!({"prompt":prompt,"max_tokens":limit,"temperature":0,"stream":false,
-            "cache_prompt":false,"add_special_tokens":true,"stop":["<|plamo:tag|>","<|plamo:bos|>"]}))
-        .send().await.map_err(|_| "並列計測の応答を取得できませんでした")?;
+    history: Option<(String, String)>,
+) -> Result<String, String> {
+    let texts: &[&str] = if long_text { &TEXTS } else { SHORT_TEXTS };
+    let text = texts[index % texts.len()];
+    let history: Vec<_> = history
+        .into_iter()
+        .map(|(source, target)| json!({"source":source,"target":target}))
+        .collect();
+    let (prompt, limit) = prompt(&json!({"text":text,"target_lang":"ja","history":history}))?;
+    let mut response = completion_request(client, endpoint, prompt, limit)
+        .send()
+        .await
+        .map_err(|_| "並列計測の応答を取得できませんでした")?;
     if !response.status().is_success() {
         return Err("並列計測の応答が不正です".into());
     }
-    let value: Value = response
-        .json()
+    let mut decoder = Decoder::default();
+    let mut translated = String::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| "並列計測の応答が不正です")?;
-    if value["choices"][0]["text"]
-        .as_str()
-        .is_none_or(|t| t.trim().is_empty())
-        || value["choices"][0]["finish_reason"] != "stop"
+        .map_err(|_| "並列計測の接続が切れました")?
     {
-        return Err("並列計測の訳が完了しませんでした".into());
+        for event in decoder.feed(&chunk)? {
+            if let Some(part) = event["t"].as_str() {
+                translated.push_str(part);
+            }
+            if event["done"] == true {
+                if event["finish"] != "stop" || translated.trim().is_empty() {
+                    return Err("並列計測の訳が完了しませんでした".into());
+                }
+                return Ok(translated.trim().to_owned());
+            }
+        }
     }
-    Ok(())
+    Err("並列計測の接続が途中で切れました".into())
 }
 
 async fn batch(
@@ -86,21 +159,33 @@ async fn batch(
     parallel: usize,
     long_text: bool,
 ) -> Result<f64, String> {
-    // 短文は各セッションに異なる3文を順番に流す。長文は合計96件。
-    let requests = if long_text { 96 } else { parallel * 3 };
+    // 短文は3文×64セッション。同じ192件をすべての並列数で処理する。
+    let requests = if long_text { 96 } else { 192 };
+    let session_size = if long_text { 1 } else { 3 };
+    let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let previous = Arc::new(Mutex::new(None));
     let started = Instant::now();
     let mut workers = tokio::task::JoinSet::new();
-    for worker in 0..parallel {
+    for _ in 0..parallel {
         let client = client.clone();
         let endpoint = endpoint.clone();
+        let next = next.clone();
+        let previous = previous.clone();
         workers.spawn(async move {
-            let indexes: Vec<_> = if long_text {
-                (worker..requests).step_by(parallel).collect()
-            } else {
-                (worker * 3..worker * 3 + 3).collect()
-            };
-            for index in indexes {
-                translate(&client, &endpoint, index, long_text).await?;
+            loop {
+                let start = next.fetch_add(session_size, Ordering::SeqCst);
+                if start >= requests {
+                    break;
+                }
+                for index in start..start + session_size {
+                    // page-task.mjsと同様に、送信時点で最後に完了した訳を全ワーカーで共有。
+                    let history = previous.lock().unwrap().clone();
+                    let translated =
+                        translate(&client, &endpoint, index, long_text, history).await?;
+                    let texts: &[&str] = if long_text { &TEXTS } else { SHORT_TEXTS };
+                    *previous.lock().unwrap() =
+                        Some((texts[index % texts.len()].to_owned(), translated));
+                }
             }
             Ok::<_, String>(())
         });
@@ -134,7 +219,7 @@ async fn sweep(
         // 起動直後の初回推論を計測から除外。準備完了後の異常終了もここで検出する。
         tokio::time::timeout(
             Duration::from_secs(15),
-            translate(&trial.client, &endpoint, 1000, measurement.long_text),
+            translate(&trial.client, &endpoint, 1000, measurement.long_text, None),
         )
         .await
         .map_err(|_| "並列計測の準備がタイムアウトしました")??;
@@ -249,7 +334,8 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut data = [0; 8192];
             stream.read(&mut data).await.unwrap();
-            let body = r#"{"choices":[{"text":"未完了","finish_reason":"length"}]}"#;
+            let body =
+                "data: {\"choices\":[{\"text\":\"未完了\",\"finish_reason\":\"length\"}]}\n\n";
             stream
                 .write_all(
                     format!(
@@ -262,9 +348,11 @@ mod tests {
                 .await
                 .unwrap();
         });
-        assert!(translate(&reqwest::Client::new(), &endpoint, 0, false)
-            .await
-            .is_err());
+        assert!(
+            translate(&reqwest::Client::new(), &endpoint, 0, false, None)
+                .await
+                .is_err()
+        );
         server.await.unwrap();
     }
     #[test]
@@ -291,21 +379,26 @@ mod tests {
     async fn batch_runs_real_concurrent_requests_against_a_local_mock() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         for long_text in [false, true] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = Endpoint {
-                url: format!("http://{}", listener.local_addr().unwrap()),
-                key: "test".into(),
-            };
-            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let (a, p, c) = (active.clone(), peak.clone(), count.clone());
-            let server = tokio::spawn(async move {
-                let mut connections = tokio::task::JoinSet::new();
-                for _ in 0..if long_text { 96 } else { 36 } {
-                    let (mut stream, _) = listener.accept().await.unwrap();
-                    let (a, p, c) = (a.clone(), p.clone(), c.clone());
-                    connections.spawn(async move {
+            for parallel in [1, 12, 64] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let endpoint = Endpoint {
+                    url: format!("http://{}", listener.local_addr().unwrap()),
+                    key: "test".into(),
+                };
+                let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let seen = Arc::new(Mutex::new(std::collections::HashMap::<String, usize>::new()));
+                let history_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let (seen_server, history_server) = (seen.clone(), history_count.clone());
+                let (a, p, c) = (active.clone(), peak.clone(), count.clone());
+                let server = tokio::spawn(async move {
+                    let mut connections = tokio::task::JoinSet::new();
+                    for _ in 0..if long_text { 96 } else { 192 } {
+                        let (mut stream, _) = listener.accept().await.unwrap();
+                        let (a, p, c) = (a.clone(), p.clone(), c.clone());
+                        let (seen, history_count) = (seen_server.clone(), history_server.clone());
+                        connections.spawn(async move {
                         let mut data = Vec::new();
                         let mut buffer = [0; 4096];
                         loop {
@@ -330,15 +423,23 @@ mod tests {
                                             .unwrap();
                                     let prompt = body["prompt"].as_str().unwrap();
                                     let texts: &[&str] =
-                                        if long_text { &TEXTS } else { &SHORT_TEXTS };
+                                        if long_text { &TEXTS } else { SHORT_TEXTS };
+                                    assert_eq!(body["stream"], true);
+                                    assert!(body.get("cache_prompt").is_none());
                                     assert!(texts.iter().any(|text| prompt.contains(text)));
+                                    if prompt.matches("<|plamo:tag|>input").count() > 1 {
+                                        history_count.fetch_add(1, Ordering::SeqCst);
+                                    }
+                                    let current = prompt.rsplit("<|plamo:tag|>input<|plamo:msg|>").next().unwrap()
+                                        .split("<|plamo:tag|>output").next().unwrap();
+                                    *seen.lock().unwrap().entry(current.to_owned()).or_default() += 1;
                                     break;
                                 }
                             }
                         }
                         p.fetch_max(a.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
                         tokio::time::sleep(Duration::from_millis(2)).await;
-                        let body = r#"{"choices":[{"text":"訳","finish_reason":"stop"}]}"#;
+                        let body = "data: {\"choices\":[{\"text\":\"訳\",\"finish_reason\":\"stop\"}]}\n\n";
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             body.len(),
@@ -348,24 +449,38 @@ mod tests {
                         stream.write_all(response.as_bytes()).await.unwrap();
                         c.fetch_add(1, Ordering::SeqCst);
                     });
+                    }
+                    while let Some(result) = connections.join_next().await {
+                        result.unwrap();
+                    }
+                });
+                assert!(
+                    batch(&reqwest::Client::new(), &endpoint, parallel, long_text)
+                        .await
+                        .unwrap()
+                        > 0.
+                );
+                server.await.unwrap();
+                assert_eq!(
+                    count.load(Ordering::SeqCst),
+                    if long_text { 96 } else { 192 }
+                );
+                assert!(peak.load(Ordering::SeqCst) >= 1);
+                if parallel > 1 {
+                    assert!(peak.load(Ordering::SeqCst) > 1);
                 }
-                while let Some(result) = connections.join_next().await {
-                    result.unwrap();
+                assert!(peak.load(Ordering::SeqCst) <= parallel);
+                let texts: &[&str] = if long_text { &TEXTS } else { SHORT_TEXTS };
+                let counts = seen.lock().unwrap();
+                assert_eq!(counts.len(), texts.len());
+                for text in texts {
+                    assert_eq!(counts.get(*text), Some(&(if long_text { 48 } else { 3 })));
                 }
-            });
-            assert!(
-                batch(&reqwest::Client::new(), &endpoint, 12, long_text)
-                    .await
-                    .unwrap()
-                    > 0.
-            );
-            server.await.unwrap();
-            assert_eq!(
-                count.load(Ordering::SeqCst),
-                if long_text { 96 } else { 36 }
-            );
-            assert!(peak.load(Ordering::SeqCst) > 1);
-            assert!(peak.load(Ordering::SeqCst) <= 12);
+                assert!(
+                    history_count.load(Ordering::SeqCst)
+                        >= (if long_text { 96 } else { 192 }) - parallel
+                );
+            }
         }
     }
 }
