@@ -109,7 +109,12 @@ export async function apiFetch(route, body, deps, abort) {
     return { status, body: null };
   }
   const reader = res.body.getReader();
-  abort.signal.addEventListener("abort", () => reader.cancel(abort.signal.reason).catch(() => {}), { once: true });
+  const onAbort = () => reader.cancel(abort.signal.reason).catch(() => {});
+  abort.signal.addEventListener("abort", onAbort, { once: true });
+  const cleanup = () => {
+    clearTimeout(timer);
+    abort.signal.removeEventListener("abort", onAbort);
+  };
   const stream = new ReadableStream({
     async pull(controller) {
       arm();
@@ -117,16 +122,16 @@ export async function apiFetch(route, body, deps, abort) {
         const { value, done } = await reader.read();
         if (abort.signal.aborted) throw abort.signal.reason;
         if (done) {
-          clearTimeout(timer);
+          cleanup();
           controller.close();
         } else controller.enqueue(value);
       } catch (e) {
-        clearTimeout(timer);
+        cleanup();
         controller.error(reason(e));
       }
     },
     cancel(why) {
-      clearTimeout(timer);
+      cleanup();
       return reader.cancel(why);
     },
   }, { highWaterMark: 0 });

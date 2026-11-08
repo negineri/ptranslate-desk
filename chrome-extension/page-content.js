@@ -1,6 +1,6 @@
 // ページ全体の翻訳 (ページ側)。background が chrome.scripting で注入する。
-// 段落 (ブロック要素) ごとに文を集めて background (page-task.mjs) に送り、届いた訳を元の位置に書き込む。
-// 段落の中のリンクや強調などの区切りは保てないので、訳は段落の最初の文字のノードにまとめて入れる。
+// 同じ要素の中で連続する文を background (page-task.mjs) に送り、届いた訳を元の位置に書き込む。
+// リンクや強調の内外は別々に訳し、操作と装飾を元の要素に残す。
 // 元の文は覚えておき、「原文に戻す」で戻す
 (() => {
   "use strict";
@@ -14,20 +14,25 @@
     "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA", "INPUT", "SELECT", "OPTION", "CODE", "PRE", "KBD",
     "SAMP", "VAR", "SVG", "MATH", "CANVAS", "IFRAME", "OBJECT", "EMBED", "VIDEO", "AUDIO",
   ]);
-  const displayCache = new Map();
   const originals = new Map(); // 文字のノード → 元の文
+  const written = new Map(); // 自分が最後に書いた値。サイト側の変更とは区別する
+  const parents = new Map();
+  let nextId = 0;
+  let scanTimer = null;
+  let rootsTimer = null;
+  const roots = new Set();
+  const observeOptions = { childList: true, characterData: true, subtree: true,
+    attributes: true, attributeFilter: ["class", "style", "hidden", "open", "translate", "contenteditable"] };
+  let following = false;
+  const observer = new MutationObserver((records) => {
+    // ストリーミング中に自分が書いた文字で再収集を繰り返さない。
+    if (records.some((r) => r.type !== "characterData" || written.get(r.target) !== r.target.data ||
+        parents.get(r.target) !== r.target.parentNode)) scheduleScan();
+  });
   let blocks = []; // { id, nodes, text }
   let port = null;
+  let priorityFrame = null;
   let state = "idle"; // idle・running・done・stopped・error・restored
-
-  function isBlock(el) {
-    let d = displayCache.get(el);
-    if (d === undefined) {
-      d = getComputedStyle(el).display;
-      displayCache.set(el, d);
-    }
-    return !(d.startsWith("inline") || d === "contents" || d === "ruby" || d === "ruby-text");
-  }
 
   function skipped(el) {
     return SKIP_TAGS.has(el.tagName) || el.isContentEditable || el.getAttribute("translate") === "no" ||
@@ -35,48 +40,243 @@
       el.id === "ptranslate-page-bar";
   }
 
-  function collect() {
-    const groups = new Map(); // ブロック要素 → 文字のノード
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          return skipped(node) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;
-        }
-        return node.data.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
-      },
-    });
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      let block = node.parentElement;
-      while (block && block !== document.body && !isBlock(block)) block = block.parentElement;
-      block ||= document.body;
-      if (!groups.has(block)) groups.set(block, []);
-      groups.get(block).push(node);
+  // open Shadow DOM の境界を越えて、画面上の祖先をたどる。
+  function textContainer(node) {
+    return node.parentElement || node.getRootNode().host || null;
+  }
+
+  function composedParent(el) {
+    return el.assignedSlot || el.parentElement || el.getRootNode().host || null;
+  }
+
+  function watchRoots(root = document.body) {
+    let added = false;
+    for (const el of root.querySelectorAll("*")) {
+      if (!el.shadowRoot || skipped(el)) continue;
+      if (!roots.has(el.shadowRoot)) {
+        roots.add(el.shadowRoot);
+        observer.observe(el.shadowRoot, observeOptions);
+        added = true;
+      }
+      if (watchRoots(el.shadowRoot)) added = true;
     }
+    return added;
+  }
+
+  function textVisible(el) {
+    if (!el || !el.isConnected) return false;
+    // display:contents の要素自身には箱がなく、checkVisibility() は false を返す。
+    // 文字の visibility を調べたうえで、箱のある祖先に表示状態を問い合わせる。
+    if (["hidden", "collapse"].includes(getComputedStyle(el).visibility)) return false;
+    let box = el;
+    while (box && getComputedStyle(box).display === "contents") box = composedParent(box);
+    return !!box && (!box.checkVisibility || box.checkVisibility({ opacityProperty: true }));
+  }
+
+  // 文字そのものの位置を、画面と祖先のスクロール領域で切り取って判定する。
+  // 大きな親要素の矩形だけを見ると、その中の画面外の文まで見えている扱いになる。
+  function onScreen(block) {
+    return block.nodes.some((node) => {
+      const el = node.assignedSlot || textContainer(node);
+      if (!node.isConnected || !textVisible(el)) return false;
+      let left = 0, top = 0, right = innerWidth, bottom = innerHeight;
+      for (let parent = el; parent; parent = composedParent(parent)) {
+        const style = getComputedStyle(parent);
+        if (style.display === "contents") continue;
+        const clipX = /^(auto|scroll|hidden|clip|overlay)$/.test(style.overflowX);
+        const clipY = /^(auto|scroll|hidden|clip|overlay)$/.test(style.overflowY);
+        if (!clipX && !clipY) continue;
+        const rect = parent.getBoundingClientRect();
+        if (clipX) {
+          left = Math.max(left, rect.left + parent.clientLeft);
+          right = Math.min(right, rect.left + parent.clientLeft + parent.clientWidth);
+        }
+        if (clipY) {
+          top = Math.max(top, rect.top + parent.clientTop);
+          bottom = Math.min(bottom, rect.top + parent.clientTop + parent.clientHeight);
+        }
+      }
+      if (left >= right || top >= bottom) return false;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      return [...range.getClientRects()].some((r) =>
+        r.width > 0 && r.height > 0 && r.right > left && r.left < right && r.bottom > top && r.top < bottom);
+    });
+  }
+
+  // チャット本文や記事を、同時に見えているナビゲーションより先に訳す。
+  // サイト固有のクラス名には依存せず、HTML と ARIA の本文領域を使う。
+  function contentPriority(block) {
+    let rank = 2;
+    for (let el = textContainer(block.nodes[0]); el; el = composedParent(el)) {
+      if (el.matches('article, [role="article"]')) return 0;
+      if (el.matches('main, [role="main"]')) rank = 1;
+    }
+    return rank;
+  }
+
+  function visibleBlocks() {
+    return blocks.filter(onScreen).sort((a, b) => contentPriority(a) - contentPriority(b));
+  }
+
+  function schedulePriority() {
+    if (!port || priorityFrame !== null) return;
+    priorityFrame = requestAnimationFrame(() => {
+      priorityFrame = null;
+      port?.postMessage({ type: "priority", ids: visibleBlocks().map((b) => b.id) });
+    });
+  }
+
+  function sourceData(node) {
+    if (originals.has(node) && written.get(node) === node.data && parents.get(node) === node.parentNode) {
+      return originals.get(node);
+    }
+    originals.delete(node);
+    written.delete(node);
+    parents.delete(node);
+    return node.data;
+  }
+
+  function current(block) {
+    return block.nodes.every((n, i) => n.isConnected && n.parentNode === block.parents[i] && n.data === block.expected[i]);
+  }
+
+  function scheduleScan() {
+    if (!following || scanTimer !== null) return;
+    scanTimer = setTimeout(() => {
+      scanTimer = null;
+      scan();
+    }, 150);
+  }
+
+  function stopFollowing() {
+    following = false;
+    observer.disconnect();
+    roots.clear();
+    clearInterval(rootsTimer);
+    rootsTimer = null;
+    clearTimeout(scanTimer);
+    scanTimer = null;
+  }
+
+  function scan() {
+    if (!following) return;
+    let removedRoot = false;
+    for (const root of roots) {
+      if (!root.host.isConnected) { roots.delete(root); removedRoot = true; }
+    }
+    if (removedRoot) {
+      observer.disconnect();
+      observer.observe(document.body, observeOptions);
+      for (const root of roots) observer.observe(root, observeOptions);
+    }
+    watchRoots();
+    for (const node of originals.keys()) {
+      if (!node.isConnected) {
+        originals.delete(node);
+        written.delete(node);
+        parents.delete(node);
+      }
+    }
+    const old = new Map(blocks.map((b) => [b.nodes[0], b]));
+    const next = collect().map((b) => {
+      const previous = old.get(b.nodes[0]);
+      if (previous && previous.text === b.text && previous.nodes.length === b.nodes.length &&
+          previous.nodes.every((n, i) => n === b.nodes[i]) && current(previous)) return previous;
+      return { ...b, skipped: !/\p{L}/u.test(b.text), id: nextId++, parents: b.nodes.map((n) => n.parentNode), expected: b.nodes.map((n) => n.data) };
+    });
+    const ids = new Set(next.map((b) => b.id));
+    const removedPending = blocks.some((b) => !b.done && !b.skipped && !ids.has(b.id));
+    const changed = next.length !== blocks.length || next.some((b, i) => b !== blocks[i]);
+    blocks = next;
+    if (!changed) return;
+    const pending = blocks.filter((b) => !b.done && !b.skipped);
+    if (removedPending) stopPort(); // チャンネルの古い要求を中断して、新しい本文へ切り替える
+    if (!pending.length) {
+      if (!port) {
+        state = "done";
+        show("新しい文章を待っています", "", ["stop", ...(originals.size ? ["restore"] : [])]);
+      }
+      return;
+    }
+    if (port) {
+      port.postMessage({ type: "update", blocks: orderedPending().map(({ id, text }) => ({ id, text })),
+        ids: visibleBlocks().map((b) => b.id) });
+    } else launch();
+  }
+
+  function orderedPending() {
+    const visible = visibleBlocks();
+    const ids = new Set(visible.map((b) => b.id));
+    return [...visible, ...blocks.filter((b) => !ids.has(b.id))].filter((b) => !b.done && !b.skipped);
+  }
+
+  function collect() {
+    const groups = []; // 同じ親要素を持つ、連続する文字のノード
+    function visit(root) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            if (skipped(node)) return NodeFilter.FILTER_REJECT;
+            return node.shadowRoot ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+          }
+          return sourceData(node).trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+        },
+      });
+      let previous = null;
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          visit(node.shadowRoot);
+          previous = null;
+          continue;
+        }
+        const el = textContainer(node);
+        if (!textVisible(el)) {
+          previous = null;
+          continue;
+        }
+        // 親が同じでも、間にリンクなどがあれば別のまとまりにする。
+        if (!previous || previous.nextSibling !== node || previous.parentNode !== node.parentNode) {
+          groups.push([el, []]);
+        }
+        groups.at(-1)[1].push(node);
+        previous = node;
+      }
+    }
+    visit(document.body);
     const list = [];
     for (const [el, nodes] of groups) {
-      if (el.checkVisibility && !el.checkVisibility({ visibilityProperty: true })) continue;
-      const text = nodes.map((n) => n.data).join("").replace(/\s+/g, " ").trim();
+      if (!textVisible(el)) continue;
+      const text = nodes.map(sourceData).join("").replace(/\s+/g, " ").trim();
       if (!text) continue;
-      const rect = el.getBoundingClientRect();
-      const onScreen = rect.bottom > 0 && rect.top < innerHeight;
-      list.push({ id: list.length, nodes, text, onScreen });
+      list.push({ id: list.length, nodes, text });
     }
     return list;
   }
 
   function write(block, text) {
+    if (!current(block)) return;
     const [first, ...rest] = block.nodes;
-    for (const n of block.nodes) if (!originals.has(n)) originals.set(n, n.data);
+    for (const n of block.nodes) if (!originals.has(n)) {
+      originals.set(n, n.data);
+      parents.set(n, n.parentNode);
+    }
     const lead = originals.get(first).match(/^\s*/)[0];
     const last = block.nodes[block.nodes.length - 1];
     const trail = originals.get(last).match(/\s*$/)[0];
     first.data = lead + text + (rest.length ? "" : trail);
     for (const n of rest) n.data = n === last ? trail : "";
+    block.expected = block.nodes.map((n) => n.data);
+    for (const n of block.nodes) written.set(n, n.data);
   }
 
   function restore() {
-    for (const [node, data] of originals) node.data = data;
+    for (const [node, data] of originals) {
+      if (node.isConnected && node.parentNode === parents.get(node) && node.data === written.get(node)) node.data = data;
+    }
     originals.clear();
+    written.clear();
+    parents.clear();
   }
 
   // 進み具合のバー (ページの CSS が混ざらないよう shadow DOM に入れる)
@@ -122,6 +322,10 @@
   }
 
   function stopPort() {
+    removeEventListener("scroll", schedulePriority, true);
+    removeEventListener("resize", schedulePriority);
+    if (priorityFrame !== null) cancelAnimationFrame(priorityFrame);
+    priorityFrame = null;
     if (!port) return;
     try {
       port.disconnect();
@@ -132,23 +336,33 @@
   }
 
   function start() {
+    stopFollowing();
     stopPort();
     restore();
-    blocks = collect();
-    if (!blocks.length) {
-      state = "error";
-      show("訳す文が見つかりませんでした", "err", []);
-      return;
-    }
+    blocks = [];
+    following = true;
+    state = "idle";
+    scan();
+    observer.observe(document.body, observeOptions);
+    // attachShadow 自体は MutationObserver に通知されないので、遅れて作られた境界も探す。
+    rootsTimer = setInterval(() => { if (watchRoots()) scheduleScan(); }, 1000);
+    if (!blocks.length) show("新しい文章を待っています", "", ["stop"]);
+  }
+
+  function launch() {
     state = "running";
     show("訳す準備をしています", "", ["stop"]);
-    const byId = new Map(blocks.map((b) => [b.id, b]));
-    // 画面に見えている段落から訳す
-    const ordered = [...blocks.filter((b) => b.onScreen), ...blocks.filter((b) => !b.onScreen)];
+    const visibleIds = visibleBlocks().map((b) => b.id);
+    const ordered = orderedPending();
     const mine = chrome.runtime.connect({ name: "page-translate" });
     port = mine;
     let total = 0;
+    let done = 0;
     let target = "";
+    const waiting = new Set();
+    const progress = () => show(waiting.size
+      ? `前の翻訳の終了を待っています (${done} / ${total})`
+      : `${target}に訳しています (${done} / ${total})`, "", ["stop", ...(originals.size ? ["restore"] : [])]);
     mine.onMessage.addListener((msg) => {
       if (port !== mine) return;
       if (msg.type === "start") {
@@ -156,21 +370,41 @@
         target = msg.targetName;
         show(total ? `${target}に訳しています (0 / ${total})` : "訳す段落がありませんでした", total ? "" : "ok",
           total ? ["stop"] : []);
+      } else if (msg.type === "waiting") {
+        if (msg.waiting) waiting.add(msg.id);
+        else waiting.delete(msg.id);
+        progress();
       } else if (msg.type === "partial") {
-        const b = byId.get(msg.id);
+        const b = blocks.find((b) => b.id === msg.id);
         if (b) write(b, msg.text);
       } else if (msg.type === "block") {
-        const b = byId.get(msg.id);
-        if (b) write(b, msg.text);
-        show(`${target}に訳しています (${msg.done} / ${msg.total})`, "", ["stop", "restore"]);
+        const b = blocks.find((b) => b.id === msg.id);
+        if (b) {
+          write(b, msg.text);
+          if (current(b)) b.done = true;
+        }
+        done = msg.done;
+        total = msg.total;
+        progress();
+        schedulePriority();
       } else if (msg.type === "done") {
         state = "done";
         stopPort();
-        if (msg.truncated) {
-          show(`訳し終わりました (${msg.truncated} か所は長すぎて途中で切れました)`, "warn", ["restore"]);
-        } else show("訳し終わりました", "ok", ["restore"]);
+        const warnings = [];
+        if (msg.truncated) warnings.push(`${msg.truncated} か所は長すぎて途中で切れました`);
+        if (msg.omitted) warnings.push(`上限のため ${msg.omitted} か所は訳していません`);
+        if (warnings.length) show(`翻訳を終了しました (${warnings.join("、")})`, "warn", ["stop", "restore"]);
+        else show("訳し終わりました (新しい文章も自動で訳します)", "ok", ["stop", "restore"]);
+        if (msg.omitted) {
+          for (const b of blocks) if (!b.done) b.skipped = true;
+        } else if (following && blocks.some((b) => !b.done && !b.skipped)) {
+          // 完了直前に追加された文章が background に届かなかった場合も拾う。
+          scan();
+          if (!port && blocks.some((b) => !b.done && !b.skipped)) launch();
+        }
       } else if (msg.type === "error") {
         state = "error";
+        stopFollowing();
         stopPort();
         const fix = msg.code === "login" ? ["login"] : msg.remedy === "options" ? ["options"] : [];
         show(msg.message, "err", [...fix, ...(originals.size ? ["restore"] : []), "again"]);
@@ -178,19 +412,25 @@
     });
     mine.onDisconnect.addListener(() => {
       if (port !== mine) return;
-      port = null;
+      stopPort();
+      stopFollowing();
       state = "error";
       show("翻訳サーバーに接続できません", "err", [...(originals.size ? ["restore"] : []), "again"]);
     });
-    mine.postMessage({ blocks: ordered.map(({ id, text }) => ({ id, text })) });
+    mine.postMessage({ blocks: ordered.map(({ id, text }) => ({ id, text })), visibleIds });
+    // scroll はバブルしないので capture で、ページ内のスクロール領域も受ける。
+    addEventListener("scroll", schedulePriority, true);
+    addEventListener("resize", schedulePriority);
   }
 
   buttons.stop.addEventListener("click", () => {
+    stopFollowing();
     stopPort();
     state = "stopped";
     show("中止しました", "", [...(originals.size ? ["restore"] : []), "again"]);
   });
   buttons.restore.addEventListener("click", () => {
+    stopFollowing();
     stopPort();
     restore();
     state = "restored";
