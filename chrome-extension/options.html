@@ -1,0 +1,52 @@
+<!doctype html>
+<!-- 拡張の設定 -->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PTranslate — 拡張の設定</title>
+<!-- shared-style -->
+<style>
+  main { max-width: 720px; }
+  label { display: block; margin-top: 12px; font-size: .9rem; }
+  input[type="url"] { width: 100%; }
+  #glossary { min-height: 100px; }
+  .langs { margin-top: 4px; margin-bottom: 0; }
+</style>
+</head>
+<body><main>
+  <h1><img class="brand-mark" src="./logo.png" width="32" height="32" alt="">拡張の設定</h1>
+  <p class="sub">翻訳には PTranslate のサーバーとそのアカウントが要ります。ログインは Web版 (サーバーURLのページ) で行い、拡張はそのログインを使います。</p>
+  <section>
+    <label for="server">サーバーURL</label>
+    <input id="server" type="url" placeholder="https://translate.example.com" spellcheck="false" autocomplete="off">
+    <p class="hint">管理者から伝えられたURL (パスなし)。Web版の「クライアントの接続設定」にも出ています。</p>
+    <div class="row">
+      <button id="save" class="primary">保存して接続を確かめる</button>
+      <button id="login" hidden>Web版を開いてログイン</button>
+      <span id="status" class="hint" role="status"></span>
+    </div>
+  </section>
+  <section>
+    <label for="target">訳す先の言語</label>
+    <div class="langs">
+      <select id="source" aria-label="原文の言語"><option value="">自動で判定</option></select>
+      <span>→</span>
+      <select id="target" aria-label="訳す先の言語"><option value="auto">日本語 ⇄ 英語 (自動)</option></select>
+      <select id="form" aria-label="文体">
+        <option value="">文体はおまかせ</option>
+        <option value="polite">です・ます</option>
+        <option value="plain">だ・である</option>
+      </select>
+    </div>
+    <p class="hint">言語の一覧は接続を確かめると出ます。文体は日本語に訳すときだけ使います。</p>
+    <label for="glossary">用語集 (1 行に 1 つ、「原語 =&gt; 訳語」)</label>
+    <textarea id="glossary" placeholder="管理画面 =&gt; dashboard&#10;オーナー =&gt; assignee" spellcheck="false"></textarea>
+    <div class="row"><button id="save-prefs">保存</button><span id="prefs-status" class="hint" role="status"></span></div>
+  </section>
+  <section>
+    <p class="hint" style="margin:0">ショートカットは <button id="shortcuts" class="link">chrome://extensions/shortcuts</button> で変えられます。
+      原文と訳はこの拡張に保存しません (訳し終えるまで、ブラウザを閉じると消える場所に置くだけです)。</p>
+  </section>
+</main><script type="module" src="./options.mjs"></script></body>
+</html>

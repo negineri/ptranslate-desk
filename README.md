@@ -21,6 +21,7 @@ PLaMo 3 Translate (llama.cpp の llama-server) を裏側にした、Web とデ�
 | デスクトップ版（PTranslate Desk） | macOS 13以降、Apple Silicon・Intel                              | 両CPU共通のuniversal版。選択した文章の取得にはアクセシビリティの許可が必要 |
 | Windowsデスクトップ版 | Windows 10 / 11（x64） | NSISインストーラー。コード署名なし。Ctrl+Cの連続コピーに対応 |
 | Web版（PTranslate）               | JavaScriptとストリーミング受信（Fetch API）に対応したブラウザー | インストール不要。構築したサーバーのURLをブラウザーで開く                  |
+| Chrome拡張（PTranslate for Chrome） | Chrome 120以降、Edgeなど Chromium系のブラウザー | ページで選んだ文を訳す。Web版のログインを使う。ストア配布は未対応 |
 
 Linux向けデスクトップ版は未配布で、ショートカットによる選択文の取得も未実装です。
 サーバー管理者がIdPで利用者と利用権限を管理します。
@@ -90,6 +91,13 @@ client IDは公開クライアント（client secretなし、PKCE）のもので
 管理者から受け取ったサーバーURLをブラウザーで開き、IdPにログインします。
 原文を入力し、言語や文体を選んで翻訳します。アプリのインストールは不要です。
 
+## Chrome拡張を使う
+
+ブラウザーで読んでいるページの文を選び、右クリックの「PTranslate で翻訳」か
+**Alt+Shift+T** で訳します。拡張の設定にサーバーURLを入れ、同じブラウザーでWeb版にログインしておきます。
+拡張は自分ではログインせず、Web版のログインを使うので、IdPの設定は変えなくて構いません。
+読み込み方と仕組みは[Chrome拡張の説明](chrome-extension/README.md)を参照してください。
+
 ## サーバーを自分で用意する
 
 Linuxのサーバー1台で動きます。GPUは要りません。構成は2通りあります。
@@ -116,6 +124,7 @@ Linuxのサーバー1台で動きます。GPUは要りません。構成は2通�
 
 - [開発ガイド](docs/DEVELOPMENT.md): リポジトリの構成、モック起動、試験、ビルド、CI
 - [デスクトップの開発手順](desktop/README.md)
+- [Chrome拡張](chrome-extension/README.md)
 - [仕様](docs/SPEC.md)
 - [Releaseの作成と更新署名](docs/RELEASING.md)
 - [訳の繰り返しと揺れの調査](docs/REPEAT_INVESTIGATION.md)
