@@ -1,7 +1,8 @@
 //! 初期設定用のGPU並列数計測。利用者の文章は使わない。
 use super::*;
 
-const SHORT_TEXTS: [&str; 2] = [
+const SHORT_TEXTS: [&str; 3] = [
+    "This application translates text on your computer.",
     "The library opens at nine in the morning. Please return your books on time.",
     "This application translates text on your computer while keeping the original links and formatting.",
 ];
@@ -10,7 +11,7 @@ fn adjusted_parallel(measured: usize, long_text: bool) -> usize {
     if long_text {
         measured
     } else {
-        (measured * 2 / 3).max(1)
+        (measured * 3 / 4).max(1)
     }
 }
 
@@ -53,7 +54,7 @@ async fn translate(
     index: usize,
     long_text: bool,
 ) -> Result<(), String> {
-    let texts = if long_text { &TEXTS } else { &SHORT_TEXTS };
+    let texts: &[&str] = if long_text { &TEXTS } else { &SHORT_TEXTS };
     let text = format!("{} Reference number: {index}.", texts[index % texts.len()]);
     let (prompt, limit) = prompt(&json!({"text":text,"target_lang":"ja"}))?;
     let response = client
@@ -85,15 +86,20 @@ async fn batch(
     parallel: usize,
     long_text: bool,
 ) -> Result<f64, String> {
-    // どの候補も同じ96件を処理する。各ワーカーに均等に分け、未送信分の待ちも含む。
-    const REQUESTS: usize = 96;
+    // 短文は各セッションに異なる3文を順番に流す。長文は合計96件。
+    let requests = if long_text { 96 } else { parallel * 3 };
     let started = Instant::now();
     let mut workers = tokio::task::JoinSet::new();
     for worker in 0..parallel {
         let client = client.clone();
         let endpoint = endpoint.clone();
         workers.spawn(async move {
-            for index in (worker..REQUESTS).step_by(parallel) {
+            let indexes: Vec<_> = if long_text {
+                (worker..requests).step_by(parallel).collect()
+            } else {
+                (worker * 3..worker * 3 + 3).collect()
+            };
+            for index in indexes {
                 translate(&client, &endpoint, index, long_text).await?;
             }
             Ok::<_, String>(())
@@ -102,7 +108,7 @@ async fn batch(
     while let Some(result) = workers.join_next().await {
         result.map_err(|_| "並列計測が終了しました")??;
     }
-    Ok(REQUESTS as f64 / started.elapsed().as_secs_f64().max(0.001))
+    Ok(requests as f64 / started.elapsed().as_secs_f64().max(0.001))
 }
 
 async fn sweep(
@@ -198,8 +204,8 @@ pub async fn measure(
 mod tests {
     use super::*;
     #[test]
-    fn short_recommendation_is_two_thirds_rounded_down_and_long_is_unchanged() {
-        for (measured, expected) in [(1, 1), (2, 1), (4, 2), (24, 16), (32, 21), (64, 42)] {
+    fn short_recommendation_is_three_quarters_rounded_down_and_long_is_unchanged() {
+        for (measured, expected) in [(1, 1), (2, 1), (4, 3), (24, 18), (32, 24), (64, 48)] {
             assert_eq!(adjusted_parallel(measured, false), expected);
             assert_eq!(adjusted_parallel(measured, true), measured);
         }
@@ -296,7 +302,7 @@ mod tests {
             let (a, p, c) = (active.clone(), peak.clone(), count.clone());
             let server = tokio::spawn(async move {
                 let mut connections = tokio::task::JoinSet::new();
-                for _ in 0..96 {
+                for _ in 0..if long_text { 96 } else { 36 } {
                     let (mut stream, _) = listener.accept().await.unwrap();
                     let (a, p, c) = (a.clone(), p.clone(), c.clone());
                     connections.spawn(async move {
@@ -323,7 +329,8 @@ mod tests {
                                         serde_json::from_slice(&data[end + 4..end + 4 + length])
                                             .unwrap();
                                     let prompt = body["prompt"].as_str().unwrap();
-                                    let texts = if long_text { &TEXTS } else { &SHORT_TEXTS };
+                                    let texts: &[&str] =
+                                        if long_text { &TEXTS } else { &SHORT_TEXTS };
                                     assert!(texts.iter().any(|text| prompt.contains(text)));
                                     break;
                                 }
@@ -353,7 +360,10 @@ mod tests {
                     > 0.
             );
             server.await.unwrap();
-            assert_eq!(count.load(Ordering::SeqCst), 96);
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                if long_text { 96 } else { 36 }
+            );
             assert!(peak.load(Ordering::SeqCst) > 1);
             assert!(peak.load(Ordering::SeqCst) <= 12);
         }

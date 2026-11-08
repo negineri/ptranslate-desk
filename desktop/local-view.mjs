@@ -165,7 +165,7 @@ async function measure(longText = false) {
         const result = document.createElement("p");
         result.textContent = r.long_text
           ? `長文の推奨：${r.recommended_parallel}並列（約${r.bulk_per_second.toFixed(1)}件/秒）`
-          : `推奨${r.recommended_parallel}並列（短文計測${r.measured_parallel}並列の2/3、端数切り捨て・最低1）`;
+          : `推奨${r.recommended_parallel}並列（短文計測${r.measured_parallel}並列の3/4、端数切り捨て・最低1）`;
         const apply = document.createElement("button"); apply.textContent = "大量翻訳に設定";
         apply.onclick = () => {
           $("local-device").value = r.id; manual = true;
