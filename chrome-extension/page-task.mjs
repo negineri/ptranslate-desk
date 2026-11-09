@@ -14,20 +14,6 @@ export function concurrencyLimit(config) {
   if (!Number.isSafeInteger(c?.max_in_flight) || c.max_in_flight < 1) return 1;
   return Math.min(PAGE_CONCURRENCY, c.max_in_flight);
 }
-// この試作用に作成した、英語のボタンラベルと定訳。
-const UI_LABELS_JA = new Map([
-  ["Back", "戻る"],
-  ["Next", "次へ"],
-  ["Close", "閉じる"],
-  ["Cancel", "キャンセル"],
-  ["Save changes", "変更を保存"],
-  ["Learn more", "詳しく見る"],
-  ["Sign in", "ログイン"],
-  ["Sign out", "ログアウト"],
-  ["Show more", "もっと見る"],
-  ["Show less", "表示を減らす"],
-]);
-
 const MAIN_TEXT_LENGTH = 300;
 const SHORT_TEXT_LENGTH = 60;
 const BATCH_SIZE = 4;
@@ -152,7 +138,7 @@ export function runPageTask(port, deps) {
     const completed = new Set();
     const running = new Map();
     const runningIds = new Set();
-    const batchable = (block) => !priority.has(block.id) && !dictionaryTranslation(block) &&
+    const batchable = (block) => !priority.has(block.id) &&
       block.text.length <= SHORT_TEXT_LENGTH && !/[\r\n]/.test(block.text) &&
       !/^\s*\d/.test(block.text);
     const batchEnabled = Array.isArray(visibleIds) && common.target_lang === "ja" &&
@@ -209,7 +195,7 @@ export function runPageTask(port, deps) {
       for (const [index, block] of finished.group.entries()) {
         const result = finished.results[index];
         runningIds.delete(block.id);
-        if (result.previous) previous = result.previous;
+        previous = result.previous;
         truncated += result.truncated;
         done++;
         completed.add(block.id);
@@ -232,22 +218,13 @@ export function runPageTask(port, deps) {
       const results = [];
       for (const block of group) {
         const result = await translateBlock(block, previous);
-        previous = result.previous ?? previous;
+        previous = result.previous;
         results.push(result);
       }
       return results;
     }
 
-    function dictionaryTranslation(block) {
-      if (block.uiLabel === true && common.target_lang === "ja" &&
-          (!common.source_lang || common.source_lang === "en") && !common.glossary.length) {
-        return UI_LABELS_JA.get(block.text);
-      }
-    }
-
     async function translateBlock(block, previous) {
-      const text = dictionaryTranslation(block);
-      if (text) return { text, previous: null, truncated: 0 };
       let out = "";
       let truncated = 0;
       // 同じ箇所の分割は順番を保つ。別の箇所とは、送信時点の完了済みの訳を共有する。

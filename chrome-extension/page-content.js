@@ -230,7 +230,7 @@
     const old = new Map(blocks.map((b) => [b.nodes[0], b]));
     const next = collect().map((b) => {
       const previous = old.get(b.nodes[0]);
-      if (previous && previous.text === b.text && previous.uiLabel === b.uiLabel && previous.nodes.length === b.nodes.length &&
+      if (previous && previous.text === b.text && previous.nodes.length === b.nodes.length &&
           previous.nodes.every((n, i) => n === b.nodes[i]) && current(previous)) return previous;
       return { ...b, skipped: !/\p{L}/u.test(b.text), id: nextId++, parents: b.nodes.map((n) => n.parentNode), expected: b.nodes.map((n) => n.data) };
     });
@@ -249,7 +249,7 @@
       return;
     }
     if (port) {
-      port.postMessage({ type: "update", blocks: orderedPending().map(({ id, text, uiLabel }) => ({ id, text, ...(uiLabel && { uiLabel }) })),
+      port.postMessage({ type: "update", blocks: orderedPending().map(({ id, text }) => ({ id, text })),
         ids: visibleBlocks().map((b) => b.id) });
     } else launch();
   }
@@ -299,9 +299,7 @@
       if (!textVisible(el, clipCache)) continue;
       const text = nodes.map(sourceData).join("").replace(/\s+/g, " ").trim();
       if (!text) continue;
-      // 文の一部やアイコン付きの複合要素を定型ラベルとして扱わない。
-      const uiLabel = el.tagName === "BUTTON" && nodes.length === el.childNodes.length;
-      list.push({ id: list.length, nodes, text, uiLabel });
+      list.push({ id: list.length, nodes, text });
     }
     return list;
   }
@@ -501,7 +499,7 @@
       state = "error";
       show("接続できません", "err", ["options", ...(originals.size ? ["restore"] : []), "again"]);
     });
-    mine.postMessage({ blocks: ordered.map(({ id, text, uiLabel }) => ({ id, text, ...(uiLabel && { uiLabel }) })), visibleIds });
+    mine.postMessage({ blocks: ordered.map(({ id, text }) => ({ id, text })), visibleIds });
     // scroll はバブルしないので capture で、ページ内のスクロール領域も受ける。
     addEventListener("scroll", schedulePriority, true);
     addEventListener("resize", schedulePriority);

@@ -52,7 +52,6 @@ test("リンク・ボタン・強調の文字と要素を保ち、原文へ戻�
   let clicked = false;
   link.addEventListener("click", (e) => { e.preventDefault(); clicked = true; });
   assert.deepEqual(Array.from(p.blocks, (b) => b.text), ["Hello", "account", "today.", "Open"]);
-  assert.deepEqual(Array.from(p.blocks, (b) => b.uiLabel === true), [false, false, false, true]);
   const translations = ["こんにちは", "アカウント", "今日。", "開く"];
   for (const b of p.blocks) p.receive({ type: "block", id: b.id, text: translations[b.id], done: b.id + 1, total: 4 });
   assert.equal(link.textContent, "アカウント");
