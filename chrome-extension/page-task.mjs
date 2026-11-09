@@ -14,6 +14,18 @@ export function concurrencyLimit(config) {
   if (!Number.isSafeInteger(c?.max_in_flight) || c.max_in_flight < 1) return 1;
   return Math.min(PAGE_CONCURRENCY, c.max_in_flight);
 }
+const MAIN_TEXT_LENGTH = 300;
+const SHORT_TEXT_LENGTH = 60;
+const BATCH_SIZE = 4;
+
+function numberedTranslations(text, count) {
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.length !== count) return null;
+  const translations = lines.map((line, i) =>
+    line.match(new RegExp(`^\\s*${i + 1}[.．、]\\s*(\\S.*?)\\s*$`))?.[1]);
+  return translations.every(Boolean) ? translations : null;
+}
+
 const BUSY_TIMEOUT_MS = 60_000;
 const BUSY_RETRY_MS = 500;
 
@@ -125,47 +137,92 @@ export function runPageTask(port, deps) {
     let pending = [...todo];
     const completed = new Set();
     const running = new Map();
+    const runningIds = new Set();
+    const batchable = (block) => !priority.has(block.id) &&
+      block.text.length <= SHORT_TEXT_LENGTH && !/[\r\n]/.test(block.text) &&
+      !/^\s*\d/.test(block.text);
+    const batchEnabled = Array.isArray(visibleIds) && common.target_lang === "ja" &&
+      (!common.source_lang || common.source_lang === "en");
     let total = todo.length;
     let skipped = omitted;
     for (;;) {
       if (update) {
         const candidates = update.filter((b) => b && Number.isInteger(b.id) && typeof b.text === "string" &&
-          shouldTranslate(b.text) && !completed.has(b.id) && !running.has(b.id));
+          shouldTranslate(b.text) && !completed.has(b.id) && !runningIds.has(b.id));
         update = null;
-        pending = candidates.slice(0, Math.max(0, MAX_BLOCKS - done - running.size));
+        pending = candidates.slice(0, Math.max(0, MAX_BLOCKS - done - runningIds.size));
         skipped = candidates.length - pending.length;
-        total = done + running.size + pending.length;
+        total = done + runningIds.size + pending.length;
       }
       while (pending.length && running.size < concurrencyLimit(config) && !abort.signal.aborted) {
-        // 空いた枠へ、最新の表示順で次の箇所を送る。
+        // 画面内を優先し、それぞれの領域で長文を先に送る。
         let nextIndex = 0;
         let bestPriority = Infinity;
         for (let i = 0; i < pending.length; i++) {
-          const rank = priority.get(pending[i].id) ?? Infinity;
+          const block = pending[i];
+          const visible = priority.has(block.id);
+          const long = block.text.length >= MAIN_TEXT_LENGTH;
+          const tier = (visible ? 0 : 2) + (long ? 0 : 1);
+          const rank = tier * (priority.size + 1) + (priority.get(block.id) ?? 0);
           if (rank < bestPriority) {
             nextIndex = i;
             bestPriority = rank;
           }
         }
         const [block] = pending.splice(nextIndex, 1);
-        running.set(block.id, translateBlock(block, previous).then(
-          (result) => ({ id: block.id, result }),
-          (error) => ({ id: block.id, error }),
+        const group = [block];
+        if (batchEnabled && batchable(block)) {
+          const indices = [];
+          for (let i = nextIndex; i < pending.length && indices.length < BATCH_SIZE - 1; i++) {
+            if (batchable(pending[i])) indices.push(i);
+          }
+          if (indices.length === BATCH_SIZE - 1) {
+            group.push(...indices.map((index) => pending[index]));
+            for (const index of indices.reverse()) pending.splice(index, 1);
+          }
+        }
+        for (const member of group) runningIds.add(member.id);
+        running.set(block.id, translateGroup(group, previous).then(
+          (results) => ({ group, results }),
+          (error) => ({ group, error }),
         ));
       }
       if (!running.size) break;
       const finished = await Promise.race(running.values());
-      running.delete(finished.id);
+      running.delete(finished.group[0].id);
       if ("error" in finished) throw finished.error;
       if (abort.signal.aborted) return;
-      const result = finished.result;
-      previous = result.previous;
-      truncated += result.truncated;
-      done++;
-      completed.add(finished.id);
-      post({ type: "block", id: finished.id, text: result.text, done, total });
+      for (const [index, block] of finished.group.entries()) {
+        const result = finished.results[index];
+        runningIds.delete(block.id);
+        previous = result.previous;
+        truncated += result.truncated;
+        done++;
+        completed.add(block.id);
+        post({ type: "block", id: block.id, text: result.text, done, total });
+      }
     }
     post({ type: "done", total, truncated, omitted: skipped });
+
+    async function translateGroup(group, previous) {
+      if (group.length > 1) {
+        const text = group.map((block, i) => `${i + 1}. ${block.text}`).join("\n");
+        const res = await call("api/translate", JSON.stringify({ ...common, text, history: [] }), group[0].id);
+        let output = "";
+        const finish = await translateChunk(res, (part) => { output += part; });
+        const translations = finish === "stop" && numberedTranslations(output, group.length);
+        if (translations) return translations.map((text, i) => ({
+          text, previous: { source: group[i].text, target: text }, truncated: 0,
+        }));
+      }
+      const results = [];
+      for (const block of group) {
+        const result = await translateBlock(block, previous);
+        previous = result.previous;
+        results.push(result);
+      }
+      return results;
+    }
 
     async function translateBlock(block, previous) {
       let out = "";
