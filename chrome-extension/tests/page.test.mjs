@@ -373,3 +373,24 @@ test("ページ途中の表示IDを初回要求から優先し、画面外の200
   assert.equal(messages.at(-1).type, "done");
   assert.equal(server.requests.length, 250);
 });
+
+test("英語の定型ボタンだけを日本語に置換し、用語集を優先する", async () => {
+  const blocks = [
+    { id: 0, text: "Save changes", uiLabel: true },
+    { id: 1, text: "Save changes" },
+    { id: 2, text: "Save changes now", uiLabel: true },
+  ];
+  const server = fakeServer();
+  const messages = await runPage(blocks, server).finished;
+  assert.equal(messages.find((m) => m.type === "block" && m.id === 0).text, "変更を保存");
+  assert.deepEqual(server.requests.map(({ body }) => body.text), ["Save changes", "Save changes now"]);
+  assert.equal(messages.at(-1).total, 3);
+
+  for (const overrides of [{ glossary: "Save changes → 変更を確定" }, { target: "en" }, { source: "fr" }]) {
+    const fallback = fakeServer();
+    await runPage(blocks.slice(0, 1), fallback, {
+      settings: async () => ({ ...SETTINGS, ...overrides }),
+    }).finished;
+    assert.equal(fallback.requests.length, 1);
+  }
+});

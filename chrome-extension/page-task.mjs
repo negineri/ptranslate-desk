@@ -14,6 +14,20 @@ export function concurrencyLimit(config) {
   if (!Number.isSafeInteger(c?.max_in_flight) || c.max_in_flight < 1) return 1;
   return Math.min(PAGE_CONCURRENCY, c.max_in_flight);
 }
+// この試作用に作成した、英語のボタンラベルと定訳。
+const UI_LABELS_JA = new Map([
+  ["Back", "戻る"],
+  ["Next", "次へ"],
+  ["Close", "閉じる"],
+  ["Cancel", "キャンセル"],
+  ["Save changes", "変更を保存"],
+  ["Learn more", "詳しく見る"],
+  ["Sign in", "ログイン"],
+  ["Sign out", "ログアウト"],
+  ["Show more", "もっと見る"],
+  ["Show less", "表示を減らす"],
+]);
+
 const BUSY_TIMEOUT_MS = 60_000;
 const BUSY_RETRY_MS = 500;
 
@@ -168,6 +182,11 @@ export function runPageTask(port, deps) {
     post({ type: "done", total, truncated, omitted: skipped });
 
     async function translateBlock(block, previous) {
+      if (block.uiLabel === true && common.target_lang === "ja" &&
+          (!common.source_lang || common.source_lang === "en") && !common.glossary.length) {
+        const text = UI_LABELS_JA.get(block.text);
+        if (text) return { text, previous, truncated: 0 };
+      }
       let out = "";
       let truncated = 0;
       // 同じ箇所の分割は順番を保つ。別の箇所とは、送信時点の完了済みの訳を共有する。
