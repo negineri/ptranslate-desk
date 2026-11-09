@@ -9,11 +9,64 @@
     }
   };
   try {
-    step = "初回のモード選択";
-    await wait(() => $("mode-welcome") && !$("mode-welcome").hidden);
-    if (!$("welcome-local").disabled) {
-      $("welcome-local").click();
-      await wait(() => !$("local-options").hidden);
+    step = "初回ウィザード";
+    await wait(() => $("setup-wizard") && $("wizard-next").disabled);
+    const wizard = $("setup-wizard");
+    const currentStep = () => wizard.querySelector("[data-step]:not([hidden])")?.dataset.step;
+    if (!$("settings-page").inert || currentStep() !== "usage") throw new Error("初回画面");
+    const localChoice = wizard.querySelector('[data-profile="both"]');
+    if (!localChoice.disabled) {
+      localChoice.click();
+      $("wizard-next").click();
+      await wait(() => currentStep() === "license");
+      if (!$("wizard-next").disabled) throw new Error("ライセンス同意なしで進める");
+      $("wizard-license-agree").click();
+      $("wizard-next").click();
+      await wait(() => currentStep() === "model");
+      if (!$("wizard-next").disabled) throw new Error("モデル取得前に進める");
+      if (!$("wizard-model-description").textContent || !$("local-download").getClientRects().length) throw new Error("モデル取得画面の案内");
+      $("wizard-back").click();
+      $("wizard-back").click();
+    }
+    wizard.querySelector('[data-profile="server"]').click();
+    $("wizard-next").click();
+    await wait(() => currentStep() === "license");
+    if (!$("wizard-license-agree").checked) $("wizard-license-agree").click();
+    $("wizard-next").click();
+    await wait(() => currentStep() === "connection");
+    $("server-url").value = "https://wizard.example.com";
+    $("discovery-url").value = "https://auth.example.com/.well-known/openid-configuration";
+    $("wizard-next").click();
+    await wait(() => currentStep() === "login");
+    $("wizard-login").click();
+    await wait(() => !$("wizard-next").disabled);
+    $("wizard-next").click();
+    await wait(() => currentStep() === "shortcut");
+    if (!wizard.contains($("shortcut")) || $("shortcut").value !== "double-copy") throw new Error("ウィザードのショートカット設定");
+    $("wizard-next").click();
+    await wait(() => currentStep() === "done");
+    $("wizard-next").click();
+    await wait(() => !$("setup-wizard") && $("desktop-settings") && !document.querySelector("#translation-page section").inert);
+    if (await window.__TAURI__.core.invoke("setup_state") !== "done") throw new Error("初期設定完了の保存");
+    $("settings-tab").click();
+    $("desktop-settings").open = false;
+    if (!$("start-setup").closest(".settings-heading") || !$("start-setup").getClientRects().length) throw new Error("設定見出しの初期設定ボタン");
+    $("start-setup").click();
+    await wait(() => $("setup-wizard") && !$("wizard-close").hidden);
+    $("wizard-close").click();
+    await wait(() => !$("setup-wizard") && !$("settings-page").inert);
+    if (await window.__TAURI__.core.invoke("setup_state") !== "done") throw new Error("手動で開いたウィザードで完了状態が変わった");
+    $("server-active").click();
+    await wait(async () => !(await window.__TAURI__.core.invoke("session_status")).server_authenticated);
+    step = "初回の設定";
+    await wait(() => $("local-active") && $("connection-settings") && !$("settings-page").hidden);
+    if ($("mode-welcome") || $("mode-local") || $("account-menu")) throw new Error("旧設定が表示されている");
+    $("local-settings").open = false;
+    $("connection-settings").open = false;
+    if (!$("local-active").getClientRects().length || !$("server-active").getClientRects().length) throw new Error("折りたたみ時のスイッチ");
+    $("connection-settings").open = true;
+    $("local-settings").open = true;
+    if ((await window.__TAURI__.core.invoke("local_status")).supported) {
       $("local-download").click();
       if (!$("local-download-confirm").matches(":modal")) throw new Error("モデル取得の確認");
       $("local-decline-download").click();
@@ -25,9 +78,7 @@
       if (!rejectedDownload) throw new Error("確認なしで取得できてしまう");
       if (!$("local-setup").hidden) throw new Error("モデル取得前にデバイス・メモリ設定が表示される");
       if ($("local-auto-release").checked) throw new Error("自動解放の初期値");
-      $("mode-server").click();
-    } else $("welcome-server").click();
-    await wait(() => $("mode-welcome").hidden && !$("connection-settings").hidden);
+    }
     step = "ログイン前のヘッダー";
     await wait(() => $("version-badge")?.textContent.startsWith("v"));
     if (!$("version-badge").textContent.includes("0.0.0-dev")) throw new Error("開発版のバージョン");
@@ -44,47 +95,82 @@
     if (!$("settings-page").contains($("connection-form"))) throw new Error("接続先の配置");
     $("translation-tab").click();
     const connection = await window.__TAURI__.core.invoke("load_connection");
-    if (connection.server_url || connection.discovery_url || connection.client_id !== "translator-desktop") throw new Error("接続先の初期値");
+    if (connection.server_url !== "https://wizard.example.com" || connection.client_id !== "translator-desktop") throw new Error("ウィザードで設定した接続先");
     if ($("server-url").value !== connection.server_url) throw new Error("接続先の読み込み");
     let rejected = false;
     try {
       await window.__TAURI__.core.invoke("save_connection", { connection: { ...connection, server_url: "http://example.com" } });
     } catch { rejected = true; }
     if (!rejected) throw new Error("安全でない接続先を保存できてしまう");
-    step = "接続先の保存ボタンと確認";
+    step = "接続先の適用とキャンセル";
     $("settings-tab").click();
-    $("server-url").value = "http://translate.example.com";
+    const editConnection = () => {
+      $("server-url").value = "http://translate.example.com";
+      $("discovery-url").value = "https://auth.example.com/.well-known/openid-configuration";
+      $("server-url").dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    editConnection();
+    if ($("settings-apply").hidden || getComputedStyle($("settings-apply")).position !== "fixed") throw new Error("固定の適用ダイアログ");
+    $("cancel-settings").click();
+    if (!$("settings-apply").hidden || $("server-url").value !== connection.server_url ||
+        $("discovery-url").value !== connection.discovery_url) throw new Error("キャンセルで復元されない");
+    editConnection();
+    $("apply-settings").click();
+    await wait(() => $("settings-apply").textContent.includes("HTTPS") && !$("apply-settings").disabled);
+    if ((await window.__TAURI__.core.invoke("load_connection")).server_url !== connection.server_url) throw new Error("不正な接続先が保存された");
+    $("cancel-settings").click();
+    step = "接続先を再起動せずに適用";
+    $("connection-settings").open = true;
+    $("src").value = "Keep this text";
+    $("server-url").value = "https://translate.example.com";
     $("discovery-url").value = "https://auth.example.com/.well-known/openid-configuration";
-    $("save-connection").click();
-    if (!$("connection-confirm").matches(":modal")) throw new Error("保存の確認がモーダルで表示されない");
-    await wait(() => document.activeElement === $("cancel-connection"));
-    $("cancel-connection").click();
-    if ($("connection-confirm").open || $("connection-status").textContent) throw new Error("保存のキャンセル");
-    if (document.activeElement !== $("save-connection")) throw new Error("キャンセル後のフォーカス");
-    $("save-connection").click();
-    $("confirm-connection").click();
-    await wait(() => $("connection-status").classList.contains("err"));
-    if (!$("connection-status").textContent.includes("HTTPS")) throw new Error("保存ボタンから検証処理に進めない");
-    if ($("save-connection").disabled || $("connection-confirm").open) throw new Error("保存失敗後の再操作");
-    if ((await window.__TAURI__.core.invoke("load_connection")).server_url) throw new Error("不正な接続先が保存された");
-    $("server-url").value = connection.server_url;
-    $("discovery-url").value = connection.discovery_url;
+    $("server-url").dispatchEvent(new Event("input", { bubbles: true }));
+    $("apply-settings").click();
+    await wait(async () => $("settings-apply").hidden &&
+      (await window.__TAURI__.core.invoke("load_connection")).server_url === "https://translate.example.com");
+    if ($("src").value !== "Keep this text" || $("settings-page").hidden) throw new Error("適用で画面の状態を失った");
+    $("src").value = "";
     step = "ログイン";
-    await wait(() => [...document.querySelectorAll("button")].some((b) => b.textContent === "モックにログイン"));
-    [...document.querySelectorAll("button")].find((b) => b.textContent === "モックにログイン").click();
+    $("translation-tab").click();
+    $("destination-server").click();
+    if ($("settings-page").hidden || !$("app-header").contains($("destination-server")) ||
+        $("app-header").contains($("server-active"))) throw new Error("無効なサーバーから設定への導線");
+    await wait(() => $("server-active") && !$("server-active").disabled);
+    $("connection-settings").open = false;
+    $("server-active").click();
+    step = "サーバースイッチによるログイン";
+    await wait(() => $("destination-server").querySelector("small").textContent === "有効");
     await wait(() => !document.querySelector("section").inert);
     if ($("target").options.length < 53) throw new Error("言語一覧");
-    step = "ログイン後のユーザーメニュー";
-    if ($("account-menu").hidden || !$("who").textContent || !$("app-header").contains($("who"))) throw new Error(step);
-    $("account-menu").querySelector("summary").click();
-    if (!$("login-button").getClientRects().length || $("login-button").textContent !== "ログアウト") throw new Error(step);
+    step = "一時的な翻訳先";
+    const server = $("destination-server"), local = $("destination-local");
+    if (server.getAttribute("aria-pressed") !== "true" || server.querySelector("small").textContent !== "有効" ||
+        local.querySelector("small").textContent !== "無効") throw new Error("利用できる翻訳先");
+    const serverBounds = server.getBoundingClientRect(), localBounds = local.getBoundingClientRect();
+    if (serverBounds.width !== localBounds.width || serverBounds.top !== localBounds.top ||
+        getComputedStyle(server).borderColor === getComputedStyle(local).borderColor) throw new Error("翻訳先の表示");
+    let unavailable = false;
+    try {
+      await window.__TAURI__.core.invoke("start_request", {
+        id: "unavailable-local", route: "api/translate", body: null, localOverride: true,
+        stream: new window.__TAURI__.core.Channel(),
+      });
+    } catch { unavailable = true; }
+    if (!unavailable) throw new Error("ローカル翻訳が使えないときに要求を受け付けた");
+    $("src").value = "Keep the source";
     $("translation-tab").click();
-    if ($("account-menu").open) throw new Error("ユーザーメニューの外を押して閉じる");
+    local.click();
+    if ($("settings-page").hidden || $("local-options").hidden || $("src").value !== "Keep the source" ||
+        server.getAttribute("aria-pressed") !== "true" || $("connection-settings").hidden ||
+        document.activeElement !== $("local-settings-title")) throw new Error("無効なローカルから設定への導線");
+    $("src").value = "";
+    if (!$("server-active").checked || !$("server-settings-panel").contains($("server-active"))) throw new Error("サーバースイッチ");
+    $("translation-tab").click();
     step = "自動翻訳とストリーミング";
     $("src").value = "Hello Mac";
     $("src").dispatchEvent(new Event("input"));
+    await wait(() => !$("stop").hidden);
     await wait(() => $("out").textContent.includes("Hello"));
-    if ($("stop").hidden) throw new Error("ストリーミング");
     await wait(() => $("status").textContent === "訳し終わりました");
     if (!$("out").textContent.includes("[ja] Hello Mac")) throw new Error("訳文");
     step = "設定タブへの切り替えと翻訳の保持";
@@ -151,8 +237,10 @@
     await menu("main");
     await wait(async () => !(await snapshot()).popup_visible && (await snapshot()).requests === 0);
     step = "ログアウト";
-    await menu("logout");
-    await wait(async () => !(await invoke("session_status")).logged_in);
+    $("settings-tab").click();
+    $("connection-settings").open = true;
+    $("server-active").click();
+    await wait(async () => !(await invoke("session_status")).logged_in && !$("server-active").checked);
     let refused = false;
     try {
       await window.__TAURI__.core.invoke("start_request", {

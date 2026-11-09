@@ -3061,6 +3061,7 @@ dependencies = [
  "flate2",
  "getrandom 0.3.4",
  "keyring",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "reqwest 0.12.28",

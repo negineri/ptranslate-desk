@@ -222,7 +222,7 @@ pub fn schedule(app: &AppHandle) {
     if app.package_info().version.pre.as_str() == "dev"
         || cfg!(debug_assertions)
         || cfg!(feature = "smoke-test")
-        || app.state::<crate::Backend>().auth.is_mock()
+        || app.state::<crate::Backend>().auth().is_mock()
     {
         return;
     }

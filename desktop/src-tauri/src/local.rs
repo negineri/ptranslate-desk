@@ -1,5 +1,6 @@
 //! ローカル翻訳。推論を別プロセスで動かし、原文・訳を保存しない。
 mod benchmark;
+mod memory;
 mod parallel;
 pub mod resources;
 use crate::Message;
@@ -111,10 +112,11 @@ impl Drop for Process {
 }
 
 pub struct Local {
-    settings: Settings,
+    settings: Mutex<Settings>,
     process: Mutex<Option<Process>>,
     starting: tokio::sync::Mutex<()>,
     ready: AtomicBool,
+    active: AtomicBool,
     client: reqwest::Client,
     configured: AtomicBool,
     loading: AtomicBool,
@@ -173,7 +175,14 @@ struct ResumeAfterMeasurement(AppHandle);
 impl Drop for ResumeAfterMeasurement {
     fn drop(&mut self) {
         let handle = self.0.clone();
-        if !handle.state::<Local>().enabled() || handle.state::<Local>().settings.auto_release {
+        if !handle.state::<Local>().enabled()
+            || handle
+                .state::<Local>()
+                .settings
+                .lock()
+                .unwrap()
+                .auto_release
+        {
             return;
         }
         tauri::async_runtime::spawn(async move {
@@ -215,6 +224,13 @@ fn home(_app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|_| "モデルの保存先を取得できませんでした")?;
     Ok(base.join("com.witenp.ptranslate-desk").join("inference"))
 }
+pub(crate) fn check_temporary_local(app: &AppHandle) -> Result<(), String> {
+    if !resources::supported() {
+        return Err("この端末はローカル翻訳に対応していません".into());
+    }
+    installation(app).map(|_| ())
+}
+
 fn installation(app: &AppHandle) -> Result<Installation, String> {
     let path = home(app)?.join("installation.json");
     let bytes = fs::read(&path).map_err(|_| "ローカル翻訳のモデルをダウンロードしてください")?;
@@ -254,10 +270,11 @@ impl Local {
         }
         Ok(Self {
             slots: parallel::Slots::new(settings.parallel),
-            settings,
+            settings: Mutex::new(settings),
             process: Mutex::new(None),
             starting: tokio::sync::Mutex::new(()),
             ready: AtomicBool::new(false),
+            active: AtomicBool::new(true),
             client: reqwest::Client::builder()
                 .no_proxy()
                 .connect_timeout(Duration::from_secs(5))
@@ -274,7 +291,10 @@ impl Local {
         })
     }
     pub fn enabled(&self) -> bool {
-        self.settings.enabled
+        self.settings.lock().unwrap().enabled
+    }
+    pub fn active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
     }
     fn lease(&self) -> Lease<'_> {
         let mut activity = self.activity.lock().unwrap();
@@ -287,7 +307,9 @@ impl Local {
         self.process.lock().unwrap().take();
     }
     fn release_if_idle(&self, now: Instant) -> bool {
-        if !self.enabled() || !self.settings.auto_release {
+        if !self.ready.load(Ordering::SeqCst)
+            || (self.enabled() && !self.settings.lock().unwrap().auto_release)
+        {
             return false;
         }
         let Ok(_starting) = self.starting.try_lock() else {
@@ -296,7 +318,12 @@ impl Local {
         // 判定から停止まで同じロックを保持し、新しい要求のlease取得との隙間をなくす。
         // leaseは実行枠の待機前に取得するため、拡張を含む待機中の要求も保護する。
         let activity = self.activity.lock().unwrap();
-        if !should_release(activity.0, activity.1, now, self.settings.idle_minutes) {
+        if !should_release(
+            activity.0,
+            activity.1,
+            now,
+            self.settings.lock().unwrap().idle_minutes,
+        ) {
             return false;
         }
         self.stop();
@@ -306,7 +333,7 @@ impl Local {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let local = app.state::<Local>();
-            if local.enabled() && !local.settings.auto_release {
+            if local.enabled() && !local.settings.lock().unwrap().auto_release {
                 if let Err(error) = local.start(&app).await {
                     *local.error.lock().unwrap() = Some(error);
                 }
@@ -319,6 +346,9 @@ impl Local {
     }
     async fn start(&self, app: &AppHandle) -> Result<Endpoint, String> {
         let _starting = self.starting.lock().await;
+        if !self.active() {
+            return Err("設定でローカル翻訳をオンにしてください".into());
+        }
         {
             let mut slot = self.process.lock().unwrap();
             if self.ready.load(Ordering::SeqCst) {
@@ -373,12 +403,13 @@ impl Local {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if self.settings.device == "none" {
+        let device = self.settings.lock().unwrap().device.clone();
+        if device == "none" {
             cmd.args(["--device", "none", "--n-gpu-layers", "0"]);
         } else {
             cmd.args(["--n-gpu-layers", "99"]);
-            if self.settings.device != "auto" {
-                cmd.args(["--device", &self.settings.device]);
+            if device != "auto" {
+                cmd.args(["--device", &device]);
             }
         }
         let mut child = cmd
@@ -455,6 +486,7 @@ pub struct Status {
     measurement_completed: bool,
     chrome_error: Option<String>,
     enabled: bool,
+    active: bool,
     ready: bool,
     available: bool,
     device: String,
@@ -472,20 +504,22 @@ pub fn local_status(app: AppHandle) -> Status {
     let local = app.state::<Local>();
     let resources = installation(&app);
     let error = local.error.lock().unwrap().clone();
+    let settings = local.settings.lock().unwrap().clone();
     Status {
-        measurement_completed: local.settings.measurement_completed,
+        measurement_completed: settings.measurement_completed,
         chrome_error: crate::chrome_bridge::error(&app),
         enabled: local.enabled(),
+        active: local.active(),
         ready: local.ready.load(Ordering::SeqCst),
         available: resources.is_ok(),
-        device: local.settings.device.clone(),
+        device: settings.device,
         resource_error: resources.err(),
         configured: local.configured.load(Ordering::SeqCst)
             || crate::connection::load(&app).is_ok_and(|c| !c.server_url.is_empty()),
         supported: resources::supported(),
         loading: local.loading.load(Ordering::SeqCst),
-        auto_release: local.settings.auto_release,
-        idle_minutes: local.settings.idle_minutes,
+        auto_release: settings.auto_release,
+        idle_minutes: settings.idle_minutes,
         parallel: local.slots.limit(),
         error,
     }
@@ -509,6 +543,18 @@ pub fn open_model_information(window: WebviewWindow) -> Result<(), String> {
         .map_err(|_| "モデル情報のURLが不正です")?;
     crate::auth::open_browser(&url)
 }
+#[tauri::command]
+pub fn open_plamo_license(window: WebviewWindow, registration: Option<bool>) -> Result<(), String> {
+    require_main(&window)?;
+    let url = if registration == Some(true) {
+        "https://forms.gle/mTL8tBLrMYXKNZD56"
+    } else {
+        "https://plamo.preferredai.jp/info/plamo-community-license-ja"
+    };
+    let url = reqwest::Url::parse(url).map_err(|_| "ライセンスのURLが不正です")?;
+    crate::auth::open_browser(&url)
+}
+
 fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let path = settings_path(app)?;
     let dir = path.parent().ok_or("設定の保存先が不正です")?;
@@ -527,7 +573,7 @@ pub fn select_server_mode(app: AppHandle, window: WebviewWindow) -> Result<(), S
     if local.enabled() {
         return Err("モードを保存して再起動してください".into());
     }
-    persist_settings(&app, &local.settings)?;
+    persist_settings(&app, &local.settings.lock().unwrap())?;
     local.configured.store(true, Ordering::SeqCst);
     Ok(())
 }
@@ -537,11 +583,26 @@ pub struct Measurement {
     name: String,
     milliseconds: Option<u64>,
     error: Option<String>,
-    measuring_parallel: Option<usize>,
     recommended_parallel: Option<usize>,
-    bulk_per_second: Option<f64>,
     bulk_error: Option<String>,
     parallel_samples: Vec<benchmark::Sample>,
+}
+#[derive(Clone, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum MeasurementProgress {
+    Devices {
+        name: String,
+        completed: usize,
+        total: usize,
+    },
+    Parallel {
+        name: String,
+        parallel: usize,
+        candidate: usize,
+        candidates: usize,
+        completed: usize,
+        total: usize,
+    },
 }
 #[tauri::command]
 pub fn cancel_local_measurement(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
@@ -553,7 +614,7 @@ pub fn cancel_local_measurement(app: AppHandle, window: WebviewWindow) -> Result
 pub async fn measure_local_devices(
     app: AppHandle,
     window: WebviewWindow,
-    progress: Channel<Measurement>,
+    progress: Channel<MeasurementProgress>,
 ) -> Result<Vec<Measurement>, String> {
     require_main(&window)?;
     installation(&app)?;
@@ -597,14 +658,13 @@ pub async fn measure_local_devices(
         name: "CPU".into(),
     });
     let mut results = Vec::new();
-    for device in devices {
+    let total = devices.len();
+    for (completed, device) in devices.into_iter().enumerate() {
         progress
-            .send(Measurement {
-                id: device.id.clone(),
+            .send(MeasurementProgress::Devices {
                 name: device.name.clone(),
-                milliseconds: None,
-                error: None,
-                ..Measurement::default()
+                completed,
+                total,
             })
             .map_err(|_| "計測画面が閉じられました")?;
         let trial = Local::new(
@@ -619,6 +679,7 @@ pub async fn measure_local_devices(
         let result = tokio::select! {
             _ = local.measurement_cancel.canceled() => break,
             result = tokio::time::timeout(Duration::from_secs(45), async {
+                memory::check(&app, &device.id, 1).await?;
                 let endpoint = trial.start(&app).await?;
                 let (prompt, _) = prompt(&json!({"text":"This application translates text on your computer.","target_lang":"ja"}))?;
                 let started = Instant::now();
@@ -648,9 +709,6 @@ pub async fn measure_local_devices(
                 ..Measurement::default()
             },
         };
-        progress
-            .send(measurement.clone())
-            .map_err(|_| "計測画面が閉じられました")?;
         results.push(measurement);
     }
     results.sort_by_key(|r| r.milliseconds.unwrap_or(u64::MAX));
@@ -659,9 +717,6 @@ pub async fn measure_local_devices(
         if let Some(index) = benchmark::target(&results) {
             let gpu = &mut results[index];
             benchmark::measure(&app, &progress, gpu).await?;
-            progress
-                .send(gpu.clone())
-                .map_err(|_| "計測画面が閉じられました")?;
         }
     }
     drop(_starting);
@@ -692,48 +747,51 @@ fn parse_devices(text: &str) -> Vec<Device> {
         })
         .collect()
 }
+fn probe_output(cmd: &mut Command) -> Result<String, String> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| "確認用の処理を起動できませんでした")?;
+    #[cfg(target_os = "windows")]
+    let _job = match attach_job(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let started = Instant::now();
+    while matches!(child.try_wait(), Ok(None)) {
+        if started.elapsed() >= Duration::from_secs(10) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("確認用の処理がタイムアウトしました".into());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|_| "確認結果を取得できませんでした")?;
+    if !output.status.success() {
+        return Err("確認用の処理が失敗しました".into());
+    }
+    Ok(format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
 async fn list_devices(app: AppHandle) -> Result<Vec<Device>, String> {
     let install = installation(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let mut child = command(&install.engine)
-            .arg("--list-devices")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|_| "GPUの一覧を取得できませんでした")?;
-        #[cfg(target_os = "windows")]
-        let _job = match attach_job(&child) {
-            Ok(job) => job,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
-        let started = Instant::now();
-        while matches!(child.try_wait(), Ok(None)) {
-            if started.elapsed() >= Duration::from_secs(10) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("GPU一覧の取得がタイムアウトしました。CPUを選択できます".into());
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|_| "GPUの一覧を取得できませんでした")?;
-        if !output.status.success() {
-            return Err("GPUの初期化に失敗しました。CPUを選択してください".into());
-        }
-        let text = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let text = probe_output(command(&install.engine).arg("--list-devices"))?;
         Ok(parse_devices(&text))
     })
     .await
-    .map_err(|_| "GPUの一覧を取得できませんでした".to_string())?
+    .map_err(|_| "GPUの一覧を取得できませんでした".to_owned())?
 }
 #[tauri::command]
 pub async fn local_devices(app: AppHandle, window: WebviewWindow) -> Result<Vec<Device>, String> {
@@ -765,25 +823,39 @@ pub async fn save_local_settings(
     if !(1..=parallel::MAX_PARALLEL).contains(&settings.parallel) {
         return Err("同時に訳す数は1〜64で指定してください".into());
     }
+    let local = app.state::<Local>();
+    let _starting = local.starting.lock().await;
     persist_settings(&app, &settings)?;
-    crate::cancel_all(&app);
-    app.state::<Local>().stop();
-    app.request_restart();
+    crate::cancel_matching(&app, |request| request.local);
+    local.stop();
+    local.slots.resize(settings.parallel);
+    *local.settings.lock().unwrap() = settings;
+    local.configured.store(true, Ordering::SeqCst);
     Ok(())
 }
 #[tauri::command]
-pub async fn start_local_engine(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+pub async fn set_local_active(
+    app: AppHandle,
+    window: WebviewWindow,
+    active: bool,
+) -> Result<(), String> {
     require_main(&window)?;
-    if !app.state::<Local>().enabled() {
-        return Err("ローカルモードを有効にしてください".into());
-    }
     let local = app.state::<Local>();
-    let _lease = local.lease();
-    let result = local.start(&app).await.map(|_| ());
-    if let Err(error) = &result {
-        *local.error.lock().unwrap() = Some(error.clone());
+    if active {
+        check_temporary_local(&app)?;
+        local.active.store(true, Ordering::SeqCst);
+        let _lease = local.lease();
+        if let Err(error) = local.start(&app).await {
+            local.active.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
+    } else {
+        local.active.store(false, Ordering::SeqCst);
+        crate::cancel_matching(&app, |request| request.local);
+        let _starting = local.starting.lock().await;
+        local.stop();
     }
-    result
+    Ok(())
 }
 
 fn field(body: &Value, name: &str, limit: usize, required: bool) -> Result<String, String> {
@@ -930,6 +1002,9 @@ pub async fn request(
     let local = app.state::<Local>();
     if route == "api/config" {
         return json_response(stream, 200, configuration(&local)).await;
+    }
+    if !local.active() {
+        return json_response(stream, 503, json!({"error":"ローカル翻訳はオフです"})).await;
     }
     if route != "api/translate" {
         return json_response(stream, 404, json!({"error":"不明なAPIです"})).await;
@@ -1199,7 +1274,13 @@ mod tests {
 
     #[test]
     fn idle_release_respects_mode_and_auto_release_setting() {
-        for (enabled, auto_release) in [(false, true), (true, false)] {
+        // サーバーが既定の場合、一時的に起動したモデルはアイドル時に解放する。
+        for (enabled, auto_release, release) in [
+            (false, false, true),
+            (false, true, true),
+            (true, false, false),
+            (true, true, true),
+        ] {
             let local = Local::new(
                 Settings {
                     enabled,
@@ -1212,8 +1293,8 @@ mod tests {
             local.ready.store(true, Ordering::SeqCst);
             let now = Instant::now();
             local.activity.lock().unwrap().1 = now - Duration::from_secs(3600);
-            assert!(!local.release_if_idle(now));
-            assert!(local.ready.load(Ordering::SeqCst));
+            assert_eq!(local.release_if_idle(now), release);
+            assert_eq!(local.ready.load(Ordering::SeqCst), !release);
         }
     }
 

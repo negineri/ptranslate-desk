@@ -86,6 +86,8 @@ impl Resident {
 pub struct Status {
     local: bool,
     logged_in: bool,
+    server_authenticated: bool,
+    server_session_only: bool,
     paused: bool,
     shortcut: String,
     accessibility: bool,
@@ -110,17 +112,20 @@ pub fn session_status(app: AppHandle) -> Status {
     drop(ui);
     let logged_in = app.state::<Backend>().session.lock().unwrap().logged_in;
     let backend = app.state::<Backend>();
+    let auth = backend.auth();
     let auth_error = backend.auth_error.lock().unwrap().clone();
     Status {
         local: app.state::<crate::local::Local>().enabled(),
         logged_in,
+        server_authenticated: auth.is_authenticated(),
+        server_session_only: auth.session_only(),
         paused,
         shortcut,
         accessibility: accessibility(),
         copy_monitor,
         copy_events,
-        mock: backend.auth.is_mock(),
-        logging_in: backend.auth.is_busy(),
+        mock: auth.is_mock(),
+        logging_in: auth.is_busy(),
         auth_error,
     }
 }

@@ -2,7 +2,7 @@
 
 ブラウザで読んでいるページの文を、PTranslate のサーバーまたはこのPCで訳す Chrome 拡張です。
 サーバーモードはChrome 120以降と、EdgeなどのChromium系ブラウザで動きます。
-このPCで翻訳する連携はWindows x64のChrome向けです。
+このPCで翻訳する連携はWindows x64とmacOS 13.3以降（Apple Silicon・Intel）のGoogle Chrome向けです。
 
 - ページで文を選んで右クリック →「PTranslate で翻訳」、またはショートカット (既定は Alt+Shift+T) で、
   選んだ文の近くに訳を出します。PDF のビューアーや埋め込み画面を読み込めないページでは、小さいウィンドウで開きます
@@ -105,7 +105,7 @@ node chrome-extension/build.mjs
 node --test chrome-extension/tests/*.test.mjs
 ```
 
-## このPCで翻訳（Windows x64）
+## このPCで翻訳（Windows x64 / macOS）
 
 デスクトップのローカルモデルを利用できる。[設定手順](../docs/LOCAL_TRANSLATION.md#chrome拡張との連携)を参照。
 拡張にモデルをダウンロードする必要はない。デスクトップはローカルモードで起動しておく。

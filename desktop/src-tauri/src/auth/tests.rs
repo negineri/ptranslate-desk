@@ -355,6 +355,40 @@ async fn login_restore_rotation_and_revoke_use_discovery_and_secure_storage() {
 }
 
 #[tokio::test]
+async fn login_can_refresh_and_revoke_when_os_storage_rejects_writes() {
+    struct ReadOnlyVault;
+    impl Vault for ReadOnlyVault {
+        fn load(&self) -> Result<Option<Secret>, String> {
+            Ok(None)
+        }
+        fn save(&self, _: &str) -> Result<(), String> {
+            Err("書き込み不可".into())
+        }
+        fn clear(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    let fixture = Fixture::new().await;
+    let mut auth = fixture.auth();
+    auth.vault = Arc::new(ReadOnlyVault);
+    fixture.login(&auth).await;
+    assert!(auth.session_only());
+    assert!(auth.verify().await.unwrap().verified);
+    {
+        let mut credentials = auth.credentials.lock().await;
+        auth.refresh_locked(&mut credentials).await.unwrap();
+    }
+    assert!(auth.session_only());
+    auth.logout().await.unwrap();
+    assert!(!auth.is_authenticated());
+    assert!(auth.credentials.lock().await.session_refresh.is_none());
+    let model = fixture.state.lock().unwrap();
+    assert_eq!(model.refreshes, 1);
+    assert_eq!(model.revokes, 1);
+}
+
+#[tokio::test]
 async fn discovery_without_revocation_logs_out_locally() {
     let fixture = Fixture::new().await;
     fixture.state.lock().unwrap().no_revocation = true;

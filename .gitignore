@@ -9,3 +9,5 @@ dist/
 /desktop/macos-app.zip
 
 /desktop/release-app.zip
+
+.DS_Store

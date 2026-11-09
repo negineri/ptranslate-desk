@@ -19,7 +19,7 @@
     const begin = performance.now();
     if (state.auto_release) {
       if (state.ready) throw new Error("自動解放時に起動だけでモデルを読み込んでいる");
-      await invoke("start_local_engine");
+      await invoke("set_local_active", { active: true });
     } else {
       await wait(async () => (await invoke("local_status")).ready);
     }

@@ -341,6 +341,7 @@
       background: #ffffff; color: #1d2330; border: 1px solid #dde1e8; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
     .heading, .actions { display: flex; align-items: center; gap: 4px; }
     .heading strong { font-size: 12px; }
+    .model-credit { text-align: right; font-size: 11px; color: #576174; }
     .msg { flex: 1; min-width: 0; display: block; height: 20px; line-height: 20px; overflow: hidden; text-overflow: ellipsis;
       white-space: nowrap; text-align: left; font-variant-numeric: tabular-nums; }
     .actions { flex-wrap: wrap; min-height: 26px; }
@@ -353,6 +354,7 @@
     button[hidden] { display: none; }
     @media (prefers-color-scheme: dark) {
       .bar { background: #1d2128; color: #e7eaf0; border-color: #2e343e; }
+      .model-credit { color: #aab3c2; }
       button { border-color: #2e343e; } button.primary { background: #5b8ff0; color: #0d1117; border-color: #5b8ff0; }
       .err { color: #ef6b6b; } .ok { color: #4cc283; } .warn { color: #e3a33c; }
     }
@@ -369,6 +371,7 @@
       <button data-act="login">ログイン</button>
       <button data-act="options">設定</button>
     </div>
+    <footer class="model-credit">PLaMo 3 Translate</footer>
   </div>`;
   const $ = (sel) => shadow.querySelector(sel);
   const buttons = Object.fromEntries([...shadow.querySelectorAll("button")].map((b) => [b.dataset.act, b]));

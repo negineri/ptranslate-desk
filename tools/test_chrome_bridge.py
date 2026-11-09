@@ -1,4 +1,4 @@
-"""Windowsの中継モードをモックの名前付きパイプで確認する。登録と実モデルは使わない。"""
+"""中継モードをモックの名前付きパイプ・Unixソケットで確認する。"""
 
 import ctypes
 from ctypes import wintypes
@@ -6,8 +6,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 
@@ -27,9 +30,7 @@ def read_frame(stream):
     return json.loads(stream.read(length))
 
 
-def main():
-    if os.name != "nt":
-        raise RuntimeError("Windowsで実行してください")
+def test_windows():
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateNamedPipeW.restype = wintypes.HANDLE
     kernel.CreateNamedPipeW.argtypes = [
@@ -173,6 +174,83 @@ def main():
         finally:
             kernel.CloseHandle(pipe)
     print("中継EXE: フレーム・日本語・完了・切断による中止 PASS")
+
+
+def test_macos():
+    with tempfile.TemporaryDirectory(prefix="ptranslate-chrome-test-", dir="/tmp") as directory:
+        # 実行ファイルを分け、通常のアプリのソケットやChromeの登録を使わない。
+        binary = Path(directory, "ptranslate-desk").resolve()
+        shutil.copy2(BINARY.with_suffix(""), binary)
+        digest = hashlib.sha256(os.fsencode(binary)).hexdigest()[:32]
+        socket_dir = Path(f"/tmp/ptranslate-{os.geteuid()}-{digest}")
+        socket_dir.mkdir(mode=0o700)
+        try:
+            Path(directory, "com.witenp.ptranslate.json").write_text(
+                json.dumps({"path": str(binary), "allowed_origins": [ORIGIN]}), encoding="utf-8"
+            )
+            env = dict(os.environ, PTRANSLATE_SMOKE_CONFIG=directory)
+            denied = subprocess.run(
+                [str(binary), "chrome-extension://" + "b" * 32 + "/"],
+                env=env,
+                input=b"",
+                capture_output=True,
+                timeout=5,
+            )
+            assert denied.returncode == 1
+            assert json.loads(denied.stdout[4:]) == {"kind": "error"}
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(socket_dir / "bridge.sock"))
+                listener.listen()
+                listener.settimeout(5)
+                for cancel in (False, True):
+                    with subprocess.Popen(
+                        [str(binary), ORIGIN],
+                        env=env,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                    ) as host:
+                        watchdog = threading.Timer(10, host.kill)
+                        watchdog.start()
+                        try:
+                            request = {"version": 1, "route": "api/config", "body": None}
+                            body = json.dumps(request).encode()
+                            host.stdin.write(struct.pack("<I", len(body)) + body)
+                            host.stdin.flush()
+                            peer, _ = listener.accept()
+                            with peer, peer.makefile("rb") as wire:
+                                peer.settimeout(5)
+                                assert read_frame(wire) == request
+                                messages = [{"kind": "start", "status": 200}]
+                                if not cancel:
+                                    messages += [
+                                        {"kind": "bytes", "bytes": list("日本語".encode())},
+                                        {"kind": "end"},
+                                    ]
+                                for message in messages:
+                                    body = json.dumps(message).encode()
+                                    peer.sendall(struct.pack("<I", len(body)) + body)
+                                    assert read_frame(host.stdout) == message
+                                if cancel:
+                                    host.stdin.close()
+                                    assert wire.read(1) == b"", "中止がソケットへ届いていません"
+                                assert host.wait(timeout=5) == 0
+                        finally:
+                            watchdog.cancel()
+                            if host.poll() is None:
+                                host.kill()
+                                host.wait()
+        finally:
+            shutil.rmtree(socket_dir)
+    print("macOS中継: 未登録IDの拒否・フレーム・日本語・完了・切断による中止 PASS")
+
+
+def main():
+    if sys.platform == "darwin":
+        test_macos()
+    elif os.name == "nt":
+        test_windows()
+    else:
+        raise RuntimeError("WindowsまたはmacOSで実行してください")
 
 
 if __name__ == "__main__":
