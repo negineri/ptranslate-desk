@@ -366,12 +366,15 @@ for (const mode of ["local", "server"]) {
 }
 
 test("ページ途中の表示IDを初回要求から優先し、画面外の200段落を先に送らない", async () => {
-  const server = fakeServer({ config: () => Response.json({ ...CONFIG, concurrency: { max_in_flight: 1 } }) });
+  const server = fakeServer({
+    config: () => Response.json({ ...CONFIG, concurrency: { max_in_flight: 1 } }),
+    translate: ({ text }) => sse([{ t: text }, { done: true, finish: "stop" }]),
+  });
   const blocks = Array.from({ length: 250 }, (_, id) => ({ id, text: `Paragraph ${id}` }));
   const messages = await runPage(blocks, server, {}, [200, 201]).finished;
-  assert.deepEqual(server.requests.slice(0, 3).map((request) => request.body.text), ["Paragraph 200", "Paragraph 201", "Paragraph 0"]);
+  assert.deepEqual(server.requests.slice(0, 3).map((request) => request.body.text), ["Paragraph 200", "Paragraph 201", "1. Paragraph 0\n2. Paragraph 1\n3. Paragraph 2\n4. Paragraph 3"]);
   assert.equal(messages.at(-1).type, "done");
-  assert.equal(server.requests.length, 250);
+  assert.equal(server.requests.length, 64);
 });
 
 test("英語の定型ボタンだけを日本語に置換し、用語集を優先する", async () => {
@@ -393,4 +396,47 @@ test("英語の定型ボタンだけを日本語に置換し、用語集を優�
     }).finished;
     assert.equal(fallback.requests.length, 1);
   }
+});
+
+test("長文を画面内・画面外の各範囲で優先し、画面外の短文を4件まとめる", async () => {
+  const visibleLong = "A visible paragraph about the collection. ".repeat(9).trim();
+  const hiddenLong = "A paragraph farther down about the archive. ".repeat(9).trim();
+  const labels = ["Site Rules", "Recent Changes", "Research Notes", "Request Access"];
+  const server = fakeServer({
+    config: () => Response.json({ ...CONFIG, concurrency: { max_in_flight: 1 } }),
+    translate: ({ text }) => sse([
+      { t: text.startsWith("1. ") ? "1. 規則\n2. 変更\n3. ノート\n4. 申請" : "本文の訳" },
+      { done: true, finish: "stop" },
+    ]),
+  });
+  const blocks = [
+    { id: 0, text: "Visible label" },
+    { id: 1, text: visibleLong },
+    ...labels.map((text, index) => ({ id: index + 2, text })),
+    { id: 6, text: hiddenLong },
+  ];
+  const messages = await runPage(blocks, server, {}, [0, 1]).finished;
+  assert.deepEqual(server.requests.map(({ body }) => body.text), [
+    visibleLong, "Visible label", hiddenLong,
+    labels.map((label, index) => `${index + 1}. ${label}`).join("\n"),
+  ]);
+  assert.deepEqual(messages.filter((m) => m.type === "block").slice(-4).map(({ id, text }) => [id, text]),
+    [[2, "規則"], [3, "変更"], [4, "ノート"], [5, "申請"]]);
+  assert.equal(messages.at(-1).total, 7);
+});
+
+test("一括翻訳で番号が重複した場合はすべて個別に訳し直す", async () => {
+  const labels = ["Site Rules", "Recent Changes", "Research Notes", "Request Access"];
+  const blocks = labels.map((text, id) => ({ id, text }));
+  const server = fakeServer({
+    translate: ({ text }) => sse([
+      { t: text.startsWith("1. ") ? "1. 規則\n2. 変更\n2. ノート\n4. 申請" : `訳 ${text}` },
+      { done: true, finish: "stop" },
+    ]),
+  });
+  const messages = await runPage(blocks, server, {}, []).finished;
+  assert.equal(server.requests.length, 5);
+  assert.deepEqual(server.requests.slice(1).map(({ body }) => body.text), labels);
+  assert.deepEqual(messages.filter((m) => m.type === "block").map(({ text }) => text),
+    labels.map((label) => `訳 ${label}`));
 });
