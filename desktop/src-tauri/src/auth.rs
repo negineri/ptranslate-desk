@@ -85,6 +85,7 @@ struct Access {
 #[derive(Default)]
 struct Credentials {
     access: Option<Access>,
+    session_refresh: Option<Secret>,
     discovery: Option<Discovery>,
     initialized: bool,
 }
@@ -98,6 +99,7 @@ pub struct Auth {
     credentials: Mutex<Credentials>,
     cancellation: watch::Sender<u64>,
     authenticated: AtomicBool,
+    session_only: AtomicBool,
     busy: AtomicBool,
     mock: bool,
     changed: tokio::sync::Notify,
@@ -141,6 +143,7 @@ impl Auth {
             credentials: Mutex::new(Credentials::default()),
             cancellation: watch::channel(0).0,
             authenticated: AtomicBool::new(false),
+            session_only: AtomicBool::new(false),
             busy: AtomicBool::new(false),
             mock,
             changed: tokio::sync::Notify::new(),
@@ -152,6 +155,9 @@ impl Auth {
     pub fn is_authenticated(&self) -> bool {
         self.authenticated.load(Ordering::SeqCst)
     }
+    pub fn session_only(&self) -> bool {
+        self.is_authenticated() && self.session_only.load(Ordering::SeqCst)
+    }
     pub fn is_busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
     }
@@ -161,7 +167,9 @@ impl Auth {
     }
 
     pub fn begin_connection_change(&self) -> Result<ConnectionChange<'_>, String> {
-        if self.mock {
+        let isolated_test =
+            cfg!(feature = "smoke-test") && std::env::var_os("PTRANSLATE_SMOKE_CONFIG").is_some();
+        if self.mock && !isolated_test {
             return Err("モック実行中は接続先を変更できません".into());
         }
         self.busy
@@ -248,7 +256,17 @@ impl Auth {
         let expires = Instant::now()
             .checked_add(Duration::from_secs(reply.expires_in))
             .ok_or("ログインの有効期限が不正です")?;
-        self.vault.save(refresh)?;
+        credentials.session_refresh = if (previous.is_some()
+            && credentials.session_refresh.is_some())
+            || self.vault.save(refresh).is_err()
+        {
+            Some(Zeroizing::new(refresh.to_owned()))
+        } else {
+            None
+        };
+        self.session_only
+            .store(credentials.session_refresh.is_some(), Ordering::SeqCst);
+        credentials.initialized = true;
         credentials.access = Some(Access {
             value: Zeroizing::new(reply.access_token),
             expires,
@@ -260,7 +278,10 @@ impl Auth {
 
     async fn refresh_locked(&self, credentials: &mut Credentials) -> Result<(), String> {
         let epoch = *self.cancellation.borrow();
-        let previous = self.vault.load()?.ok_or(LOGIN_REQUIRED)?;
+        let previous = match &credentials.session_refresh {
+            Some(value) => value.clone(),
+            None => self.vault.load()?.ok_or(LOGIN_REQUIRED)?,
+        };
         let discovery = self.discovery(credentials).await?;
         let reply = self
             .exchange(
@@ -282,6 +303,8 @@ impl Auth {
         self.authenticated.store(false, Ordering::SeqCst);
         self.changed.notify_one();
         credentials.access = None;
+        credentials.session_refresh = None;
+        self.session_only.store(false, Ordering::SeqCst);
         if self.mock {
             Ok(())
         } else {
@@ -314,9 +337,7 @@ impl Auth {
         open: impl FnOnce(&Url) -> Result<(), String>,
     ) -> Result<(), String> {
         if !self.mock && !self.is_configured() {
-            return Err(
-                "設定でサーバーURLとOIDC discovery URLを入力し、保存して再起動してください".into(),
-            );
+            return Err("設定でサーバーURLとOIDC discovery URLを入力し、適用してください".into());
         }
         if self.busy.swap(true, Ordering::SeqCst) {
             return Err("ログインを待っています".into());
@@ -410,15 +431,18 @@ impl Auth {
         // 更新処理が終わってから最新のrefresh tokenを読み、再認証も止める。
         self.authenticated.store(false, Ordering::SeqCst);
         credentials.initialized = true;
-        let refresh = self.vault.load();
+        let refresh = match credentials.session_refresh.take() {
+            Some(value) => Ok(Some(value)),
+            None => self.vault.load(),
+        };
         credentials.access = None;
+        self.session_only.store(false, Ordering::SeqCst);
         let cleared = self.vault.clear();
         let refresh = refresh?;
-        cleared?;
         if let Some(refresh) = refresh {
             let discovery = self.discovery(&mut credentials).await?;
             let Some(revocation_endpoint) = &discovery.revocation_endpoint else {
-                return Ok(());
+                return cleared;
             };
             let response = self
                 .client
@@ -440,7 +464,7 @@ impl Auth {
                 );
             }
         }
-        Ok(())
+        cleared
     }
 
     pub async fn renew_if_needed(&self) -> Result<(), String> {

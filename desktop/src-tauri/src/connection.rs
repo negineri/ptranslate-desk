@@ -101,11 +101,15 @@ pub async fn save_connection(
     app: AppHandle,
     window: WebviewWindow,
     connection: Connection,
-) -> Result<(), String> {
+) -> Result<Connection, String> {
     require_main(&window)?;
     let connection = connection.validated()?;
     let backend = app.state::<crate::Backend>();
-    let _changing = backend.auth.begin_connection_change()?;
+    let auth = backend.auth();
+    let changing = auth.begin_connection_change()?;
+    if !std::sync::Arc::ptr_eq(&auth, &backend.auth()) {
+        return Err("接続先が変更されました。もう一度適用してください".into());
+    }
     let destination = path(&app)?;
     let parent = destination.parent().ok_or("接続先設定の保存先が不正です")?;
     fs::create_dir_all(parent).map_err(|_| "接続先設定を保存できませんでした")?;
@@ -113,16 +117,26 @@ pub async fn save_connection(
         tempfile::NamedTempFile::new_in(parent).map_err(|_| "接続先設定を保存できませんでした")?;
     serde_json::to_writer(&mut file, &connection)
         .map_err(|_| "接続先設定を保存できませんでした")?;
-    crate::cancel_all(&app);
-    if let Err(error) = backend.auth.logout().await {
+    crate::cancel_matching(&app, |request| !request.local);
+    if let Err(error) = auth.logout().await {
+        drop(changing);
         crate::publish_auth(&app, Some(error.clone()));
         return Err(error);
     }
     if file.persist(&destination).is_err() {
+        drop(changing);
         crate::publish_auth(&app, None);
         return Err("接続先設定を保存できませんでした。もう一度ログインしてください".into());
     }
-    app.restart();
+    *backend.auth_error.lock().unwrap() = None;
+    backend
+        .auth
+        .send_replace(std::sync::Arc::new(crate::auth::Auth::with_connection(
+            backend.client.clone(),
+            connection.clone(),
+        )));
+    crate::publish_auth(&app, None);
+    Ok(connection)
 }
 
 #[cfg(test)]

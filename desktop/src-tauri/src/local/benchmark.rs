@@ -1,73 +1,83 @@
 //! 初期設定用のGPU並列数計測。利用者の文章は使わない。
 use super::*;
 
-// ページの短い項目・見出し・短い段落を混ぜた合成データ。外部サイトの本文は保存しない。
-const SHORT_TEXTS: &[&str] = &[
-    "Home",
-    "Search",
-    "Sign in",
-    "Create account",
-    "Help",
-    "Contact us",
-    "About this site",
-    "Latest updates",
-    "Read more",
-    "Next page",
-    "Previous page",
-    "Contents",
-    "Discussion",
-    "Page history",
-    "Related articles",
-    "Privacy policy",
-    "Terms of use",
-    "Share this page",
-    "Print version",
-    "Download",
-    "Edit page",
-    "View source",
-    "Back to top",
-    "All categories",
-    "Recent changes",
-    "Community",
-    "Support",
-    "Settings",
-    "Language",
-    "Accessibility",
-    "Overview",
-    "Introduction",
-    "Background",
-    "Summary",
-    "References",
-    "Further reading",
-    "New research",
-    "Local news",
-    "Public transport",
-    "Education",
-    "Science",
-    "Technology",
-    "Open today",
-    "Updated yesterday",
-    "Published this week",
-    "More information",
-    "Frequently asked questions",
-    "Return to the article",
-    "Library extends its opening hours",
-    "New bus routes will connect local schools",
-    "Researchers publish their latest findings",
-    "Community meeting scheduled for next month",
-    "Public gardens reopen after maintenance",
-    "Weather conditions may affect weekend services",
-    "The library opens at nine in the morning. Please return your books on time.",
-    "This application translates text on your computer while keeping the original links and formatting.",
-    "Residents can attend the public meeting to ask questions and share their views.",
-    "The research team compared energy use in schools, libraries, and hospitals over several years.",
-    "The new routes will connect residential areas with schools and the central railway station.",
-    "Please check the revised schedule before planning your journey to the city centre.",
-    "The report recommends gradual improvements and regular maintenance of existing equipment.",
-    "Readers can follow the links below to find the original report and supporting documents.",
-    "Construction is expected to begin next spring after the public consultation has finished.",
-    "Local authorities will review the findings before deciding how to distribute the budget.",
+// 1リクエストあたり約1,500字の合成英文。同じ12件を全候補で使う。
+const TOPICS: [(&str, &str, &str); 12] = [
+    (
+        "the coastal library",
+        "older residents",
+        "the reading rooms",
+    ),
+    (
+        "the railway museum",
+        "school groups",
+        "the exhibition halls",
+    ),
+    (
+        "the public garden",
+        "neighborhood volunteers",
+        "the outdoor paths",
+    ),
+    (
+        "the municipal archive",
+        "local historians",
+        "the reference desks",
+    ),
+    (
+        "the arts center",
+        "independent artists",
+        "the rehearsal studios",
+    ),
+    (
+        "the ferry terminal",
+        "island commuters",
+        "the boarding areas",
+    ),
+    (
+        "the community market",
+        "small vendors",
+        "the covered stalls",
+    ),
+    (
+        "the science center",
+        "visiting families",
+        "the demonstration spaces",
+    ),
+    (
+        "the city observatory",
+        "student researchers",
+        "the viewing platforms",
+    ),
+    ("the sports center", "youth teams", "the practice courts"),
+    (
+        "the concert hall",
+        "visiting musicians",
+        "the rehearsal rooms",
+    ),
+    (
+        "the public workshop",
+        "local craftspeople",
+        "the work benches",
+    ),
 ];
+
+fn passages() -> Vec<String> {
+    TOPICS.iter().map(|(place, people, spaces)| format!(
+        "The planning team at {place} began a six month review after a series of meetings with {people}. \
+         The first report described how {spaces} were used on weekdays and how demand changed when the weather was poor. \
+         Staff members recorded the hours when {people} arrived and noted which services were most frequently requested. \
+         Several respondents explained that a small improvement in the signs would make it easier to find the correct entrance without asking for help. \
+         The committee considered moving some activities out of {spaces} so that maintenance could take place during quieter periods. \
+         It also asked the finance team to compare the cost of short term repairs with the expense of a more substantial renovation. \
+         Instead of accepting the first estimate, managers invited {people} to review a second proposal during an open meeting. \
+         Participants pointed out that different users often need the same facilities at different times and that a single schedule would not suit everyone. \
+         The next draft sets aside additional time for {people} and introduces a simple system for reporting delays or cancelled sessions. \
+         An independent reviewer will check the results after the first month and publish a short account of what worked and what still needs attention. \
+         The team will then decide whether to extend the arrangement at {place} or revise the plan before the next season begins."
+    )).collect()
+}
+
+const WARMUP: &str = "Please place the blue cup near the window.";
 
 pub(super) fn target(results: &[Measurement]) -> Option<usize> {
     results
@@ -82,6 +92,7 @@ pub(super) fn target(results: &[Measurement]) -> Option<usize> {
 pub struct Sample {
     parallel: usize,
     requests_per_second: f64,
+    memory: memory::Estimate,
 }
 
 // 最高速度の95%以上を出せる最小値を選び、わずかな差のために枠を増やさない。
@@ -100,16 +111,9 @@ fn recommendation(samples: &[Sample]) -> Option<&Sample> {
 async fn translate(
     client: &reqwest::Client,
     endpoint: &Endpoint,
-    index: usize,
-    history: Option<(String, String)>,
+    text: &str,
 ) -> Result<String, String> {
-    let texts = SHORT_TEXTS;
-    let text = texts[index % texts.len()];
-    let history: Vec<_> = history
-        .into_iter()
-        .map(|(source, target)| json!({"source":source,"target":target}))
-        .collect();
-    let (prompt, limit) = prompt(&json!({"text":text,"target_lang":"ja","history":history}))?;
+    let (prompt, limit) = prompt(&json!({"text":text,"target_lang":"ja"}))?;
     let mut response = completion_request(client, endpoint, prompt, limit)
         .send()
         .await
@@ -143,58 +147,75 @@ async fn batch(
     client: &reqwest::Client,
     endpoint: &Endpoint,
     parallel: usize,
+    texts: Arc<Vec<String>>,
+    on_progress: impl Fn(usize) -> Result<(), String>,
 ) -> Result<f64, String> {
-    // 短文は3文×64セッション。同じ192件をすべての並列数で処理する。
-    let requests = 192;
-    let session_size = 3;
-    let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let previous = Arc::new(Mutex::new(None));
+    use std::sync::atomic::AtomicUsize;
+    let next = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let total = texts.len();
     let started = Instant::now();
     let mut workers = tokio::task::JoinSet::new();
     for _ in 0..parallel {
         let client = client.clone();
         let endpoint = endpoint.clone();
         let next = next.clone();
-        let previous = previous.clone();
+        let completed = completed.clone();
+        let texts = texts.clone();
         workers.spawn(async move {
             loop {
-                let start = next.fetch_add(session_size, Ordering::SeqCst);
-                if start >= requests {
-                    break;
-                }
-                for index in start..start + session_size {
-                    // page-task.mjsと同様に、送信時点で最後に完了した訳を全ワーカーで共有。
-                    let history = previous.lock().unwrap().clone();
-                    let translated = translate(&client, &endpoint, index, history).await?;
-                    let texts = SHORT_TEXTS;
-                    *previous.lock().unwrap() =
-                        Some((texts[index % texts.len()].to_owned(), translated));
-                }
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(text) = texts.get(index) else { break };
+                translate(&client, &endpoint, text).await?;
+                completed.fetch_add(1, Ordering::Relaxed);
             }
             Ok::<_, String>(())
         });
     }
-    while let Some(result) = workers.join_next().await {
-        result.map_err(|_| "並列計測が終了しました")??;
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    while !workers.is_empty() {
+        tokio::select! {
+            result = workers.join_next() => {
+                if let Some(result) = result {
+                    result.map_err(|_| "並列計測が終了しました")??;
+                }
+            }
+            _ = interval.tick() => on_progress(completed.load(Ordering::Relaxed))?,
+        }
     }
-    Ok(requests as f64 / started.elapsed().as_secs_f64().max(0.001))
+    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+    on_progress(total)?;
+    Ok(total as f64 / elapsed)
 }
 
 async fn sweep(
     samples: &mut Vec<Sample>,
     trial: &Local,
     app: &AppHandle,
-    progress: &Channel<Measurement>,
+    progress: &Channel<MeasurementProgress>,
     measurement: &Measurement,
 ) -> Result<(), String> {
     let mut stagnant = 0;
-    for parallel in [1, 2, 4, 8, 12, 16, 24, 32, 48, 64] {
-        let mut update = measurement.clone();
-        update.measuring_parallel = Some(parallel);
-        progress
-            .send(update)
-            .map_err(|_| "計測画面が閉じられました")?;
+    let candidates = [1, 2, 4, 8, 12];
+    let texts = Arc::new(passages());
+    for (index, parallel) in candidates.into_iter().enumerate() {
+        let report = |completed, total| {
+            progress
+                .send(MeasurementProgress::Parallel {
+                    name: measurement.name.clone(),
+                    parallel,
+                    candidate: index + 1,
+                    candidates: candidates.len(),
+                    completed,
+                    total,
+                })
+                .map_err(|_| "計測画面が閉じられました".to_owned())
+        };
+        report(0, 0)?;
         trial.stop();
+        let memory = memory::check(app, &measurement.id, parallel)
+            .await
+            .map_err(|error| format!("{parallel}並列: {error}"))?;
         trial.slots.resize(parallel);
         // 保存値を変えず、候補の枠数だけを変えて起動する。
         let endpoint = tokio::time::timeout(Duration::from_secs(45), trial.start(app))
@@ -203,17 +224,32 @@ async fn sweep(
         // 起動直後の初回推論を計測から除外。準備完了後の異常終了もここで検出する。
         tokio::time::timeout(
             Duration::from_secs(15),
-            translate(&trial.client, &endpoint, 1000, None),
+            translate(&trial.client, &endpoint, WARMUP),
         )
         .await
         .map_err(|_| "並列計測の準備がタイムアウトしました")??;
-        let speed = tokio::time::timeout(Duration::from_secs(60), async {
-            let first = batch(&trial.client, &endpoint, parallel).await?;
-            let second = batch(&trial.client, &endpoint, parallel).await?;
+        let speed = tokio::time::timeout(Duration::from_secs(90), async {
+            let total = texts.len() * 2;
+            let first = batch(
+                &trial.client,
+                &endpoint,
+                parallel,
+                texts.clone(),
+                |completed| report(completed, total),
+            )
+            .await?;
+            let second = batch(
+                &trial.client,
+                &endpoint,
+                parallel,
+                texts.clone(),
+                |completed| report(texts.len() + completed, total),
+            )
+            .await?;
             Ok::<_, String>(2. / (1. / first + 1. / second))
         })
         .await
-        .map_err(|_| "60秒以内に並列計測を完了できませんでした")??;
+        .map_err(|_| "90秒以内に並列計測を完了できませんでした")??;
         let best = samples
             .iter()
             .map(|s| s.requests_per_second)
@@ -222,6 +258,7 @@ async fn sweep(
         samples.push(Sample {
             parallel,
             requests_per_second: speed,
+            memory,
         });
         // 小さい並列数での一時的な揺れを許し、伸びない候補が2回続いたら打ち切る。
         if parallel >= 8 && stagnant >= 2 {
@@ -233,7 +270,7 @@ async fn sweep(
 
 pub async fn measure(
     app: &AppHandle,
-    progress: &Channel<Measurement>,
+    progress: &Channel<MeasurementProgress>,
     measurement: &mut Measurement,
 ) -> Result<(), String> {
     let local = app.state::<Local>();
@@ -259,7 +296,6 @@ pub async fn measure(
     }
     if let Some(best) = recommendation(&samples) {
         measurement.recommended_parallel = Some(best.parallel);
-        measurement.bulk_per_second = Some(best.requests_per_second);
     }
     measurement.bulk_error = result.err();
     measurement.parallel_samples = samples;
@@ -322,7 +358,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        assert!(translate(&reqwest::Client::new(), &endpoint, 0, None)
+        assert!(translate(&reqwest::Client::new(), &endpoint, WARMUP)
             .await
             .is_err());
         server.await.unwrap();
@@ -334,6 +370,7 @@ mod tests {
                 Sample {
                     parallel,
                     requests_per_second,
+                    memory: memory::Estimate::default(),
                 }
             });
         assert_eq!(recommendation(&samples).unwrap().parallel, 24);
@@ -344,13 +381,14 @@ mod tests {
         let samples = [(1, 5.), (2, 9.), (4, 12.)].map(|(parallel, requests_per_second)| Sample {
             parallel,
             requests_per_second,
+            memory: memory::Estimate::default(),
         });
         assert_eq!(recommendation(&samples).unwrap().parallel, 4);
     }
     #[tokio::test]
     async fn batch_runs_real_concurrent_requests_against_a_local_mock() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        for parallel in [1, 12, 64] {
+        for parallel in [1, 4, 12] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = Endpoint {
                 url: format!("http://{}", listener.local_addr().unwrap()),
@@ -360,15 +398,21 @@ mod tests {
             let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let seen = Arc::new(Mutex::new(std::collections::HashMap::<String, usize>::new()));
-            let history_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let (seen_server, history_server) = (seen.clone(), history_count.clone());
+            let seen_server = seen.clone();
+            let texts = Arc::new(passages());
+            assert_eq!(texts.len(), 12);
+            assert!(texts
+                .iter()
+                .all(|text| (1_400..=1_550).contains(&text.len())));
+            let server_texts = texts.clone();
             let (a, p, c) = (active.clone(), peak.clone(), count.clone());
             let server = tokio::spawn(async move {
                 let mut connections = tokio::task::JoinSet::new();
-                for _ in 0..192 {
+                for _ in 0..server_texts.len() {
                     let (mut stream, _) = listener.accept().await.unwrap();
                     let (a, p, c) = (a.clone(), p.clone(), c.clone());
-                    let (seen, history_count) = (seen_server.clone(), history_server.clone());
+                    let seen = seen_server.clone();
+                    let texts = server_texts.clone();
                     connections.spawn(async move {
                         let mut data = Vec::new();
                         let mut buffer = [0; 4096];
@@ -393,13 +437,9 @@ mod tests {
                                         serde_json::from_slice(&data[end + 4..end + 4 + length])
                                             .unwrap();
                                     let prompt = body["prompt"].as_str().unwrap();
-                                    let texts = SHORT_TEXTS;
                                     assert_eq!(body["stream"], true);
                                     assert!(body.get("cache_prompt").is_none());
-                                    assert!(texts.iter().any(|text| prompt.contains(text)));
-                                    if prompt.matches("<|plamo:tag|>input").count() > 1 {
-                                        history_count.fetch_add(1, Ordering::SeqCst);
-                                    }
+                                    assert!(texts.iter().any(|text| prompt.contains(text.as_str())));
                                     let current = prompt.rsplit("<|plamo:tag|>input<|plamo:msg|>").next().unwrap()
                                         .split("<|plamo:tag|>output").next().unwrap();
                                     *seen.lock().unwrap().entry(current.to_owned()).or_default() += 1;
@@ -425,25 +465,29 @@ mod tests {
                 }
             });
             assert!(
-                batch(&reqwest::Client::new(), &endpoint, parallel)
-                    .await
-                    .unwrap()
+                batch(
+                    &reqwest::Client::new(),
+                    &endpoint,
+                    parallel,
+                    texts.clone(),
+                    |_| Ok(())
+                )
+                .await
+                .unwrap()
                     > 0.
             );
             server.await.unwrap();
-            assert_eq!(count.load(Ordering::SeqCst), 192);
+            assert_eq!(count.load(Ordering::SeqCst), texts.len());
             assert!(peak.load(Ordering::SeqCst) >= 1);
             if parallel > 1 {
                 assert!(peak.load(Ordering::SeqCst) > 1);
             }
             assert!(peak.load(Ordering::SeqCst) <= parallel);
-            let texts = SHORT_TEXTS;
             let counts = seen.lock().unwrap();
             assert_eq!(counts.len(), texts.len());
-            for text in texts {
-                assert_eq!(counts.get(*text), Some(&3));
+            for text in texts.iter() {
+                assert_eq!(counts.get(text), Some(&1));
             }
-            assert!(history_count.load(Ordering::SeqCst) >= (192) - parallel);
         }
     }
 }

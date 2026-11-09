@@ -18,6 +18,7 @@
         "create": false,
         "title": "PTranslate Desk",
         "width": 1120,
+        "minWidth": 640,
         "height": 760
       },
       {

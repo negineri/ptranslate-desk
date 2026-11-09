@@ -30,8 +30,8 @@ ${css(settings)}
 ${css(connection)}
 ${css(local)}
 /* ここから下は確認用のツールバー。アプリ本体のデザインとは独立しています。 */
-html[data-theme="light"] { --bg:#f6f7f9;--panel:#fff;--text:#1d2330;--muted:#5d6576;--line:#dde1e8;--accent:#2f6fde;--accent-text:#fff;--ok:#1f8a4c;--warn:#b26a00;--err:#c43c3c; }
-html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9aa3b2;--line:#2e343e;--accent:#5b8ff0;--accent-text:#0d1117;--ok:#4cc283;--warn:#e3a33c;--err:#ef6b6b; }
+html[data-theme="light"] { --bg:#f6f7f9;--panel:#fff;--text:#1d2330;--muted:#5d6576;--line:#dde1e8;--accent:#2f6fde;--accent-text:#fff;--accent-soft:#e9f0fd;--desktop-link:#2459b5;--ok:#1f8a4c;--warn:#b26a00;--err:#c43c3c; }
+html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9aa3b2;--line:#2e343e;--accent:#5b8ff0;--accent-text:#0d1117;--accent-soft:#2c3e63;--desktop-link:#a8c7ff;--ok:#4cc283;--warn:#e3a33c;--err:#ef6b6b; }
 .preview-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
 .preview-toolbar label { display:flex; align-items:center; gap:6px; font-size:13px; }
 .preview-toolbar p { margin:0; font-size:12px; color:var(--muted); }
@@ -44,7 +44,7 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
 <nav class="preview-toolbar" aria-label="デザイン確認ツール">
   <strong>デザイン確認</strong>
   <label>状態<select id="preview-scene">
-    <option value="welcome">初回のモード選択</option><option value="server">サーバー設定</option>
+    <option value="server">サーバー設定</option>
     <option value="missing">モデル未取得</option><option value="confirm">ダウンロード確認</option>
     <option value="downloading">ダウンロード中</option><option value="measuring">デバイス計測中</option>
     <option value="candidates">デバイス候補・手動選択</option><option value="memory">メモリ自動解放</option>
@@ -60,17 +60,17 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
     <h1><img class="brand-mark" src="data:image/png;base64,${logo}" width="32" height="32" alt="">PTranslate Desk</h1>
     <div id="header-updates"><details id="update-menu"><summary id="version-badge">v0.0.0-dev · 開発用</summary><div class="header-popover"><span class="hint">デザイン確認用</span><button type="button">更新を確認</button></div></details></div>
     <p class="sub">PLaMo 3 Translate</p>
-    <div id="header-account"><details id="account-menu"><summary><span id="who">この端末</span></summary><div class="header-popover"><button id="preview-server-switch">サーバーモードに切り替え</button></div></details></div>
+    <div id="header-account"><div id="translation-destinations">${template(transport, "mode")}</div></div>
   </header>
   <p id="local-runtime-status" class="hint" role="status" hidden></p>
   <div class="page-tabs" role="tablist" aria-label="画面の切り替え"><button id="translation-tab" role="tab">翻訳</button><button id="settings-tab" role="tab">設定</button></div>
   <div id="translation-page" role="tabpanel">${section}<p class="hint">長い文章は段落ごとに区切って順に訳します。</p></div>
-  <div id="settings-page" role="tabpanel">${heading}
-    <aside id="local-settings">${template(local, "panel")}</aside>
-    <details id="connection-settings">${template(connection, "panel")}</details>
+  <div id="settings-apply" role="dialog" aria-label="設定の変更" hidden>${template(settings, "applyPanel")}</div>
+  <div id="settings-page" role="tabpanel">${heading.replace("</h2>", `</h2><div>${template(transport, "desktopActions")}</div>`)}
+    <div class="translation-settings-panel"><details id="local-settings">${template(local, "panel")}</details><div class="translation-settings-switch">${template(local, "localAccess")}</div><p id="local-status" class="hint" role="status"></p></div>
+    <div id="server-settings-panel" class="translation-settings-panel"><details id="connection-settings">${template(connection, "panel")}</details><div id="server-access" class="translation-settings-switch">${template(transport, "serverAccess")}</div></div>
     <details id="desktop-settings">${template(transport, "settingsPanel")}</details>
   </div>
-  <div id="mode-welcome">${template(local, "welcome")}</div>
 </main></div>
 <script>
 // 確認用の状態遷移だけを再現する。アプリのネイティブAPIは使用しない。
@@ -81,26 +81,29 @@ function scene(name) {
   clearInterval(animation);
   document.querySelectorAll('dialog[open]').forEach((d) => d.close());
   $('preview-scene').value = name;
-  const welcome = name === 'welcome';
   const translate = name === 'translation' || name === 'loading';
   const server = name === 'server';
   const missing = ['missing','confirm','downloading','error'].includes(name);
-  show('mode-welcome', welcome); show('translation-page', !welcome && translate); show('settings-page', !welcome && !translate);
-  document.querySelector('.page-tabs').hidden = welcome;
-  show('header-account', !welcome && !missing && !server);
-  show('local-options', !server); show('connection-settings', server); $('connection-settings').open = server;
-  show('local-setup', !missing && !server);
+  show('translation-page', translate); show('settings-page', !translate);
+  $('connection-settings').open = server; $('local-settings').open = !server;
+  show('local-setup', !missing);
   show('local-download-area', missing && name !== 'downloading'); show('local-progress-area', name === 'downloading');
+  show('local-measure-progress', name === 'measuring'); $('local-measure-progress').max = 24; $('local-measure-progress').value = 16;
   show('local-cancel-measure', name === 'measuring'); show('local-runtime-status', name === 'loading');
   $('local-runtime-status').textContent = '翻訳モデルを読み込んでいます…';
   $('local-auto-release').checked = name === 'memory'; show('local-idle-setting', name === 'memory'); $('local-idle-minutes').value = '5';
-  $('mode-local').setAttribute('aria-pressed',String(!server)); $('mode-server').setAttribute('aria-pressed',String(server));
+  $('destination-local').setAttribute('aria-pressed',String(!server)); $('destination-server').setAttribute('aria-pressed',String(server));
+  $('destination-local').dataset.available = String(!missing);
+  $('destination-server').dataset.available = String(server);
+  $('destination-local').querySelector('small').textContent = missing ? '無効' : '有効';
+  $('destination-server').querySelector('small').textContent = server ? '有効' : '無効';
   $('translation-tab').setAttribute('aria-selected',String(translate)); $('settings-tab').setAttribute('aria-selected',String(!translate));
-  $('local-save').disabled = missing || name === 'measuring'; $('local-measure').disabled = missing || name === 'measuring';
-  $('local-start').disabled = missing || name === 'measuring';
+  $('local-measure').disabled = missing || name === 'measuring';
+  $('local-active').checked = !missing; $('local-active').disabled = missing || name === 'measuring';
+  $('server-active').checked = server; $('server-active').disabled = false;
   $('local-status').className = name === 'error' ? 'hint err' : 'hint';
   $('local-status').textContent = name === 'error' ? 'ダウンロードが途切れました。やり直してください' : name === 'downloading' ? '' : missing ? 'モデルをダウンロードすると、このPCで翻訳できます。' : 'モデルの準備ができました。';
-  $('local-measure-status').textContent = name === 'measuring' ? 'AMD Radeon Graphicsを計測しています…' : ['candidates','memory'].includes(name) ? '推奨値を設定欄に反映しました。「保存して再起動」で適用します。' : '';
+  $('local-measure-status').textContent = name === 'measuring' ? '並列数の候補 4/5 · AMD Radeon Graphics・8並列 · 16/24件 完了' : ['candidates','memory'].includes(name) ? '推奨値を設定欄に反映しました。「適用」で反映します。' : '';
   $('local-candidates').replaceChildren();
   if (['candidates','memory'].includes(name)) {
     for (const [label,id] of [['NVIDIA GeForce RTX 4090：短文の翻訳 約0.06秒（おすすめ）','Vulkan0'],['CPU：短文の翻訳 約0.45秒','none'],['AMD Radeon Graphics：短文の翻訳 約3.20秒','Vulkan1']]) {
@@ -112,18 +115,16 @@ function scene(name) {
   $('local-parallel-limit').value = '8';
   $('local-progress').value = .42; $('local-progress-label').textContent = '翻訳モデル：723.9 / 1723.5 MiB（42%）';
   $('client-id').value = 'translator-desktop'; $('shortcut-status').textContent = 'ショートカットを使えます';
-  $('header-account').querySelector('summary').title = 'アカウント';
   $('count').textContent = String($('src').value.length);
   $('out').textContent = name === 'loading' ? '' : 'このアプリケーションは、お使いのコンピューターで文章を翻訳します。';
   $('copy').disabled = name === 'loading';
-  document.querySelector('#app-header .sub').textContent = welcome ? 'PLaMo 3 Translate' : server ? 'PLaMo 3 Translate · 原文と訳はサーバーに残りません' : 'PLaMo 3 Translate · このPCで翻訳';
   if (name === 'confirm') { $('local-download-confirm').showModal(); $('local-decline-download').focus(); }
 }
 $('preview-scene').onchange = (e) => scene(e.target.value);
 $('preview-theme').onchange = (e) => document.documentElement.dataset.theme = e.target.value;
 $('preview-width').onchange = (e) => $('preview-frame').style.width = e.target.value === 'full' ? '100%' : e.target.value + 'px';
-$('welcome-local').onclick = $('mode-local').onclick = () => scene('missing');
-$('welcome-server').onclick = $('mode-server').onclick = $('preview-server-switch').onclick = () => scene('server');
+$('destination-local').onclick = () => scene('missing');
+$('destination-server').onclick = () => scene('server');
 $('local-download').onclick = () => scene('confirm'); $('local-decline-download').onclick = () => scene('missing');
 $('local-confirm-download').onclick = () => {
   scene('downloading'); let progress = .42;
@@ -132,11 +133,9 @@ $('local-confirm-download').onclick = () => {
 $('local-cancel-download').onclick = () => scene('missing');
 $('local-measure').onclick = () => { scene('measuring'); animation = setInterval(() => scene('candidates'),1800); };
 $('local-cancel-measure').onclick = () => scene('candidates');
+$('local-active').onchange = () => $('local-status').textContent = $('local-active').checked ? 'モデルを読み込みました。' : 'モデルを解放しました。';
 $('local-auto-release').onchange = () => show('local-idle-setting',$('local-auto-release').checked);
-$('local-save').onclick = () => scene('translation'); $('local-start').onclick = () => $('local-status').textContent = 'モデルの準備ができました。';
 $('translation-tab').onclick = () => scene('translation'); $('settings-tab').onclick = () => scene('candidates');
-$('connection-form').onsubmit = (e) => { e.preventDefault(); $('connection-confirm').showModal(); };
-$('cancel-connection').onclick = () => $('connection-confirm').close(); $('confirm-connection').onclick = () => { scene('translation'); $('who').textContent = 'サンプルユーザー'; };
 for (const id of ['source','target']) $(id).innerHTML = (id === 'source' ? '<option value="">自動で判定</option>' : '<option value="auto">日本語 ⇄ 英語（自動）</option>') + '<option value="ja">日本語</option><option value="en">英語</option>';
 $('src').value = 'This application translates text on your computer.';
 $('out').textContent = 'このアプリケーションは、お使いのコンピューターで文章を翻訳します。';
@@ -144,7 +143,12 @@ $('go').onclick = () => $('status').textContent = '訳し終わりました（�
 $('clear').onclick = () => { $('src').value = ''; $('out').textContent = ''; };
 $('shortcut').onchange = () => show('custom-shortcut',$('shortcut').value === 'custom');
 document.querySelectorAll('a[href^="http"]').forEach((link) => { link.onclick = (e) => { e.preventDefault(); $('local-status').textContent = 'モデル情報のリンク（表示サンプル）'; }; });
-scene(new URLSearchParams(location.search).get('scene') || 'welcome');
+$('settings-page').addEventListener('input', (event) => {
+  if (event.target.getAttribute('role') !== 'switch') show('settings-apply', true);
+});
+$('apply-settings').onclick = $('cancel-settings').onclick = () => show('settings-apply', false);
+$('connection-form').onsubmit = (event) => event.preventDefault();
+scene(new URLSearchParams(location.search).get('scene') || 'server');
 </script>
 </body></html>`;
 await mkdir(new URL("design/", root), { recursive: true });

@@ -50,6 +50,7 @@ struct Session {
 struct Request {
     owner: String,
     translation: bool,
+    local: bool,
     task: JoinHandle<()>,
     stream: Channel<Message>,
 }
@@ -61,20 +62,28 @@ impl Request {
     }
 }
 
-fn cancel_matching(app: &AppHandle, matches: impl Fn(&Request) -> bool) {
-    let backend = app.state::<Backend>();
-    let mut session = backend.session.lock().unwrap();
-    let ids: Vec<_> = session
-        .requests
-        .iter()
-        .filter(|(_, r)| matches(r))
-        .map(|(id, _)| id.clone())
-        .collect();
-    for id in ids {
-        if let Some(request) = session.requests.remove(&id) {
-            request.cancel();
+impl Session {
+    fn cancel_matching(&mut self, matches: impl Fn(&Request) -> bool) {
+        let ids: Vec<_> = self
+            .requests
+            .iter()
+            .filter(|(_, request)| matches(request))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            if let Some(request) = self.requests.remove(&id) {
+                request.cancel();
+            }
         }
     }
+}
+
+fn cancel_matching(app: &AppHandle, matches: impl Fn(&Request) -> bool) {
+    app.state::<Backend>()
+        .session
+        .lock()
+        .unwrap()
+        .cancel_matching(matches);
 }
 
 fn cancel_window(app: &AppHandle, owner: &str) {
@@ -85,9 +94,16 @@ fn cancel_all(app: &AppHandle) {
 }
 
 struct Backend {
-    auth: Arc<auth::Auth>,
+    auth: tokio::sync::watch::Sender<Arc<auth::Auth>>,
+    client: Client,
     session: Mutex<Session>,
     auth_error: Mutex<Option<String>>,
+}
+
+impl Backend {
+    fn auth(&self) -> Arc<auth::Auth> {
+        self.auth.borrow().clone()
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -103,11 +119,11 @@ enum Message {
 
 fn publish_auth(app: &AppHandle, error: Option<String>) {
     let backend = app.state::<Backend>();
-    let logged_in = backend.auth.is_authenticated();
+    let logged_in = backend.auth().is_authenticated();
     if logged_in || error.is_some() {
         *backend.auth_error.lock().unwrap() = error;
     }
-    change_login(app, logged_in);
+    change_login(app, app.state::<local::Local>().enabled() || logged_in);
 }
 
 fn change_login(app: &AppHandle, logged_in: bool) {
@@ -116,9 +132,7 @@ fn change_login(app: &AppHandle, logged_in: bool) {
         let mut session = backend.session.lock().unwrap();
         session.logged_in = logged_in;
         if !logged_in {
-            for (_, request) in session.requests.drain() {
-                request.cancel();
-            }
+            session.cancel_matching(|request| !request.local);
         }
     }
     if !logged_in {
@@ -134,22 +148,23 @@ async fn restore_session(app: AppHandle) -> Result<(), String> {
         change_login(&app, true);
         return Ok(());
     }
-    if !app.state::<Backend>().auth.is_mock() && connection::load(&app)?.server_url.is_empty() {
-        change_login(&app, false);
+    restore_server_session(app).await
+}
+
+#[tauri::command]
+async fn restore_server_session(app: AppHandle) -> Result<(), String> {
+    if !app.state::<Backend>().auth().is_mock() && connection::load(&app)?.server_url.is_empty() {
+        publish_auth(&app, None);
         return Ok(());
     }
-    let result = app.state::<Backend>().auth.restore().await;
+    let result = app.state::<Backend>().auth().restore().await;
     publish_auth(&app, result.as_ref().err().cloned());
     result
 }
 
 #[tauri::command]
 async fn login(app: AppHandle) -> Result<auth::LoginReport, String> {
-    if app.state::<local::Local>().enabled() {
-        change_login(&app, true);
-        return Ok(auth::LoginReport::default());
-    }
-    let auth = app.state::<Backend>().auth.clone();
+    let auth = app.state::<Backend>().auth();
     if auth.is_busy() {
         return Err("ログインを待っています".into());
     }
@@ -172,18 +187,19 @@ async fn login(app: AppHandle) -> Result<auth::LoginReport, String> {
 
 #[tauri::command]
 fn cancel_login(app: AppHandle) {
-    app.state::<Backend>().auth.cancel_login();
+    app.state::<Backend>().auth().cancel_login();
 }
 
 #[tauri::command]
 async fn logout(app: AppHandle) -> Result<(), String> {
-    if app.state::<local::Local>().enabled() {
-        return Err("設定からサーバーモードへ切り替えてください".into());
-    }
-    let auth = app.state::<Backend>().auth.clone();
+    let auth = app.state::<Backend>().auth();
     // ネットワークの revoke を待つ間にも画面と翻訳を止める。
     auth.cancel_login();
-    change_login(&app, false);
+    if app.state::<local::Local>().enabled() {
+        cancel_matching(&app, |request| !request.local);
+    } else {
+        change_login(&app, false);
+    }
     let result = auth.logout().await;
     if result.is_ok() {
         *app.state::<Backend>().auth_error.lock().unwrap() = None;
@@ -215,12 +231,24 @@ fn start_request(
     route: String,
     body: Option<Value>,
     popup_revision: Option<u64>,
+    local_override: Option<bool>,
     stream: Channel<Message>,
 ) -> Result<(), String> {
     let backend = app.state::<Backend>();
     let mut session = backend.session.lock().unwrap();
-    if !session.logged_in {
-        return Err("ログインしてください".into());
+    let engine = app.state::<local::Local>();
+    if local_override.is_some() && window.label() != "main" {
+        return Err("翻訳先の切り替えはメイン画面で行ってください".into());
+    }
+    let use_local = local_override.unwrap_or_else(|| engine.enabled());
+    if use_local && !engine.enabled() && route == "api/translate" {
+        local::check_temporary_local(&app)?;
+    }
+    let auth = backend.auth();
+    if !use_local
+        && (auth.is_busy() || !auth.is_authenticated() || (!engine.enabled() && !session.logged_in))
+    {
+        return Err("サーバーで翻訳するにはログインしてください".into());
     }
     let (method, path) = match route.as_str() {
         "api/config" => (Method::GET, "/api/config"),
@@ -241,32 +269,23 @@ fn start_request(
         return Err("リクエスト ID が重複しています".into());
     }
     if route == "api/translate" {
-        let ids: Vec<_> = session
-            .requests
-            .iter()
-            .filter(|(_, r)| r.translation)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in ids {
-            if let Some(request) = session.requests.remove(&id) {
-                request.cancel();
-            }
-        }
+        session.cancel_matching(|request| request.translation);
     }
-    let auth = backend.auth.clone();
     let app = app.clone();
     let cancel_stream = stream.clone();
     let translation = route == "api/translate";
     let task = tauri::async_runtime::spawn(async move {
         let result: Result<(), ()> = async {
-            if app.state::<local::Local>().enabled() {
+            if use_local {
                 return local::request(&app, &route, body.as_ref(), &stream).await;
             }
             let mut response = match auth.send(method, path, body.as_ref()).await {
                 Ok(response) => response,
                 Err(_) if !auth.is_authenticated() => {
                     let _ = stream.send(Message::LoginRequired { status: 401 });
-                    publish_auth(&app, Some("ログインし直してください".into()));
+                    if Arc::ptr_eq(&auth, &app.state::<Backend>().auth()) {
+                        publish_auth(&app, Some("ログインし直してください".into()));
+                    }
                     return Ok(());
                 }
                 Err(_) => return Err(()),
@@ -276,12 +295,14 @@ fn start_request(
                 // nginx の 403 HTML は読まず、状態の番号だけを渡す。
                 let _ = stream.send(Message::LoginRequired { status });
                 let _ = auth.invalidate().await;
-                publish_auth(
-                    &app,
-                    Some(format!(
-                        "サーバーが {status} を返しました。ログインし直してください"
-                    )),
-                );
+                if Arc::ptr_eq(&auth, &app.state::<Backend>().auth()) {
+                    publish_auth(
+                        &app,
+                        Some(format!(
+                            "サーバーが {status} を返しました。ログインし直してください"
+                        )),
+                    );
+                }
                 return Ok(());
             }
             stream
@@ -310,6 +331,7 @@ fn start_request(
         Request {
             owner: window.label().into(),
             translation,
+            local: use_local,
             task,
             stream: cancel_stream,
         },
@@ -357,7 +379,12 @@ fn main() {
             app.manage(local::Local::load(app.handle())?);
             let connection = connection::load(app.handle())?;
             app.manage(Backend {
-                auth: Arc::new(auth::Auth::with_connection(client.clone(), connection)),
+                auth: tokio::sync::watch::channel(Arc::new(auth::Auth::with_connection(
+                    client.clone(),
+                    connection,
+                )))
+                .0,
+                client: client.clone(),
                 session: Mutex::new(Session::default()),
                 auth_error: Mutex::new(None),
             });
@@ -370,14 +397,21 @@ fn main() {
             chrome_bridge::setup_links(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                let mut connections = handle.state::<Backend>().auth.subscribe();
                 loop {
-                    let auth = handle.state::<Backend>().auth.clone();
-                    auth.wait_for_refresh().await;
-                    if handle.state::<local::Local>().enabled() {
-                        continue;
-                    }
-                    if let Err(error) = auth.renew_if_needed().await {
-                        publish_auth(&handle, Some(error));
+                    let auth = connections.borrow_and_update().clone();
+                    tokio::select! {
+                        _ = connections.changed() => {},
+                        result = async {
+                            auth.wait_for_refresh().await;
+                            auth.renew_if_needed().await
+                        } => {
+                            if let Err(error) = result {
+                                if Arc::ptr_eq(&auth, &handle.state::<Backend>().auth()) {
+                                    publish_auth(&handle, Some(error));
+                                }
+                            }
+                        }
                     }
                 }
             });
@@ -428,12 +462,14 @@ fn main() {
         login,
         logout,
         restore_session,
+        restore_server_session,
         chrome_bridge::register_chrome,
         chrome_bridge::chrome_registration_request,
         chrome_bridge::finish_chrome_registration,
         local::local_status,
         local::select_server_mode,
         local::open_model_information,
+        local::open_plamo_license,
         local::measure_local_devices,
         local::cancel_local_measurement,
         local::resources::local_download_info,
@@ -441,7 +477,7 @@ fn main() {
         local::resources::cancel_local_download,
         local::local_devices,
         local::save_local_settings,
-        local::start_local_engine,
+        local::set_local_active,
         cancel_login,
         start_request,
         stop_request,
@@ -449,6 +485,7 @@ fn main() {
         connection::save_connection,
         settings::load_settings,
         settings::save_settings,
+        settings::setup_state,
         resident::session_status,
         resident::popup_content,
         resident::resize_popup,
@@ -467,12 +504,14 @@ fn main() {
             login,
             logout,
             restore_session,
+            restore_server_session,
             chrome_bridge::register_chrome,
             chrome_bridge::chrome_registration_request,
             chrome_bridge::finish_chrome_registration,
             local::local_status,
             local::select_server_mode,
             local::open_model_information,
+            local::open_plamo_license,
             local::measure_local_devices,
             local::cancel_local_measurement,
             local::resources::local_download_info,
@@ -480,7 +519,7 @@ fn main() {
             local::resources::cancel_local_download,
             local::local_devices,
             local::save_local_settings,
-            local::start_local_engine,
+            local::set_local_active,
             cancel_login,
             start_request,
             stop_request,
@@ -488,6 +527,7 @@ fn main() {
             connection::save_connection,
             settings::load_settings,
             settings::save_settings,
+            settings::setup_state,
             resident::session_status,
             resident::popup_content,
             resident::resize_popup,

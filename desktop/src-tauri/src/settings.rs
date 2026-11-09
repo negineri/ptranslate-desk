@@ -70,6 +70,40 @@ pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn setup_state(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    state: Option<String>,
+) -> Result<Option<String>, String> {
+    if window.label() != "main" {
+        return Err("初期設定はメインウィンドウで行ってください".into());
+    }
+    let path = settings_path(&app)?.with_file_name("setup-state");
+    if let Some(state) = state {
+        if !matches!(state.as_str(), "started" | "done") {
+            return Err("初期設定の状態が不正です".into());
+        }
+        let save = || -> std::io::Result<()> {
+            use std::io::Write;
+            let dir = path.parent().expect("設定ファイルの親ディレクトリ");
+            fs::create_dir_all(dir)?;
+            let mut file = tempfile::NamedTempFile::new_in(dir)?;
+            file.write_all(state.as_bytes())?;
+            file.persist(path)?;
+            Ok(())
+        };
+        save().map_err(|_| "初期設定の状態を保存できませんでした".to_string())?;
+        return Ok(Some(state));
+    }
+    match fs::read_to_string(path) {
+        Ok(value) if matches!(value.as_str(), "started" | "done") => Ok(Some(value)),
+        Ok(_) => Err("初期設定の状態が不正です".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("初期設定の状態を読み込めませんでした".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

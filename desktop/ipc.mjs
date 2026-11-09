@@ -1,7 +1,7 @@
 const { Channel, invoke } = window.__TAURI__.core;
 
 // メインウィンドウと翻訳ポップアップの両方で使う。所有者は Rust が呼び出し元の窓から決める。
-export async function desktopFetch(route, { body, signal, popupRevision = null } = {}) {
+export async function desktopFetch(route, { body, signal, popupRevision = null, localOverride = null } = {}) {
   signal?.throwIfAborted();
   const id = crypto.randomUUID();
   const stream = new Channel();
@@ -38,7 +38,7 @@ export async function desktopFetch(route, { body, signal, popupRevision = null }
       }
     };
     const started = invoke("start_request", {
-      id, route, body: body ? JSON.parse(body) : null, stream, popupRevision,
+      id, route, body: body ? JSON.parse(body) : null, stream, popupRevision, localOverride,
     });
     void started.catch((error) => finish(new Error(String(error))));
     signal?.addEventListener("abort", abort, { once: true });

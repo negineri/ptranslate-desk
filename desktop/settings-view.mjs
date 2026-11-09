@@ -10,14 +10,7 @@ export const updateSlot = document.createElement("div");
 updateSlot.id = "header-updates";
 export const accountSlot = document.createElement("div");
 accountSlot.id = "header-account";
-export const accountMenu = document.createElement("details");
-accountMenu.id = "account-menu";
-accountMenu.hidden = true;
-const accountSummary = document.createElement("summary");
-who.textContent = "アカウント";
-accountSummary.append(who);
-accountMenu.append(accountSummary);
-accountSlot.append(accountMenu);
+who.hidden = true;
 main.prepend(header);
 header.append(title, updateSlot, description, accountSlot);
 main.querySelector(".web-heading")?.setAttribute("hidden", "");
@@ -51,6 +44,56 @@ settingsPage.setAttribute("aria-labelledby", "settings-tab");
 settingsPage.innerHTML = `<div class="settings-heading"><h2>設定</h2><p class="hint">翻訳モードや接続先、ショートカットを管理します。</p></div>`;
 main.append(settingsPage);
 
+const pendingSettings = new Map();
+export function hasPendingSettings() { return pendingSettings.size > 0; }
+const applyPanel = document.createElement("div");
+applyPanel.id = "settings-apply";
+applyPanel.setAttribute("role", "dialog");
+applyPanel.setAttribute("aria-label", "設定の変更");
+applyPanel.hidden = true;
+applyPanel.innerHTML = `<p role="status">未適用の変更があります</p>
+  <button id="apply-settings" type="button" class="primary">適用</button>
+  <button id="cancel-settings" type="button">キャンセル</button>`;
+document.body.append(applyPanel);
+const applyStatus = applyPanel.querySelector("p");
+const applyButton = applyPanel.querySelector("#apply-settings");
+const cancelButton = applyPanel.querySelector("#cancel-settings");
+
+function renderPendingSettings() {
+  applyPanel.hidden = settingsPage.hidden || pendingSettings.size === 0;
+}
+export function stageSettings(key, change) {
+  if (change) pendingSettings.set(key, change);
+  else pendingSettings.delete(key);
+  if (!applyButton.disabled) applyStatus.textContent = "未適用の変更があります";
+  renderPendingSettings();
+}
+applyButton.onclick = async () => {
+  const changes = [...pendingSettings];
+  if (!changes.every(([, change]) => !change.validate || change.validate())) return;
+  applyButton.disabled = cancelButton.disabled = true;
+  settingsPage.inert = true;
+  applyStatus.textContent = "設定を適用しています…";
+  try {
+    for (const [key, change] of changes) {
+      await change.apply();
+      if (pendingSettings.get(key) === change) pendingSettings.delete(key);
+    }
+  } catch (error) {
+    applyStatus.textContent = String(error);
+  } finally {
+    settingsPage.inert = false;
+    applyButton.disabled = cancelButton.disabled = false;
+    renderPendingSettings();
+  }
+};
+cancelButton.onclick = () => {
+  const changes = [...pendingSettings.values()];
+  pendingSettings.clear();
+  for (const change of changes) change.cancel();
+  renderPendingSettings();
+};
+
 const tabs = document.createElement("div");
 tabs.className = "page-tabs";
 tabs.setAttribute("role", "tablist");
@@ -62,6 +105,7 @@ const buttons = [...tabs.querySelectorAll("button")];
 export function showPage(settings = false) {
   translation.hidden = settings;
   settingsPage.hidden = !settings;
+  renderPendingSettings();
   for (const [index, button] of buttons.entries()) {
     const selected = index === Number(settings);
     button.setAttribute("aria-selected", String(selected));
@@ -82,6 +126,14 @@ buttons.forEach((button, index) => {
 });
 const style = document.createElement("style");
 style.textContent = `
+  :root { --desktop-link: #2459b5; }
+  @media (prefers-color-scheme: dark) { :root { --desktop-link: #a8c7ff; } }
+  main a[href] { color: var(--desktop-link); text-decoration: underline; text-underline-offset: .15em; }
+  main a[href]:focus-visible { outline: 2px solid var(--desktop-link); outline-offset: 2px; }
+  #settings-apply { position: fixed; top: 12px; right: 16px; z-index: 20;
+    max-width: min(360px, calc(100vw - 32px)); padding: 12px; border: 1px solid var(--line);
+    border-radius: 10px; background: var(--panel); box-shadow: 0 8px 28px #0003; display: flex; flex-wrap: wrap; gap: 8px; }
+  #settings-apply p { flex-basis: 100%; margin: 0; }
   [hidden] { display: none !important; }
   [data-web-only] { display: none !important; }
   main { padding-top: 16px; padding-bottom: 16px; }
@@ -89,15 +141,29 @@ style.textContent = `
   #app-header h1 { margin: 0; font-size: 1.25rem; white-space: nowrap; }
   #app-header .sub { flex: 1; margin: 0; font-size: .85rem; }
   #header-account { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  #translation-destinations { display: flex; gap: 8px; }
+  #translation-destinations button { box-sizing: border-box; width: 120px; flex: 0 0 120px; padding: 4px 8px; white-space: nowrap; border: 2px solid var(--line); }
+  #translation-destinations button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  #translation-destinations button[aria-pressed="true"]::before { content: "✓"; color: var(--accent); font-weight: 700; margin-inline-end: 5px; }
+  #translation-destinations small { font-size: .7rem; color: var(--muted); }
+  #translation-destinations button[data-available="true"] small { color: var(--ok); font-weight: 600; }
+  .translation-settings-panel { position: relative; }
+  .translation-settings-panel > details { margin: 0; }
+  .translation-settings-panel > details > summary { padding-inline-end: 145px; }
+  .translation-settings-switch { position: absolute; top: 18px; inset-inline-end: 16px; display: flex; align-items: center; gap: 8px; }
+  .translation-settings-panel > p:empty { display: none; }
+  input[role="switch"] { appearance: none; width: 36px; height: 20px; margin: 0;
+    border: 1px solid var(--muted); border-radius: 12px; background: var(--panel); cursor: pointer; }
+  input[role="switch"]::before { content: ""; display: block; width: 12px; height: 12px;
+    margin: 3px; border-radius: 50%; background: var(--muted); }
+  input[role="switch"]:checked { background: var(--accent); border-color: var(--accent); }
+  input[role="switch"]:checked::before { transform: translateX(16px); background: var(--accent-text); }
+  input[role="switch"]:disabled { opacity: .5; cursor: default; }
+  input[role="switch"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #app-header details { position: relative; margin: 0; }
   #app-header summary { list-style: none; cursor: pointer; }
   #app-header summary::-webkit-details-marker { display: none; }
-  #account-menu > summary { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; background: var(--panel); }
-  #account-menu > summary::after { content: "▾"; font-size: .75rem; color: var(--muted); }
-  #who { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .header-popover { position: absolute; top: calc(100% + 10px); z-index: 10; padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 28px #0003; }
-  #account-menu .header-popover { right: 0; min-width: 150px; }
-  #account-menu .header-popover button { width: 100%; text-align: left; }
   #update-menu > summary { border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; color: var(--muted); background: var(--panel); font-size: .8rem; white-space: nowrap; }
   #update-menu .header-popover { left: 0; width: min(340px, calc(100vw - 48px)); display: flex; flex-wrap: wrap; gap: 8px; }
   #update-status { flex-basis: 100%; }
@@ -113,15 +179,17 @@ style.textContent = `
   .page-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin: 16px 0 12px; }
   .page-tabs button { padding: 6px 4px 8px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); }
   .page-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .settings-heading { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 12px; }
   .settings-heading h2 { margin: 0; font-size: 1.2rem; }
-  .settings-heading p { margin: 4px 0 20px; }
+  .settings-heading p { grid-column: 1 / -1; margin: 0 0 20px; }
   #settings-page { max-width: 760px; margin: 0 auto; }
   #translation-page section { padding: 12px; margin-bottom: 12px; }
   #translation-page > .hint { margin: 8px 0 0; }
   #translation-page .under { margin-top: 8px; }
-  #settings-page > details, #settings-page > aside { padding: 16px; margin: 0 0 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  #settings-page > details, #settings-page > .translation-settings-panel { padding: 16px; margin: 0 0 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
   #settings-page summary { color: var(--text); font-weight: 600; }
-  #desktop-settings > label { display: block; margin: 16px 0 8px; }
+  #start-setup { font-size: .85rem; white-space: nowrap; }
+  #shortcut-controls > label { display: block; margin: 16px 0 8px; }
   #custom-shortcut { margin-top: 12px; }
   #shortcut-keys { max-width: 100%; }
 `;

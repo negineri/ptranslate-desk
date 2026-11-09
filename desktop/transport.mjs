@@ -1,8 +1,9 @@
-import { settingsPage, showPage, accountSlot, accountMenu } from "./settings-view.mjs";
+import { settingsPage, showPage, accountSlot, stageSettings, hasPendingSettings } from "./settings-view.mjs";
 import { desktopFetch as request } from "./ipc.mjs";
 import "./updates.mjs";
 import "./connection.mjs";
 import { modeReady } from "./local-view.mjs";
+import { runSetup } from "./setup-wizard.mjs";
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -39,17 +40,20 @@ export async function copyText(text) {
   catch (error) { showError(error); return false; }
 }
 
-const loginButton = document.createElement("button");
-loginButton.textContent = "ログイン";
-loginButton.id = "login-button";
-accountSlot.append(loginButton);
-const accountActions = document.createElement("div");
-accountActions.className = "header-popover";
-accountMenu.append(accountActions);
+const serverAccess = document.createElement("div");
+serverAccess.id = "server-access";
+serverAccess.className = "translation-settings-switch";
+serverAccess.innerHTML = `<input id="server-active" type="checkbox" role="switch" aria-label="サーバー翻訳" disabled>
+  <span class="hint" role="status"></span>`;
+const serverPanel = document.getElementById("connection-settings");
+serverPanel.after(serverAccess);
+const loginSwitch = serverAccess.querySelector("input");
+const serverStatus = serverAccess.querySelector("span");
+serverAccess.prepend(serverStatus);
 const cancelLogin = document.createElement("button");
 cancelLogin.textContent = "ログインを中止";
 cancelLogin.hidden = true;
-accountSlot.append(cancelLogin);
+serverAccess.after(cancelLogin);
 cancelLogin.addEventListener("click", () => { void invoke("cancel_login").catch(showError); });
 if (/Mac/.test(navigator.platform)) {
   const keychainHelp = document.createElement("details");
@@ -66,62 +70,138 @@ if (/Mac/.test(navigator.platform)) {
   settingsPage.append(keychainHelp);
 }
 let resolveLogin;
-let localMode = false;
 const login = new Promise((resolve) => { resolveLogin = resolve; });
+const mode = document.createElement("div");
+mode.id = "translation-destinations";
+mode.setAttribute("role", "group");
+mode.setAttribute("aria-label", "一時的な翻訳先");
+mode.hidden = true;
+mode.innerHTML = `<button id="destination-server" type="button" aria-pressed="false">サーバー <small>無効</small></button>
+  <button id="destination-local" type="button" aria-pressed="false">ローカル <small>無効</small></button>`;
+accountSlot.append(mode);
+const serverButton = mode.querySelector("#destination-server");
+const localButton = mode.querySelector("#destination-local");
+let defaultLocal = false;
+const destinationKey = "ptranslate-desktop-destination";
+const rememberedDestination = window.localStorage.getItem(destinationKey);
+let temporaryLocal = rememberedDestination === "local" ? true : rememberedDestination === "server" ? false : null;
+let serverAuthenticated = false;
+let serverConfigured = false;
+let serverSwitching = false;
+
+export function translationMode() {
+  return temporaryLocal ?? defaultLocal;
+}
+
+function updateDestinations() {
+  const useLocal = translationMode();
+  serverButton.setAttribute("aria-pressed", String(!useLocal));
+  localButton.setAttribute("aria-pressed", String(useLocal));
+  const serverAvailable = serverConfigured && serverAuthenticated;
+  serverButton.dataset.available = String(serverAvailable);
+  serverButton.querySelector("small").textContent = serverAvailable ? "有効" : "無効";
+  serverButton.title = serverAvailable ? "サーバーで翻訳" : "サーバー翻訳の設定を開く";
+}
+
+async function selectDestination(useLocal) {
+  if (translationMode() === useLocal) return;
+  document.getElementById("stop").click();
+  temporaryLocal = useLocal;
+  window.localStorage.setItem(destinationKey, useLocal ? "local" : "server");
+  updateDestinations();
+  document.dispatchEvent(new CustomEvent("translation-destination-changed", { detail: useLocal }));
+  await restoreSession();
+}
+
+serverButton.addEventListener("click", () => {
+  if (serverConfigured && serverAuthenticated) {
+    void selectDestination(false).catch(showError);
+    return;
+  }
+  showPage(true);
+  const connection = document.getElementById("connection-settings");
+  connection.open = true;
+  if (serverConfigured) {
+    loginSwitch.focus();
+    if (defaultLocal && !serverAuthenticated) void invoke("restore_server_session").catch(showError);
+  } else {
+    document.getElementById("server-url").focus();
+  }
+});
+localButton.addEventListener("click", () => {
+  if (localButton.dataset.available === "true") {
+    void selectDestination(true).catch(showError);
+    return;
+  }
+  showPage(true);
+  document.getElementById("local-settings").open = true;
+  document.getElementById("local-settings-title").focus();
+});
 
 async function restoreSession() {
   const status = await invoke("session_status");
-  localMode = status.local;
-  loginButton.disabled = status.logging_in;
+  defaultLocal = status.local;
+  serverAuthenticated = status.server_authenticated;
+  serverConfigured = status.mock || Boolean((await invoke("load_connection").catch(showError))?.server_url);
+  const useLocal = translationMode();
+  loginSwitch.disabled = !serverConfigured || status.logging_in || serverSwitching;
+  loginSwitch.checked = serverAuthenticated;
+  serverStatus.textContent = status.logging_in ? "ログイン中" : status.server_session_only ? "今回のみログイン中" : serverAuthenticated ? "ログイン済み" :
+    serverConfigured ? "未接続" : "接続先未設定";
   cancelLogin.hidden = !status.logging_in;
-  if (!loginButton.dataset.loggedIn) loginButton.textContent = status.mock ? "モックにログイン" : "ログイン";
-  if (status.logged_in && !loginButton.dataset.loggedIn) {
-    const settings = await invoke("load_settings").catch(showError);
-    savedSettings = settings ? JSON.stringify(settings) : null;
-    loginButton.dataset.loggedIn = "true";
-    loginButton.textContent = localMode ? "サーバーモードに切り替え" : "ログアウト";
-    accountActions.append(loginButton);
-    accountMenu.hidden = false;
-    resolveLogin();
-  } else if (!status.logged_in && loginButton.dataset.loggedIn) {
-    await pendingSave;
-    location.reload();
-  }
-  if (status.auth_error) showError(status.auth_error);
+  if (status.logged_in || useLocal) resolveLogin();
+  updateDestinations();
+  if (status.auth_error && !useLocal) showError(status.auth_error);
   return status;
 }
 
-loginButton.addEventListener("click", async () => {
-  loginButton.disabled = true;
-  const loggingIn = !loginButton.dataset.loggedIn;
-  cancelLogin.hidden = !loggingIn;
+loginSwitch.addEventListener("change", async () => {
+  const active = loginSwitch.checked;
+  serverSwitching = true;
+  loginSwitch.disabled = true;
   try {
     await pendingSave;
-    if (localMode) {
-      const { device, auto_release, idle_minutes } = await invoke("local_status");
-      await invoke("save_local_settings", { settings: { enabled: false, device, auto_release, idle_minutes } });
-      return;
-    }
-    await invoke(loggingIn ? "login" : "logout");
-    await restoreSession();
+    await invoke(active ? "login" : "logout");
   } catch (error) { showError(error); }
-  finally { loginButton.disabled = false; cancelLogin.hidden = true; }
+  finally {
+    serverSwitching = false;
+    await restoreSession().catch(showError);
+  }
 });
 
 await modeReady;
-await listen("session-changed", () => { void restoreSession().catch(showError); });
-await listen("login-started", () => { loginButton.disabled = true; cancelLogin.hidden = false; });
-await invoke("restore_session").catch(showError);
-const initialSession = await restoreSession().catch(showError);
-if (initialSession) showPage(!initialSession.logged_in);
+const localStatus = await invoke("local_status");
+defaultLocal = localStatus.enabled;
+localButton.dataset.available = String(localStatus.available && localStatus.supported && localStatus.active);
+localButton.querySelector("small").textContent = localButton.dataset.available === "true" ? "有効" : "無効";
 
-export async function desktopFetch(...args) { await login; return request(...args); }
+mode.hidden = false;
+await listen("session-changed", () => { void restoreSession().catch(showError); });
+await listen("login-started", () => { loginSwitch.disabled = true; cancelLogin.hidden = false; serverStatus.textContent = "ログイン中"; });
+await invoke("restore_session").catch(showError);
+if (defaultLocal && !translationMode()) await invoke("restore_server_session").catch(showError);
+document.dispatchEvent(new CustomEvent("translation-destination-changed", { detail: translationMode() }));
+let initialSession = await restoreSession().catch(showError);
+const settings = await invoke("load_settings").catch(showError);
+savedSettings = settings ? JSON.stringify(settings) : null;
+async function restoreAfterSetup(destination) {
+  temporaryLocal = destination;
+  await invoke("restore_session").catch(showError);
+  const status = await restoreSession().catch(showError);
+  document.dispatchEvent(new CustomEvent("translation-destination-changed", { detail: translationMode() }));
+  return status;
+}
+export async function desktopFetch(route, options = {}) {
+  await login;
+  return request(route, { ...options, localOverride: options.localOverride ?? translationMode() });
+}
 
 const settingsPanel = document.createElement("details");
 const isMac = /Mac/.test(navigator.platform);
 const copyKey = isMac ? "⌘C" : "Ctrl+C";
 settingsPanel.id = "desktop-settings";
 settingsPanel.innerHTML = `<summary>デスクトップの設定</summary>
+  <div id="shortcut-controls">
   <label for="shortcut">選んだ文を翻訳するショートカット</label>
   <select id="shortcut">
     <option value="double-copy">${copyKey} を 0.5 秒以内に 2 回</option>
@@ -131,20 +211,45 @@ settingsPanel.innerHTML = `<summary>デスクトップの設定</summary>
   <div id="custom-shortcut" hidden>
     <label for="shortcut-keys">組み合わせ（例: CommandOrControl+Alt+J）</label>
     <input id="shortcut-keys" type="text" autocomplete="off" spellcheck="false">
-    <button id="save-shortcut">この組み合わせを使う</button>
   </div>
   <p class="hint" id="shortcut-status"></p>
   <p class="hint" id="shortcut-diagnostics"></p>
   <button id="accessibility" ${isMac ? "" : "hidden"}>アクセシビリティの設定を開く</button>
+  </div>
   <p class="hint">${isMac ? 'macOS のシステム設定で「PTranslate Desk」を許可してください。許可は数秒以内に反映されます。メインウィンドウを閉じても常駐します。終了するにはメニューバーの「終了」か ⌘Q を使います。' : 'メインウィンドウを閉じても通知領域に常駐します。終了するにはトレイの「終了」を使います。組み合わせのショートカットは、キーを離すと選んだ文をコピーします。管理者権限で動くアプリからは取得できない場合があります。'}</p>`;
 settingsPanel.open = Boolean(initialSession?.logged_in);
-document.getElementById("connection-settings").after(settingsPanel);
+const desktopActions = document.createElement("div");
+desktopActions.innerHTML = `<button id="start-setup" type="button">初期設定を始める</button>`;
+settingsPage.querySelector(".settings-heading h2").after(desktopActions);
+serverPanel.parentElement.after(settingsPanel);
+const startSetup = desktopActions.querySelector("button");
+startSetup.addEventListener("click", async () => {
+  if (hasPendingSettings()) {
+    showError("変更を適用またはキャンセルしてから、初期設定を始めてください。");
+    return;
+  }
+  startSetup.disabled = true;
+  try {
+    const local = await invoke("local_status");
+    const destination = await runSetup(local, null, { manual: true, saveShortcut });
+    if (destination !== null) {
+      await restoreAfterSetup(destination);
+      showPage(false);
+    }
+  } catch (error) { showError(error); }
+  finally {
+    startSetup.disabled = false;
+    if (!settingsPage.hidden) startSetup.focus();
+    void updateShortcutStatus().catch(showError);
+  }
+});
 const shortcut = document.getElementById("shortcut");
+let shortcutDraft = false;
 const shortcutStatus = document.getElementById("shortcut-status");
 async function updateShortcutStatus() {
   const status = await invoke("session_status");
   const custom = !["double-copy", "CommandOrControl+Shift+T"].includes(status.shortcut);
-  if (document.activeElement !== shortcut && document.activeElement?.id !== "shortcut-keys") {
+  if (!shortcutDraft && !document.getElementById("setup-wizard") && document.activeElement !== shortcut && document.activeElement?.id !== "shortcut-keys") {
     shortcut.value = custom ? "custom" : status.shortcut;
     document.getElementById("custom-shortcut").hidden = !custom;
     if (custom) document.getElementById("shortcut-keys").value = status.shortcut;
@@ -159,29 +264,49 @@ async function updateShortcutStatus() {
 setInterval(() => {
   if (!settingsPage.hidden && settingsPanel.open) void updateShortcutStatus().catch(showError);
 }, 2000);
-shortcut.addEventListener("change", async () => {
+const shortcutKeys = document.getElementById("shortcut-keys");
+async function saveShortcut(value) {
+  await pendingSave;
+  const settings = { ...JSON.parse(savedSettings || "{}"), shortcut: value };
+  await invoke("save_settings", { settings });
+  savedSettings = JSON.stringify(settings);
+}
+function stageShortcut() {
+  if (document.getElementById("setup-wizard")) return;
+  const value = shortcut.value === "custom" ? shortcutKeys.value.trim() : shortcut.value;
+  shortcutDraft = value !== (JSON.parse(savedSettings || "{}").shortcut || "double-copy");
+  stageSettings("shortcut", shortcutDraft ? {
+    validate() {
+      if (shortcut.value !== "custom" || value.includes("+")) return true;
+      settingsPanel.open = true;
+      shortcutKeys.focus();
+      showError("CommandOrControl+Alt+J のように修飾キーと文字を指定してください");
+      return false;
+    },
+    async apply() {
+      await saveShortcut(value);
+      shortcutDraft = false;
+      await updateShortcutStatus().catch(showError);
+    },
+    cancel() {
+      shortcutDraft = false;
+      void updateShortcutStatus().catch(showError);
+    },
+  } : null);
+}
+shortcut.addEventListener("change", () => {
   document.getElementById("custom-shortcut").hidden = shortcut.value !== "custom";
-  if (shortcut.value === "custom") {
-    document.getElementById("shortcut-keys").focus();
-    return;
-  }
-  shortcut.disabled = true;
-  await settingsStorage.setItem("translator", JSON.stringify({ shortcut: shortcut.value }));
-  await updateShortcutStatus().catch(showError);
-  shortcut.disabled = false;
+  if (shortcut.value === "custom") shortcutKeys.focus();
+  stageShortcut();
 });
-document.getElementById("save-shortcut").addEventListener("click", async () => {
-  const value = document.getElementById("shortcut-keys").value.trim();
-  if (!value.includes("+")) {
-    showError("CommandOrControl+Alt+J のように修飾キーと文字を指定してください");
-    return;
-  }
-  await settingsStorage.setItem("translator", JSON.stringify({ shortcut: value }));
-  await updateShortcutStatus().catch(showError);
-});
+shortcutKeys.addEventListener("input", stageShortcut);
 document.getElementById("accessibility").addEventListener("click", () => {
   void invoke("open_accessibility_settings").catch(showError);
 });
+await updateShortcutStatus().catch(showError);
+const setupDestination = await runSetup(localStatus, settings, { saveShortcut });
+if (setupDestination !== null) initialSession = await restoreAfterSetup(setupDestination);
+if (initialSession) showPage(!initialSession.logged_in);
 await listen("show-settings", () => { showPage(true); settingsPanel.open = true; settingsPanel.scrollIntoView(); document.getElementById("shortcut").focus(); });
 await listen("session-changed", () => { void updateShortcutStatus().catch(showError); });
 await listen("desktop-error", ({ payload }) => showError(payload));

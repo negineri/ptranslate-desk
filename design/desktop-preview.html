@@ -69,6 +69,14 @@
   .connection-value button { flex-shrink: 0; }
 
 
+  :root { --desktop-link: #2459b5; }
+  @media (prefers-color-scheme: dark) { :root { --desktop-link: #a8c7ff; } }
+  main a[href] { color: var(--desktop-link); text-decoration: underline; text-underline-offset: .15em; }
+  main a[href]:focus-visible { outline: 2px solid var(--desktop-link); outline-offset: 2px; }
+  #settings-apply { position: fixed; top: 12px; right: 16px; z-index: 20;
+    max-width: min(360px, calc(100vw - 32px)); padding: 12px; border: 1px solid var(--line);
+    border-radius: 10px; background: var(--panel); box-shadow: 0 8px 28px #0003; display: flex; flex-wrap: wrap; gap: 8px; }
+  #settings-apply p { flex-basis: 100%; margin: 0; }
   [hidden] { display: none !important; }
   [data-web-only] { display: none !important; }
   main { padding-top: 16px; padding-bottom: 16px; }
@@ -76,15 +84,29 @@
   #app-header h1 { margin: 0; font-size: 1.25rem; white-space: nowrap; }
   #app-header .sub { flex: 1; margin: 0; font-size: .85rem; }
   #header-account { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  #translation-destinations { display: flex; gap: 8px; }
+  #translation-destinations button { box-sizing: border-box; width: 120px; flex: 0 0 120px; padding: 4px 8px; white-space: nowrap; border: 2px solid var(--line); }
+  #translation-destinations button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  #translation-destinations button[aria-pressed="true"]::before { content: "✓"; color: var(--accent); font-weight: 700; margin-inline-end: 5px; }
+  #translation-destinations small { font-size: .7rem; color: var(--muted); }
+  #translation-destinations button[data-available="true"] small { color: var(--ok); font-weight: 600; }
+  .translation-settings-panel { position: relative; }
+  .translation-settings-panel > details { margin: 0; }
+  .translation-settings-panel > details > summary { padding-inline-end: 145px; }
+  .translation-settings-switch { position: absolute; top: 18px; inset-inline-end: 16px; display: flex; align-items: center; gap: 8px; }
+  .translation-settings-panel > p:empty { display: none; }
+  input[role="switch"] { appearance: none; width: 36px; height: 20px; margin: 0;
+    border: 1px solid var(--muted); border-radius: 12px; background: var(--panel); cursor: pointer; }
+  input[role="switch"]::before { content: ""; display: block; width: 12px; height: 12px;
+    margin: 3px; border-radius: 50%; background: var(--muted); }
+  input[role="switch"]:checked { background: var(--accent); border-color: var(--accent); }
+  input[role="switch"]:checked::before { transform: translateX(16px); background: var(--accent-text); }
+  input[role="switch"]:disabled { opacity: .5; cursor: default; }
+  input[role="switch"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #app-header details { position: relative; margin: 0; }
   #app-header summary { list-style: none; cursor: pointer; }
   #app-header summary::-webkit-details-marker { display: none; }
-  #account-menu > summary { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; background: var(--panel); }
-  #account-menu > summary::after { content: "▾"; font-size: .75rem; color: var(--muted); }
-  #who { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .header-popover { position: absolute; top: calc(100% + 10px); z-index: 10; padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 28px #0003; }
-  #account-menu .header-popover { right: 0; min-width: 150px; }
-  #account-menu .header-popover button { width: 100%; text-align: left; }
   #update-menu > summary { border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; color: var(--muted); background: var(--panel); font-size: .8rem; white-space: nowrap; }
   #update-menu .header-popover { left: 0; width: min(340px, calc(100vw - 48px)); display: flex; flex-wrap: wrap; gap: 8px; }
   #update-status { flex-basis: 100%; }
@@ -100,42 +122,44 @@
   .page-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin: 16px 0 12px; }
   .page-tabs button { padding: 6px 4px 8px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); }
   .page-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .settings-heading { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 12px; }
   .settings-heading h2 { margin: 0; font-size: 1.2rem; }
-  .settings-heading p { margin: 4px 0 20px; }
+  .settings-heading p { grid-column: 1 / -1; margin: 0 0 20px; }
   #settings-page { max-width: 760px; margin: 0 auto; }
   #translation-page section { padding: 12px; margin-bottom: 12px; }
   #translation-page > .hint { margin: 8px 0 0; }
   #translation-page .under { margin-top: 8px; }
-  #settings-page > details, #settings-page > aside { padding: 16px; margin: 0 0 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  #settings-page > details, #settings-page > .translation-settings-panel { padding: 16px; margin: 0 0 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
   #settings-page summary { color: var(--text); font-weight: 600; }
-  #desktop-settings > label { display: block; margin: 16px 0 8px; }
+  #start-setup { font-size: .85rem; white-space: nowrap; }
+  #shortcut-controls > label { display: block; margin: 16px 0 8px; }
   #custom-shortcut { margin-top: 12px; }
   #shortcut-keys { max-width: 100%; }
 
-#connection-settings { margin-bottom: 16px; }
-  #connection-form { display: grid; gap: 8px; margin-top: 12px; }
+#connection-form { display: grid; gap: 8px; margin-top: 12px; }
   #connection-form input { width: 100%; min-width: 0; }
   #connection-form button { justify-self: start; }
   #connection-form p { margin: 0; }
-#mode-welcome { max-width:800px; margin:48px auto; }
-  .mode-cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-top:24px; }
-  .mode-cards button { text-align:left; padding:24px; white-space:normal; }
-  .mode-cards strong,.mode-cards span { display:block; } .mode-cards strong { font-size:1.1rem; margin-bottom:12px; }
-  .mode-cards span { color:var(--muted); line-height:1.6; }
-  #local-settings h3 { margin-top:0; } .mode-switch,.local-actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
-  .mode-switch button[aria-pressed=true] { border-color:var(--accent); color:var(--accent); }
-  #local-device { display:block; max-width:100%; margin:8px 0 20px; }
+#local-settings h3 { margin-top:0; } #local-options { margin-top:20px; }
+  #local-measure-progress { width: 100%; accent-color: var(--accent); }
+  .local-actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+  #local-device { display:block; max-width:100%; margin:8px 0 0; }
+  #chrome-extension-id { width:100%; max-width:22em; }
   label[for="local-parallel-limit"] { margin-inline-end:8px; }
   .local-check { display:flex; align-items:center; gap:8px; } #local-options progress { width:100%; }
-  #local-candidates li { margin:8px 0; } #local-candidates button { margin-left:8px; }
+  #local-candidates { list-style:none; padding-inline-start:0; }
+  #local-candidates li { margin:8px 0; }
+  .local-benchmark { width:100%; border-collapse:collapse; margin-block:8px; font-size:.9em; }
+  .local-benchmark th, .local-benchmark td { padding:5px 6px; text-align:start; border-bottom:1px solid var(--line); }
+  #local-candidates label { display:flex; align-items:center; gap:8px; cursor:pointer; }
   #local-download-confirm { max-width:520px; } #local-runtime-status { margin:8px 0; }
   .setup-group { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); } .setup-group h4 { margin:0 0 8px; font-size:.95rem; }
   .setup-group + .setup-group { padding-top:16px; }
   .save-row { margin:20px 0 4px; }
-  @media(max-width:600px) { .mode-cards { grid-template-columns:1fr; } #mode-welcome { margin:24px 0; } }
+
 /* ここから下は確認用のツールバー。アプリ本体のデザインとは独立しています。 */
-html[data-theme="light"] { --bg:#f6f7f9;--panel:#fff;--text:#1d2330;--muted:#5d6576;--line:#dde1e8;--accent:#2f6fde;--accent-text:#fff;--ok:#1f8a4c;--warn:#b26a00;--err:#c43c3c; }
-html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9aa3b2;--line:#2e343e;--accent:#5b8ff0;--accent-text:#0d1117;--ok:#4cc283;--warn:#e3a33c;--err:#ef6b6b; }
+html[data-theme="light"] { --bg:#f6f7f9;--panel:#fff;--text:#1d2330;--muted:#5d6576;--line:#dde1e8;--accent:#2f6fde;--accent-text:#fff;--accent-soft:#e9f0fd;--desktop-link:#2459b5;--ok:#1f8a4c;--warn:#b26a00;--err:#c43c3c; }
+html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9aa3b2;--line:#2e343e;--accent:#5b8ff0;--accent-text:#0d1117;--accent-soft:#2c3e63;--desktop-link:#a8c7ff;--ok:#4cc283;--warn:#e3a33c;--err:#ef6b6b; }
 .preview-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
 .preview-toolbar label { display:flex; align-items:center; gap:6px; font-size:13px; }
 .preview-toolbar p { margin:0; font-size:12px; color:var(--muted); }
@@ -148,7 +172,7 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
 <nav class="preview-toolbar" aria-label="デザイン確認ツール">
   <strong>デザイン確認</strong>
   <label>状態<select id="preview-scene">
-    <option value="welcome">初回のモード選択</option><option value="server">サーバー設定</option>
+    <option value="server">サーバー設定</option>
     <option value="missing">モデル未取得</option><option value="confirm">ダウンロード確認</option>
     <option value="downloading">ダウンロード中</option><option value="measuring">デバイス計測中</option>
     <option value="candidates">デバイス候補・手動選択</option><option value="memory">メモリ自動解放</option>
@@ -164,7 +188,8 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
     <h1><img class="brand-mark" src="data:image/png;base64,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" width="32" height="32" alt="">PTranslate Desk</h1>
     <div id="header-updates"><details id="update-menu"><summary id="version-badge">v0.0.0-dev · 開発用</summary><div class="header-popover"><span class="hint">デザイン確認用</span><button type="button">更新を確認</button></div></details></div>
     <p class="sub">PLaMo 3 Translate</p>
-    <div id="header-account"><details id="account-menu"><summary><span id="who">この端末</span></summary><div class="header-popover"><button id="preview-server-switch">サーバーモードに切り替え</button></div></details></div>
+    <div id="header-account"><div id="translation-destinations"><button id="destination-server" type="button" aria-pressed="false">サーバー <small>無効</small></button>
+  <button id="destination-local" type="button" aria-pressed="false">ローカル <small>無効</small></button></div></div>
   </header>
   <p id="local-runtime-status" class="hint" role="status" hidden></p>
   <div class="page-tabs" role="tablist" aria-label="画面の切り替え"><button id="translation-tab" role="tab">翻訳</button><button id="settings-tab" role="tab">設定</button></div>
@@ -208,28 +233,31 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
       <p class="hint">用語集・言語の選択・自動で翻訳するかは、このブラウザに覚えておきます。</p>
     </details>
   </section><p class="hint">長い文章は段落ごとに区切って順に訳します。</p></div>
-  <div id="settings-page" role="tabpanel"><div class="settings-heading"><h2>設定</h2><p class="hint">翻訳モードや接続先、ショートカットを管理します。</p></div>
-    <aside id="local-settings"><h3>翻訳する場所</h3>
-  <div class="mode-switch"><button id="mode-local">このPCで翻訳</button><button id="mode-server">サーバーで翻訳</button></div>
-  <div id="local-options" hidden>
-    <p class="hint">PLaMo 3 Translate 2Bをこの端末で動かします。</p>
-    <div class="setup-group">
+  <div id="settings-apply" role="dialog" aria-label="設定の変更" hidden><p role="status">未適用の変更があります</p>
+  <button id="apply-settings" type="button" class="primary">適用</button>
+  <button id="cancel-settings" type="button">キャンセル</button></div>
+  <div id="settings-page" role="tabpanel"><div class="settings-heading"><h2>設定</h2><div><button id="start-setup" type="button">初期設定を始める</button></div><p class="hint">翻訳モードや接続先、ショートカットを管理します。</p></div>
+    <div class="translation-settings-panel"><details id="local-settings">
+  <summary id="local-settings-title">ローカル翻訳の設定</summary>
+  <div id="local-options">
+    <p class="hint">PLaMo 3 Translate 2Bをこの端末で動かします。<a data-plamo-license href="https://plamo.preferredai.jp/info/plamo-community-license-ja" target="_blank" rel="noreferrer">PLaMoコミュニティライセンス</a></p>
+    <div class="setup-group" id="local-model-controls">
       <h4>モデル</h4>
       <div id="local-download-area"><button id="local-download" class="primary">モデルをダウンロード</button><p class="hint">モデルと推論エンジンの合計：約1.85 GB</p></div>
       <div id="local-progress-area" hidden><progress id="local-progress" max="1" value="0"></progress><p id="local-progress-label" role="status"></p><button id="local-cancel-download">ダウンロードを中止</button></div>
-      <p id="local-status" class="hint" role="status"></p>
     </div>
     <div id="local-setup" hidden>
-      <div class="setup-group">
+      <div class="setup-group" id="local-device-controls">
         <h4>翻訳に使うデバイス</h4>
         <div class="local-actions"><button id="local-measure">計測して候補を確認</button><button id="local-cancel-measure" hidden>計測を中止</button></div>
+        <progress id="local-measure-progress" aria-label="計測の進捗" hidden></progress>
         <p id="local-measure-status" class="hint" role="status"></p><ol id="local-candidates"></ol>
         <label for="local-device">使用するデバイス</label><select id="local-device"><option value="none">CPU</option></select>
       </div>
-      <div class="setup-group">
+      <div class="setup-group" id="local-parallel-controls">
         <h4>同時に訳す数</h4>
-        <label for="local-parallel-limit">推論の並列数</label><input id="local-parallel-limit" type="number" min="1" max="64" value="1" style="width:6em">
-        <p class="hint">1〜64件を指定できます。計測すると推奨値が入ります。保存して再起動すると反映されます。</p>
+        <label for="local-parallel-limit">推論の並列数</label><input id="local-parallel-limit" type="number" min="1" max="64" value="1" required style="width:6em">
+        <p class="hint">1〜64件を指定できます。計測すると推奨値が入ります。適用すると反映されます。</p>
       </div>
       <div class="setup-group">
         <h4>メモリ</h4>
@@ -237,7 +265,6 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
         <p class="hint">無効の場合は、ローカルモードの起動直後にモデルを読み込みます。</p>
         <p id="local-idle-setting"><label for="local-idle-minutes">解放するまでの未使用時間</label> <select id="local-idle-minutes"><option value="1">1分</option><option value="5">5分</option><option value="10">10分</option><option value="30">30分</option><option value="60">60分</option></select></p>
       </div>
-      <div class="local-actions save-row"><button id="local-start">モデルを読み込む</button></div>
     </div>
     <div class="setup-group">
       <h4>Chrome連携</h4>
@@ -247,19 +274,16 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
       <button id="chrome-register">Chrome連携を登録</button></details><p id="chrome-status" class="hint" role="status"></p>
     </div>
   </div>
-  <div id="mode-save-row" class="local-actions save-row">
-    <button id="local-save" class="primary">保存して再起動</button>
-    <span id="mode-pending" class="warn" role="status" hidden>未適用の変更があります</span>
-  </div><p id="mode-status" class="hint" role="status"></p>
   <dialog id="local-download-confirm" aria-labelledby="local-download-title">
     <h2 id="local-download-title">翻訳モデルをダウンロードしますか？</h2>
     <p>PLaMo 3 Translate 2B（Q4_K_M、約1.81 GB）と、推論エンジン（約37 MB）をこのPCに保存します。</p>
     <p>Hugging FaceとGitHubから取得します。通信量は約1.85 GB、空き容量は少なくとも約2 GB必要です。</p>
     <p><a id="local-model-information" href="https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF" target="_blank" rel="noreferrer">モデルの情報</a></p>
+    <p><a data-plamo-license href="https://plamo.preferredai.jp/info/plamo-community-license-ja" target="_blank" rel="noreferrer">PLaMoコミュニティライセンス</a>をご確認ください。</p>
     <p id="local-model-information-status" class="hint" role="status"></p>
     <div class="local-actions"><button id="local-confirm-download" class="primary">ダウンロードする</button><button id="local-decline-download" autofocus>キャンセル</button></div>
-  </dialog></aside>
-    <details id="connection-settings"><summary>接続先の設定</summary>
+  </dialog></details><div class="translation-settings-switch"><span id="local-active-status" class="hint" role="status"></span><input id="local-active" type="checkbox" role="switch" aria-label="ローカル翻訳" disabled></div><p id="local-status" class="hint" role="status"></p></div>
+    <div id="server-settings-panel" class="translation-settings-panel"><details id="connection-settings"><summary>サーバー翻訳の設定</summary>
   <p class="hint">自分で用意した翻訳サーバーを使う場合は、サーバーと認証の設定を入力してください。</p>
   <form id="connection-form">
     <label for="server-url">サーバーURL</label>
@@ -268,17 +292,12 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
     <input id="discovery-url" type="url" required placeholder="https://auth.example.com/application/o/translator-desktop/.well-known/openid-configuration" autocomplete="off" spellcheck="false">
     <label for="client-id">client ID（公開クライアント）</label>
     <input id="client-id" type="text" required maxlength="256" autocomplete="off" spellcheck="false">
-    <p class="hint">保存すると現在の接続先からログアウトし、アプリを再起動します。新しい接続先でログインし直してください。</p>
-    <button id="save-connection" type="submit" class="primary">接続先を保存して再起動</button>
-    <dialog id="connection-confirm" aria-labelledby="connection-confirm-title">
-      <h2 id="connection-confirm-title">接続先の変更</h2>
-      <p>現在の接続先からログアウトして接続先を変更します。保存後にアプリを再起動してよろしいですか？</p>
-      <button id="confirm-connection" type="button" class="primary">再起動する</button>
-      <button id="cancel-connection" type="button" autofocus>キャンセル</button>
-    </dialog>
+    <p class="hint">接続先を変更すると現在の接続先からログアウトします。適用後、新しい接続先でログインしてください。</p>
     <p id="connection-status" class="hint" role="status"></p>
-  </form></details>
+  </form></details><div id="server-access" class="translation-settings-switch"><input id="server-active" type="checkbox" role="switch" aria-label="サーバー翻訳" disabled>
+  <span class="hint" role="status"></span></div></div>
     <details id="desktop-settings"><summary>デスクトップの設定</summary>
+  <div id="shortcut-controls">
   <label for="shortcut">選んだ文を翻訳するショートカット</label>
   <select id="shortcut">
     <option value="double-copy">Ctrl+C を 0.5 秒以内に 2 回</option>
@@ -288,19 +307,13 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
   <div id="custom-shortcut" hidden>
     <label for="shortcut-keys">組み合わせ（例: CommandOrControl+Alt+J）</label>
     <input id="shortcut-keys" type="text" autocomplete="off" spellcheck="false">
-    <button id="save-shortcut">この組み合わせを使う</button>
   </div>
   <p class="hint" id="shortcut-status"></p>
   <p class="hint" id="shortcut-diagnostics"></p>
   <button id="accessibility" hidden>アクセシビリティの設定を開く</button>
+  </div>
   <p class="hint">メインウィンドウを閉じても通知領域に常駐します。終了するにはトレイの「終了」を使います。組み合わせのショートカットは、キーを離すと選んだ文をコピーします。管理者権限で動くアプリからは取得できない場合があります。</p></details>
   </div>
-  <div id="mode-welcome"><h2>翻訳する場所を選んでください</h2>
-  <p class="hint">あとから設定で切り替えられます。</p>
-  <div class="mode-cards">
-    <button id="welcome-local"><strong>このPCで翻訳</strong><span>ログインせず、この端末のモデルで翻訳します。初回に約1.85 GBをダウンロードします。</span></button>
-    <button id="welcome-server"><strong>サーバーで翻訳</strong><span>接続先を設定してログインします。モデルのダウンロードは不要です。</span></button>
-  </div><p id="welcome-status" class="hint" role="status"></p></div>
 </main></div>
 <script>
 // 確認用の状態遷移だけを再現する。アプリのネイティブAPIは使用しない。
@@ -311,27 +324,29 @@ function scene(name) {
   clearInterval(animation);
   document.querySelectorAll('dialog[open]').forEach((d) => d.close());
   $('preview-scene').value = name;
-  const welcome = name === 'welcome';
   const translate = name === 'translation' || name === 'loading';
   const server = name === 'server';
   const missing = ['missing','confirm','downloading','error'].includes(name);
-  show('mode-welcome', welcome); show('translation-page', !welcome && translate); show('settings-page', !welcome && !translate);
-  document.querySelector('.page-tabs').hidden = welcome;
-  show('header-account', !welcome && !missing && !server);
-  show('mode-save-row', !server); show('local-options', !server); show('connection-settings', server); $('connection-settings').open = server;
-  show('local-setup', !missing && !server);
+  show('translation-page', translate); show('settings-page', !translate);
+  $('connection-settings').open = server; $('local-settings').open = !server;
+  show('local-setup', !missing);
   show('local-download-area', missing && name !== 'downloading'); show('local-progress-area', name === 'downloading');
+  show('local-measure-progress', name === 'measuring'); $('local-measure-progress').max = 24; $('local-measure-progress').value = 16;
   show('local-cancel-measure', name === 'measuring'); show('local-runtime-status', name === 'loading');
   $('local-runtime-status').textContent = '翻訳モデルを読み込んでいます…';
   $('local-auto-release').checked = name === 'memory'; show('local-idle-setting', name === 'memory'); $('local-idle-minutes').value = '5';
-  $('mode-local').setAttribute('aria-pressed',String(!server)); $('mode-server').setAttribute('aria-pressed',String(server));
+  $('destination-local').setAttribute('aria-pressed',String(!server)); $('destination-server').setAttribute('aria-pressed',String(server));
+  $('destination-local').dataset.available = String(!missing);
+  $('destination-server').dataset.available = String(server);
+  $('destination-local').querySelector('small').textContent = missing ? '無効' : '有効';
+  $('destination-server').querySelector('small').textContent = server ? '有効' : '無効';
   $('translation-tab').setAttribute('aria-selected',String(translate)); $('settings-tab').setAttribute('aria-selected',String(!translate));
-  show('local-save', !missing);
-  $('local-save').disabled = missing || name === 'measuring'; $('local-measure').disabled = missing || name === 'measuring';
-  $('local-start').disabled = missing || name === 'measuring';
+  $('local-measure').disabled = missing || name === 'measuring';
+  $('local-active').checked = !missing; $('local-active').disabled = missing || name === 'measuring';
+  $('server-active').checked = server; $('server-active').disabled = false;
   $('local-status').className = name === 'error' ? 'hint err' : 'hint';
   $('local-status').textContent = name === 'error' ? 'ダウンロードが途切れました。やり直してください' : name === 'downloading' ? '' : missing ? 'モデルをダウンロードすると、このPCで翻訳できます。' : 'モデルの準備ができました。';
-  $('local-measure-status').textContent = name === 'measuring' ? 'AMD Radeon Graphicsを計測しています…' : ['candidates','memory'].includes(name) ? '推奨値を設定欄に反映しました。「保存して再起動」で適用します。' : '';
+  $('local-measure-status').textContent = name === 'measuring' ? '並列数の候補 4/5 · AMD Radeon Graphics・8並列 · 16/24件 完了' : ['candidates','memory'].includes(name) ? '推奨値を設定欄に反映しました。「適用」で反映します。' : '';
   $('local-candidates').replaceChildren();
   if (['candidates','memory'].includes(name)) {
     for (const [label,id] of [['NVIDIA GeForce RTX 4090：短文の翻訳 約0.06秒（おすすめ）','Vulkan0'],['CPU：短文の翻訳 約0.45秒','none'],['AMD Radeon Graphics：短文の翻訳 約3.20秒','Vulkan1']]) {
@@ -343,18 +358,16 @@ function scene(name) {
   $('local-parallel-limit').value = '8';
   $('local-progress').value = .42; $('local-progress-label').textContent = '翻訳モデル：723.9 / 1723.5 MiB（42%）';
   $('client-id').value = 'translator-desktop'; $('shortcut-status').textContent = 'ショートカットを使えます';
-  $('header-account').querySelector('summary').title = 'アカウント';
   $('count').textContent = String($('src').value.length);
   $('out').textContent = name === 'loading' ? '' : 'このアプリケーションは、お使いのコンピューターで文章を翻訳します。';
   $('copy').disabled = name === 'loading';
-  document.querySelector('#app-header .sub').textContent = welcome ? 'PLaMo 3 Translate' : server ? 'PLaMo 3 Translate · 原文と訳はサーバーに残りません' : 'PLaMo 3 Translate · このPCで翻訳';
   if (name === 'confirm') { $('local-download-confirm').showModal(); $('local-decline-download').focus(); }
 }
 $('preview-scene').onchange = (e) => scene(e.target.value);
 $('preview-theme').onchange = (e) => document.documentElement.dataset.theme = e.target.value;
 $('preview-width').onchange = (e) => $('preview-frame').style.width = e.target.value === 'full' ? '100%' : e.target.value + 'px';
-$('welcome-local').onclick = $('mode-local').onclick = () => scene('missing');
-$('welcome-server').onclick = $('mode-server').onclick = $('preview-server-switch').onclick = () => scene('server');
+$('destination-local').onclick = () => scene('missing');
+$('destination-server').onclick = () => scene('server');
 $('local-download').onclick = () => scene('confirm'); $('local-decline-download').onclick = () => scene('missing');
 $('local-confirm-download').onclick = () => {
   scene('downloading'); let progress = .42;
@@ -363,11 +376,9 @@ $('local-confirm-download').onclick = () => {
 $('local-cancel-download').onclick = () => scene('missing');
 $('local-measure').onclick = () => { scene('measuring'); animation = setInterval(() => scene('candidates'),1800); };
 $('local-cancel-measure').onclick = () => scene('candidates');
+$('local-active').onchange = () => $('local-status').textContent = $('local-active').checked ? 'モデルを読み込みました。' : 'モデルを解放しました。';
 $('local-auto-release').onchange = () => show('local-idle-setting',$('local-auto-release').checked);
-$('local-save').onclick = () => scene('translation'); $('local-start').onclick = () => $('local-status').textContent = 'モデルの準備ができました。';
 $('translation-tab').onclick = () => scene('translation'); $('settings-tab').onclick = () => scene('candidates');
-$('connection-form').onsubmit = (e) => { e.preventDefault(); $('connection-confirm').showModal(); };
-$('cancel-connection').onclick = () => $('connection-confirm').close(); $('confirm-connection').onclick = () => { scene('translation'); $('who').textContent = 'サンプルユーザー'; };
 for (const id of ['source','target']) $(id).innerHTML = (id === 'source' ? '<option value="">自動で判定</option>' : '<option value="auto">日本語 ⇄ 英語（自動）</option>') + '<option value="ja">日本語</option><option value="en">英語</option>';
 $('src').value = 'This application translates text on your computer.';
 $('out').textContent = 'このアプリケーションは、お使いのコンピューターで文章を翻訳します。';
@@ -375,6 +386,11 @@ $('go').onclick = () => $('status').textContent = '訳し終わりました（�
 $('clear').onclick = () => { $('src').value = ''; $('out').textContent = ''; };
 $('shortcut').onchange = () => show('custom-shortcut',$('shortcut').value === 'custom');
 document.querySelectorAll('a[href^="http"]').forEach((link) => { link.onclick = (e) => { e.preventDefault(); $('local-status').textContent = 'モデル情報のリンク（表示サンプル）'; }; });
-scene(new URLSearchParams(location.search).get('scene') || 'welcome');
+$('settings-page').addEventListener('input', (event) => {
+  if (event.target.getAttribute('role') !== 'switch') show('settings-apply', true);
+});
+$('apply-settings').onclick = $('cancel-settings').onclick = () => show('settings-apply', false);
+$('connection-form').onsubmit = (event) => event.preventDefault();
+scene(new URLSearchParams(location.search).get('scene') || 'server');
 </script>
 </body></html>
