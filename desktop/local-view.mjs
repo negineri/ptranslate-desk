@@ -43,7 +43,7 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
         <p class="hint">無効の場合は、ローカルモードの起動直後にモデルを読み込みます。</p>
         <p id="local-idle-setting"><label for="local-idle-minutes">解放するまでの未使用時間</label> <select id="local-idle-minutes"><option value="1">1分</option><option value="5">5分</option><option value="10">10分</option><option value="30">30分</option><option value="60">60分</option></select></p>
       </div>
-      <div class="local-actions save-row"><button id="local-start">モデルを読み込む</button><span class="spacer"></span><button id="local-save" class="primary">保存して再起動</button></div>
+      <div class="local-actions save-row"><button id="local-start">モデルを読み込む</button></div>
     </div>
     <div class="setup-group">
       <h4>Chrome連携</h4>
@@ -52,6 +52,10 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
       <label for="chrome-extension-id">拡張ID</label><input id="chrome-extension-id" type="text" maxlength="32" autocomplete="off" spellcheck="false">
       <button id="chrome-register">Chrome連携を登録</button></details><p id="chrome-status" class="hint" role="status"></p>
     </div>
+  </div>
+  <div class="local-actions save-row">
+    <button id="local-save" class="primary">保存して再起動</button>
+    <span id="mode-pending" class="warn" role="status" hidden>未適用の変更があります</span>
   </div><p id="mode-status" class="hint" role="status"></p>
   <dialog id="local-download-confirm" aria-labelledby="local-download-title">
     <h2 id="local-download-title">翻訳モデルをダウンロードしますか？</h2>
@@ -100,25 +104,32 @@ document.head.append(style);
 const $ = (id) => document.getElementById(id);
 let state, downloading = false, measuring = false, detecting = 0, draftLocal = false, modeVersion = 0;
 let measurementCompleted = false;
+let saving = false;
 function message(id, text, failed = false) {
   $(id).textContent = String(text); $(id).className = failed ? "hint err" : "hint";
   $(id).setAttribute("role", failed ? "alert" : "status");
 }
 function error(e) { message("local-status", e, true); }
 function settings() {
-  return { enabled: true, device: $("local-device").value, auto_release: $("local-auto-release").checked,
+  return { enabled: draftLocal, device: $("local-device").value, auto_release: $("local-auto-release").checked,
     idle_minutes: Number($("local-idle-minutes").value), parallel: Number($("local-parallel-limit").value), measurement_completed: measurementCompleted };
 }
 function busy() {
   $("local-setup").hidden = !state?.available;
-  $("local-save").disabled = downloading || measuring || detecting > 0 || !state?.available;
+  const draft = settings();
+  const pending = !state.configured || draft.enabled !== state.enabled ||
+    (draftLocal && ["device", "parallel", "auto_release", "idle_minutes"].some((key) => draft[key] !== state[key]));
+  $("mode-pending").hidden = !pending;
+  $("local-save").textContent = !state.configured && !draftLocal ? "保存" : "保存して再起動";
+  $("local-save").disabled = !pending || saving || downloading || measuring || detecting > 0 || (draftLocal && !state.available);
   $("local-download").disabled = downloading || measuring;
   $("local-measure").disabled = downloading || measuring || detecting > 0 || !state?.available;
   $("local-device").disabled = measuring || downloading;
   $("local-parallel-limit").disabled = measuring || downloading;
   $("local-cancel-measure").hidden = !measuring;
   $("local-start").disabled = !state?.enabled || downloading || measuring || state?.loading;
-  $("mode-server").disabled = downloading || measuring;
+  $("mode-server").disabled = saving || downloading || measuring;
+  $("mode-local").disabled = saving || !state.supported;
 }
 function selectDraft(local) {
   draftLocal = local; modeVersion++;
@@ -126,6 +137,7 @@ function selectDraft(local) {
   $("mode-local").setAttribute("aria-pressed", String(local));
   $("mode-server").setAttribute("aria-pressed", String(!local));
   $("connection-settings").hidden = local;
+  busy();
 }
 function hideWelcome() {
   welcome.hidden = true; main.querySelector(".page-tabs").hidden = false;
@@ -185,13 +197,10 @@ async function chooseLocal() {
   if (state.available) { await devices(); if (draftLocal && modeVersion === version && !measurementCompleted) await measure(); }
   else message("local-status", "モデルをダウンロードすると、このPCで翻訳できます。");
 }
-async function chooseServer() {
-  try {
-    if (state.enabled) { await invoke("save_local_settings", { settings: { ...settings(), enabled: false } }); return; }
-    await invoke("select_server_mode"); hideWelcome(); selectDraft(false);
-    $("connection-settings").open = true;
-    message("mode-status", "接続先を設定してログインしてください。"); resolveMode();
-  } catch (e) { message("mode-status", e, true); }
+function chooseServer() {
+  hideWelcome();
+  selectDraft(false);
+  $("connection-settings").open = true;
 }
 $("welcome-local").onclick = () => void chooseLocal().catch(error);
 $("welcome-server").onclick = () => void chooseServer();
@@ -233,9 +242,28 @@ $("local-confirm-download").onclick = async () => {
   if (state.available) { await devices(); await measure(); }
 };
 $("local-cancel-download").onclick = () => void invoke("cancel_local_download").catch(error);
+panel.addEventListener("input", busy);
 $("local-save").onclick = async () => {
-  $("local-save").disabled = true; message("local-status", "設定を保存して再起動しています…");
-  try { await invoke("save_local_settings", { settings: settings() }); } catch (e) { error(e); busy(); }
+  if ($("local-save").disabled) return;
+  saving = true;
+  busy();
+  try {
+    if (!state.configured && !draftLocal) {
+      await invoke("select_server_mode");
+      state.configured = true;
+      message("mode-status", "接続先を設定してログインしてください。");
+      resolveMode();
+      saving = false;
+      busy();
+    } else {
+      message("mode-status", "設定を保存して再起動しています…");
+      await invoke("save_local_settings", { settings: settings() });
+    }
+  } catch (e) {
+    saving = false;
+    message("mode-status", e, true);
+    busy();
+  }
 };
 $("local-start").onclick = async () => {
   message("local-status", "モデルを読み込んでいます…");

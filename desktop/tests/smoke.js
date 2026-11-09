@@ -28,6 +28,10 @@
       $("mode-server").click();
     } else $("welcome-server").click();
     await wait(() => $("mode-welcome").hidden && !$("connection-settings").hidden);
+    if ((await window.__TAURI__.core.invoke("local_status")).configured) throw new Error("選択だけで設定が適用された");
+    if ($("mode-pending").hidden) throw new Error("未適用の表示");
+    $("local-save").click();
+    await wait(() => $("mode-pending").hidden);
     step = "ログイン前のヘッダー";
     await wait(() => $("version-badge")?.textContent.startsWith("v"));
     if (!$("version-badge").textContent.includes("0.0.0-dev")) throw new Error("開発版のバージョン");
