@@ -12,15 +12,17 @@
   main { padding: 12px; height: 100%; display: flex; flex-direction: column; max-width: none; }
   .heading, #status, .row { flex-shrink: 0; }
   .heading { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-  #direction { flex: 1; font-size: .85rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .heading-text { flex: 1; min-width: 0; }
+  #direction { display: block; font-size: .85rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #out { min-height: 0; flex: 1; overflow-y: auto; background: var(--panel); }
   #translation:empty::before { content: "ここに訳が出ます"; color: var(--muted); }
   #status { margin-top: 6px; }
+  .model-credit { flex-shrink: 0; margin-top: 4px; text-align: right; font-size: 11px; color: var(--muted); }
   .row { justify-content: flex-end; margin-top: 6px; }
 </style>
 </head>
 <body><main>
-  <div class="heading"><img class="brand-mark" src="./logo.png" width="20" height="20" alt=""><span id="direction">選んだ文を翻訳</span><button id="close" aria-label="閉じる">閉じる</button></div>
+  <div class="heading"><img class="brand-mark" src="./logo.png" width="20" height="20" alt=""><div class="heading-text"><strong>PTranslate</strong><span id="direction">選んだ文を翻訳</span></div><button id="close" aria-label="閉じる">閉じる</button></div>
   <div id="out" aria-live="polite"><div id="translation"></div></div>
   <div id="status" class="hint" role="status"></div>
   <div class="row">
@@ -28,5 +30,6 @@
     <button id="options" hidden>設定</button>
     <button id="copy" disabled>コピー</button>
   </div>
+  <footer class="model-credit">PLaMo 3 Translate</footer>
 </main><script type="module" src="./popup.mjs"></script></body>
 </html>

@@ -247,7 +247,7 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
       <button id="chrome-register">Chrome連携を登録</button></details><p id="chrome-status" class="hint" role="status"></p>
     </div>
   </div>
-  <div class="local-actions save-row">
+  <div id="mode-save-row" class="local-actions save-row">
     <button id="local-save" class="primary">保存して再起動</button>
     <span id="mode-pending" class="warn" role="status" hidden>未適用の変更があります</span>
   </div><p id="mode-status" class="hint" role="status"></p>
@@ -269,11 +269,11 @@ html[data-theme="dark"] { --bg:#14171c;--panel:#1d2128;--text:#e7eaf0;--muted:#9
     <label for="client-id">client ID（公開クライアント）</label>
     <input id="client-id" type="text" required maxlength="256" autocomplete="off" spellcheck="false">
     <p class="hint">保存すると現在の接続先からログアウトし、アプリを再起動します。新しい接続先でログインし直してください。</p>
-    <button id="save-connection" type="submit" class="primary">保存して再起動</button>
+    <button id="save-connection" type="submit" class="primary">接続先を保存して再起動</button>
     <dialog id="connection-confirm" aria-labelledby="connection-confirm-title">
       <h2 id="connection-confirm-title">接続先の変更</h2>
       <p>現在の接続先からログアウトして接続先を変更します。保存後にアプリを再起動してよろしいですか？</p>
-      <button id="confirm-connection" type="button" class="primary">保存して再起動する</button>
+      <button id="confirm-connection" type="button" class="primary">再起動する</button>
       <button id="cancel-connection" type="button" autofocus>キャンセル</button>
     </dialog>
     <p id="connection-status" class="hint" role="status"></p>
@@ -318,7 +318,7 @@ function scene(name) {
   show('mode-welcome', welcome); show('translation-page', !welcome && translate); show('settings-page', !welcome && !translate);
   document.querySelector('.page-tabs').hidden = welcome;
   show('header-account', !welcome && !missing && !server);
-  show('local-options', !server); show('connection-settings', server); $('connection-settings').open = server;
+  show('mode-save-row', !server); show('local-options', !server); show('connection-settings', server); $('connection-settings').open = server;
   show('local-setup', !missing && !server);
   show('local-download-area', missing && name !== 'downloading'); show('local-progress-area', name === 'downloading');
   show('local-cancel-measure', name === 'measuring'); show('local-runtime-status', name === 'loading');
@@ -326,6 +326,7 @@ function scene(name) {
   $('local-auto-release').checked = name === 'memory'; show('local-idle-setting', name === 'memory'); $('local-idle-minutes').value = '5';
   $('mode-local').setAttribute('aria-pressed',String(!server)); $('mode-server').setAttribute('aria-pressed',String(server));
   $('translation-tab').setAttribute('aria-selected',String(translate)); $('settings-tab').setAttribute('aria-selected',String(!translate));
+  show('local-save', !missing);
   $('local-save').disabled = missing || name === 'measuring'; $('local-measure').disabled = missing || name === 'measuring';
   $('local-start').disabled = missing || name === 'measuring';
   $('local-status').className = name === 'error' ? 'hint err' : 'hint';

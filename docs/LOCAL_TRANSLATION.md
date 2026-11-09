@@ -181,11 +181,11 @@ RTX 4090・CPU・内蔵GPUの結果は[計測記録](LOCAL_BENCHMARK.md)に掲�
 
 ## Chrome拡張との連携
 
-Windows版の同じEXEをChromeが中継専用モードで起動する。中継はモデルを起動せず、
-同じWindows利用者だけが接続できる名前付きパイプで、起動中のデスクトップへ要求を渡す。
+Chromeはデスクトップの実行ファイルを中継専用モードで起動する。
+中継はWindowsでは名前付きパイプ、macOSではUnixソケットを通じて、同じ利用者が起動したデスクトップに要求を渡す。
 モデル・デバイス・メモリ管理・実行枠はデスクトップと共有する。拡張のローカルモードからサーバーへの自動転送は行わない。
 
-1. 最新のWindows版デスクトップをインストールし、一度起動してローカル翻訳を設定する。
+1. 最新のデスクトップをインストールし、一度起動してローカル翻訳を設定する。macOSではアプリを「アプリケーション」に移してから起動する。
 2. Chrome拡張の設定で「このPCで翻訳」を選び、「接続」を押す。ブラウザーのアプリ起動確認を許可する。
 3. デスクトップに表示された連携の確認画面で「登録する」を押す。
 4. 拡張の設定に接続完了が表示されるのを待つ。承認後のボタンの押し直しは不要。
@@ -197,17 +197,18 @@ Windows版の同じEXEをChromeが中継専用モードで起動する。中継�
 専用URLは `ptranslate://register-chrome?extension_id=<32文字のID>`。起動中は既存のアプリへ要求を転送する。
 Webサイトからも呼べるため、URLの受信だけでは登録しない。IDとURLの形式を検証し、デスクトップで明示的に承認する。
 確認中のIDの差し替え、キャンセル済み要求の再承認は拒否する。受信・承認によって翻訳モードを変更したり、モデルを取得したりはしない。
-URLの起動先はデスクトップの通常起動時にユーザー単位で登録する。試験用ビルドでは登録しない。
+URLの起動先はWindowsでは通常起動時にユーザー単位で登録し、macOSでは配布するアプリに定義する。
 
 登録はユーザー単位で、管理者権限は不要。後から登録した拡張ID・実行ファイルが有効になる。
-開発用ビルドのEXEを移動した場合や、通常版と試作版を切り替える場合は登録し直す。
-ホスト定義は `%LOCALAPPDATA%/PTranslateChrome/native-host.json`、Chromeの登録先は
+実行ファイルを移動した場合や、通常版と試作版を切り替える場合は登録し直す。
+Windowsのホスト定義は `%LOCALAPPDATA%/PTranslateChrome/native-host.json`、Chromeの登録先は
 `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.witenp.ptranslate`。
+macOSのホスト定義は `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.witenp.ptranslate.json`。
 
-インストーラーからの通常のアンインストールでは、自身のEXEが登録した連携だけを解除する。
+Windowsのインストーラーからの通常のアンインストールでは、自身のEXEが登録した連携だけを解除する。
 自動更新中は登録を維持する。開発版はそのEXEを `--unregister-chrome` 付きで起動すると解除できる。
 
-Chrome連携のパイプを作れなくても、デスクトップ本体は起動し、サーバー翻訳と本体でのローカル翻訳を利用できる。
+Chrome連携のパイプやソケットを作れなくても、デスクトップ本体は起動し、サーバー翻訳と本体でのローカル翻訳を利用できる。
 連携の設定欄に失敗と再起動の案内を表示し、連携を利用できない状態では登録を変更しない。
 Windowsでは同じアプリの二重起動を防ぎ、URLを起動済みのアプリへ渡す。
 通常版と試作版など識別子の異なるアプリを切り替える場合は、使う側で連携を登録し直す。
@@ -216,14 +217,14 @@ Windowsでは同じアプリの二重起動を防ぎ、URLを起動済みのア�
 混雑を接続失敗として扱わず、応答を欠落させない。Chromeが接続を閉じた場合は待機も含めて中止する。
 
 中継の試験は `cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml` と、
-Windowsで `cargo build --locked --features smoke-test --manifest-path desktop/src-tauri/Cargo.toml` の後に
-`python tools/test_chrome_bridge.py` を実行する。試験は一時的なホスト定義とモックのパイプを使い、
-中継の完了・中止と、パイプが占有されている場合の本体起動・失敗通知を確認する。
+Windows・macOSで `cargo build --locked --features smoke-test --manifest-path desktop/src-tauri/Cargo.toml` の後に
+`python tools/test_chrome_bridge.py` を実行する。試験は一時的なホスト定義とモックのパイプまたはソケットを使い、中継の完了・中止を確認する。
+Windowsではパイプが占有されている場合の本体起動・失敗通知も確認する。
 Chromeの登録・既存設定・実モデルには触れない。
-同じビルドで `python tools/test_chrome_registration.py` を実行すると、新規起動・起動中のアプリへのURL転送と、
+Windowsでは同じビルドで `python tools/test_chrome_registration.py` を実行すると、新規起動・起動中のアプリへのURL転送と、
 IDの確認・キャンセル・キャンセル後の承認拒否を確認する。この試験も登録やモデル取得を行わない。
 
-実Chromeと取得済みモデルで確認する場合は、`smoke-test`付きビルドの後に、
+Windowsで実Chromeと取得済みモデルで確認する場合は、`smoke-test`付きビルドの後に、
 `python tools/run_extension_local_probe.py --device Vulkan0 --parallel 1` を起動する。
 表示されたページで拡張の翻訳を開始する。並列数は `--parallel 4` などで指定できる。
 モデル・既存のデスクトップ設定を変更せず、試験終了時にChrome連携の登録も元に戻す。

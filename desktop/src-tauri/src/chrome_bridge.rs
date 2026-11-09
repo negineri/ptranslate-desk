@@ -1,5 +1,5 @@
-//! Chromeの起動する同じEXEを、中継専用モードで使う。
-//! 原文・訳は保存せず、利用者限定の名前付きパイプで起動中のアプリへ渡す。
+//! Chromeはアプリの実行ファイルを中継専用モードで起動する。
+//! 原文・訳は保存せず、利用者限定のIPCで起動中のアプリへ渡す。
 use tauri::Manager;
 
 #[derive(Default)]
@@ -14,7 +14,7 @@ pub struct RegistrationRequest {
     extension_id: String,
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 fn extension_id_from_url(input: &str) -> Option<String> {
     if input.len() > 256 {
         return None;
@@ -35,11 +35,16 @@ fn extension_id_from_url(input: &str) -> Option<String> {
         return None;
     }
     let id = &pairs[0].1;
-    (id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))).then(|| id.to_string())
+    valid_id(id).then(|| id.to_string())
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+fn valid_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))
 }
 
 impl Status {
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test))]
     fn offer(&self, input: &str) -> bool {
         let Some(extension_id) = extension_id_from_url(input) else {
             return false;
@@ -107,7 +112,7 @@ pub fn finish_chrome_registration(
     })
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn setup_links(app: &tauri::AppHandle) {
     use tauri::{Emitter, Manager};
     use tauri_plugin_deep_link::DeepLinkExt;
@@ -132,7 +137,7 @@ pub fn setup_links(app: &tauri::AppHandle) {
         }
     }
     // 試験用EXEから利用者のプロトコル登録を変更しない。
-    #[cfg(not(feature = "smoke-test"))]
+    #[cfg(all(target_os = "windows", not(feature = "smoke-test")))]
     if app.deep_link().register_all().is_err() {
         eprintln!("拡張からデスクトップを開くためのURL登録に失敗しました。拡張IDの手動登録は利用できます。");
     }
@@ -142,7 +147,7 @@ pub fn error(app: &tauri::AppHandle) -> Option<String> {
     app.state::<Status>().error.lock().unwrap().clone()
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn unavailable(app: &tauri::AppHandle) {
     *app.state::<Status>().error.lock().unwrap() = Some(
         "Chrome連携を起動できませんでした。同じアプリが起動中なら終了してから、このアプリを起動し直してください。デスクトップでの翻訳は利用できます。".into(),
@@ -154,45 +159,40 @@ pub fn register_chrome(window: tauri::WebviewWindow, extension_id: String) -> Re
     if window.label() != "main" {
         return Err("メイン画面から操作してください".into());
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         if let Some(error) = error(window.app_handle()) {
             return Err(error);
         }
-        windows::register(&extension_id).map_err(|_| "Chrome連携の登録に失敗しました".into())
+        platform::register(&extension_id).map_err(|_| "Chrome連携の登録に失敗しました".into())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = extension_id;
-        Err("Chromeのローカル翻訳はWindowsに対応しています".into())
+        Err("Chromeのローカル翻訳はWindowsとmacOSに対応しています".into())
     }
 }
 
-#[cfg(target_os = "windows")]
-pub use windows::{host_entry, schedule};
+#[cfg(target_os = "macos")]
+#[path = "chrome_bridge/macos.rs"]
+mod platform;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub use platform::{host_entry, schedule};
 
 #[cfg(target_os = "windows")]
-mod windows {
-    use crate::{local, Message};
+mod platform {
+    use super::protocol::*;
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
-    use std::{
-        io::{self, Read, Write},
-        path::PathBuf,
-    };
-    use tauri::{AppHandle, Manager};
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::windows::named_pipe::{ClientOptions, ServerOptions},
-    };
+    use std::{io, path::PathBuf};
+    use tauri::AppHandle;
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
     use windows_sys::Win32::{
         Foundation::{CloseHandle, LocalFree},
         Security::{Authorization::*, *},
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
 
-    const HOST: &str = "com.witenp.ptranslate";
-    const MAX_MESSAGE: usize = 256 * 1024;
     fn manifest_path() -> io::Result<PathBuf> {
         Ok(PathBuf::from(
             std::env::var_os("LOCALAPPDATA")
@@ -270,7 +270,7 @@ mod windows {
         }
     }
     pub fn register(id: &str) -> io::Result<()> {
-        if id.len() != 32 || !id.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
+        if !super::valid_id(id) {
             return Err(io::Error::other("拡張IDが不正です"));
         }
         let path = manifest_path()?;
@@ -303,25 +303,6 @@ mod windows {
             use std::os::windows::process::CommandExt;
             self.creation_flags(0x08000000)
         }
-    }
-    fn read_frame(input: &mut impl Read) -> io::Result<Vec<u8>> {
-        let mut header = [0; 4];
-        input.read_exact(&mut header)?;
-        let len = u32::from_le_bytes(header) as usize;
-        if len == 0 || len > MAX_MESSAGE {
-            return Err(io::Error::other("メッセージが大きすぎます"));
-        }
-        let mut body = vec![0; len];
-        input.read_exact(&mut body)?;
-        Ok(body)
-    }
-    fn write_frame(output: &mut impl Write, body: &[u8]) -> io::Result<()> {
-        if body.len() > MAX_MESSAGE {
-            return Err(io::Error::other("メッセージが大きすぎます"));
-        }
-        output.write_all(&(body.len() as u32).to_le_bytes())?;
-        output.write_all(body)?;
-        output.flush()
     }
     fn unregister_protocol() -> io::Result<()> {
         let key = r"Software\Classes\ptranslate";
@@ -377,50 +358,24 @@ mod windows {
             {
                 return Err(io::Error::other("許可されていない拡張です"));
             }
-            let rt = tokio::runtime::Runtime::new()?;
-            let result = rt.block_on(async {
+            run_host(async {
                 let name = pipe_name()?;
                 let started = std::time::Instant::now();
-                let pipe = loop {
+                loop {
                     match ClientOptions::new().open(&name) {
-                        Ok(pipe) => break pipe,
-                        Err(error) if error.raw_os_error() == Some(231) && started.elapsed().as_secs() < 2 => {
+                        Ok(pipe) => return Ok(pipe),
+                        Err(error)
+                            if error.raw_os_error() == Some(231)
+                                && started.elapsed().as_secs() < 2 =>
+                        {
                             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                         }
                         Err(error) => return Err(error),
                     }
-                };
-                let (mut reader, mut writer) = tokio::io::split(pipe);
-                // stdinのEOFをすぐパイプへ伝え、中止した推論を残さない。
-                let incoming = tokio::task::spawn_blocking(|| read_frame(&mut io::stdin())).await??;
-                writer.write_all(&(incoming.len() as u32).to_le_bytes()).await?;
-                writer.write_all(&incoming).await?;
-                let mut eof = tokio::task::spawn_blocking(|| { let mut b = [0]; let _ = io::stdin().read(&mut b); });
-                loop {
-                    let mut header = [0; 4];
-                    tokio::select! { _ = &mut eof => return Ok::<(), io::Error>(()), result = reader.read_exact(&mut header) => { result?; } }
-                    let len = u32::from_le_bytes(header) as usize;
-                    if len == 0 || len > MAX_MESSAGE { return Err(io::Error::other("応答が大きすぎます")); }
-                    let mut body = vec![0;len]; reader.read_exact(&mut body).await?;
-                    write_frame(&mut io::stdout(), &body)?;
-                    let message: Value = serde_json::from_slice(&body)?;
-                    if matches!(message["kind"].as_str(), Some("end" | "error" | "canceled")) { return Ok(()); }
                 }
-            });
-            rt.shutdown_background();
-            result
+            })
         })();
-        if result.is_err() {
-            let _ = write_frame(&mut io::stdout(), br#"{"kind":"error"}"#);
-        }
-        // stdin待ちのスレッドを残さず終了する。翻訳内容を標準エラーにも出さない。
-        std::process::exit(if result.is_ok() { 0 } else { 1 });
-    }
-    struct Output(tokio::sync::mpsc::Sender<Message>);
-    impl local::Output for Output {
-        fn send(&self, message: Message) -> local::SendResult<'_> {
-            Box::pin(async move { self.0.send(message).await.map_err(|_| ()) })
-        }
+        exit_host(result);
     }
     pub fn schedule(app: &AppHandle) {
         let mut listener = match tauri::async_runtime::block_on(async { create_pipe(true) }) {
@@ -452,155 +407,10 @@ mod windows {
             }
         });
     }
-    async fn serve(
-        app: AppHandle,
-        pipe: tokio::net::windows::named_pipe::NamedPipeServer,
-    ) -> io::Result<()> {
-        let (mut reader, mut writer) = tokio::io::split(pipe);
-        let mut header = [0; 4];
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            reader.read_exact(&mut header),
-        )
-        .await??;
-        let len = u32::from_le_bytes(header) as usize;
-        if len == 0 || len > MAX_MESSAGE {
-            return Err(io::Error::other("不正な要求です"));
-        }
-        let mut body = vec![0; len];
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            reader.read_exact(&mut body),
-        )
-        .await??;
-        let request: Value = serde_json::from_slice(&body)?;
-        let route = request["route"].as_str().unwrap_or("");
-        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-        let output = Output(tx.clone());
-        let work = async {
-            if request["version"] != 1
-                || !matches!(route, "api/config" | "api/translate")
-                || !app.state::<local::Local>().enabled()
-            {
-                let _ = tx.send(Message::Error).await;
-                return;
-            }
-            let result = local::request(
-                &app,
-                route,
-                request.get("body").filter(|v| !v.is_null()),
-                &output,
-            )
-            .await;
-            let _ = tx
-                .send(if result.is_ok() {
-                    Message::End
-                } else {
-                    Message::Error
-                })
-                .await;
-        };
-        let send = async {
-            while let Some(msg) = rx.recv().await {
-                let terminal = matches!(msg, Message::End | Message::Error | Message::Canceled);
-                let body = serde_json::to_vec(&msg)?;
-                if body.len() > MAX_MESSAGE {
-                    return Err(io::Error::other("応答が大きすぎます"));
-                }
-                writer.write_all(&(body.len() as u32).to_le_bytes()).await?;
-                writer.write_all(&body).await?;
-                if terminal {
-                    return Ok::<(), io::Error>(());
-                }
-            }
-            Ok(())
-        };
-        let disconnected = async {
-            let mut byte = [0];
-            let _ = reader.read(&mut byte).await;
-        };
-        tokio::select! { _ = disconnected => Ok(()), result = async { tokio::join!(work, send).1 } => result }
-    }
     #[cfg(test)]
     mod tests {
         use super::*;
-        #[tokio::test]
-        async fn burst_waits_for_capacity_and_preserves_all_events_in_order() {
-            use local::Output as _;
-            let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-            let output = Output(tx);
-            // 1回の読み取りに300イベントがまとめて届く場合。
-            let wire: String = (0..300)
-                .map(|i| format!("data: {}\n\n", json!({"choices":[{"text":i.to_string()}]})))
-                .collect();
-            let events = local::Decoder::default().feed(wire.as_bytes()).unwrap();
-            assert_eq!(events.len(), 300);
-            let producer = tokio::spawn(async move {
-                for event in events {
-                    output
-                        .send(Message::Bytes {
-                            bytes: serde_json::to_vec(&event).unwrap(),
-                        })
-                        .await
-                        .unwrap();
-                }
-                output.send(Message::End).await.unwrap();
-            });
-            tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                while rx.len() < 256 {
-                    assert!(!producer.is_finished());
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-            assert_eq!(rx.len(), 256);
-            assert!(!producer.is_finished());
-            for i in 0..300 {
-                let Some(Message::Bytes { bytes }) = rx.recv().await else {
-                    panic!("イベントが欠落しました")
-                };
-                assert_eq!(
-                    serde_json::from_slice::<Value>(&bytes).unwrap(),
-                    json!({"t":i.to_string()})
-                );
-            }
-            assert!(matches!(rx.recv().await, Some(Message::End)));
-            producer.await.unwrap();
-        }
-
-        #[tokio::test]
-        async fn disconnect_interrupts_output_waiting_for_capacity() {
-            use local::Output as _;
-            let (tx, rx) = tokio::sync::mpsc::channel(1);
-            let output = Output(tx);
-            output.send(Message::Start { status: 200 }).await.unwrap();
-            let pending = output.send(Message::End);
-            tokio::pin!(pending);
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(20), &mut pending)
-                    .await
-                    .is_err()
-            );
-            drop(rx);
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_secs(1), pending)
-                    .await
-                    .unwrap()
-                    .is_err()
-            );
-        }
-
-        #[test]
-        fn frames_reject_invalid_sizes_and_preserve_unicode() {
-            let body = serde_json::to_vec(&json!({"text":"日本語"})).unwrap();
-            let mut wire = Vec::new();
-            write_frame(&mut wire, &body).unwrap();
-            assert_eq!(read_frame(&mut &wire[..]).unwrap(), body);
-            assert!(read_frame(&mut &0u32.to_le_bytes()[..]).is_err());
-            assert!(read_frame(&mut &((MAX_MESSAGE + 1) as u32).to_le_bytes()[..]).is_err());
-            assert!(read_frame(&mut &wire[..wire.len() - 1]).is_err());
-        }
+        use tokio::io::AsyncReadExt;
         #[tokio::test]
         async fn user_only_pipe_accepts_local_client_and_detects_disconnect() {
             let pipe = create_pipe(true).unwrap();
@@ -618,6 +428,10 @@ mod windows {
         }
     }
 }
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[path = "chrome_bridge/protocol.rs"]
+mod protocol;
 
 #[cfg(test)]
 mod registration_tests {

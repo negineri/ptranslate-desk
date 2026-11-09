@@ -53,10 +53,10 @@ panel.innerHTML = `<h3>翻訳する場所</h3>
       <button id="chrome-register">Chrome連携を登録</button></details><p id="chrome-status" class="hint" role="status"></p>
     </div>
   </div>
-  <div class="local-actions save-row">
+  <div id="mode-save-row" class="local-actions save-row">
     <button id="local-save" class="primary">保存して再起動</button>
     <span id="mode-pending" class="warn" role="status" hidden>未適用の変更があります</span>
-  </div><p id="mode-status" class="hint" role="status"></p>
+  </div><p id="mode-next" class="hint" hidden></p><p id="mode-status" class="hint" role="status"></p>
   <dialog id="local-download-confirm" aria-labelledby="local-download-title">
     <h2 id="local-download-title">翻訳モデルをダウンロードしますか？</h2>
     <p>PLaMo 3 Translate 2B（Q4_K_M、約1.81 GB）と、推論エンジン（約37 MB）をこのPCに保存します。</p>
@@ -119,8 +119,17 @@ function busy() {
   const draft = settings();
   const pending = !state.configured || draft.enabled !== state.enabled ||
     (draftLocal && ["device", "parallel", "auto_release", "idle_minutes"].some((key) => draft[key] !== state[key]));
+  const switchingToServer = !draftLocal && pending;
+  $("connection-settings").hidden = draftLocal || switchingToServer;
+  $("mode-save-row").hidden = !pending;
   $("mode-pending").hidden = !pending;
-  $("local-save").textContent = !state.configured && !draftLocal ? "保存" : "保存して再起動";
+  $("mode-next").hidden = !switchingToServer;
+  $("mode-next").textContent = state.configured
+    ? "再起動後に接続先を確認し、サーバーにログインできます。"
+    : "次の画面で接続先を設定します。";
+  $("local-save").textContent = draftLocal ? "保存して再起動"
+    : state.configured ? "サーバーモードに切り替えて再起動" : "接続先の設定へ";
+  $("local-save").hidden = draftLocal && !state.available;
   $("local-save").disabled = !pending || saving || downloading || measuring || detecting > 0 || (draftLocal && !state.available);
   $("local-download").disabled = downloading || measuring;
   $("local-measure").disabled = downloading || measuring || detecting > 0 || !state?.available;
@@ -136,7 +145,7 @@ function selectDraft(local) {
   $("local-options").hidden = !local;
   $("mode-local").setAttribute("aria-pressed", String(local));
   $("mode-server").setAttribute("aria-pressed", String(!local));
-  $("connection-settings").hidden = local;
+  message("mode-status", "");
   busy();
 }
 function hideWelcome() {
@@ -255,9 +264,15 @@ $("local-save").onclick = async () => {
       resolveMode();
       saving = false;
       busy();
+      $("server-url").focus();
     } else {
       message("mode-status", "設定を保存して再起動しています…");
-      await invoke("save_local_settings", { settings: settings() });
+      const nextSettings = draftLocal ? settings() : {
+        enabled: false, device: state.device, parallel: state.parallel,
+        auto_release: state.auto_release, idle_minutes: state.idle_minutes,
+        measurement_completed: state.measurement_completed,
+      };
+      await invoke("save_local_settings", { settings: nextSettings });
     }
   } catch (e) {
     saving = false;

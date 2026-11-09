@@ -27,17 +27,20 @@ zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2
 tokio = { version = "1", features = ["time", "net", "io-util", "sync", "macros", "rt-multi-thread"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 flate2 = "1"
 tar = "0.4"
 block2 = "0.6"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSEvent", "block2"] }
 
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+tauri-plugin-deep-link = "2"
+
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-registry = "0.6"
-tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }

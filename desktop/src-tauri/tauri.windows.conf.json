@@ -8,12 +8,5 @@
         "installerHooks": "chrome-installer-hooks.nsh"
       }
     }
-  },
-  "plugins": {
-    "deep-link": {
-      "desktop": {
-        "schemes": ["ptranslate"]
-      }
-    }
   }
 }

@@ -318,7 +318,7 @@ fn start_request(
 }
 
 fn main() {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     if chrome_bridge::host_entry() {
         return;
     }
@@ -331,13 +331,13 @@ fn main() {
         .expect("HTTP クライアントの作成に失敗しました");
     let builder = tauri::Builder::default();
     #[cfg(target_os = "windows")]
-    let builder = builder
-        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
-            if args.len() == 1 {
-                resident::show_main(app);
-            }
-        }))
-        .plugin(tauri_plugin_deep_link::init());
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _| {
+        if args.len() == 1 {
+            resident::show_main(app);
+        }
+    }));
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let builder = builder.plugin(tauri_plugin_deep_link::init());
     let builder = builder
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -363,10 +363,10 @@ fn main() {
             });
             resident::setup(app.handle())?;
             local::Local::schedule(app.handle());
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             chrome_bridge::schedule(app.handle());
             updates::schedule(app.handle());
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             chrome_bridge::setup_links(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
