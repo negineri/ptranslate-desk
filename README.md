@@ -130,6 +130,7 @@ Linuxのサーバー1台で動きます。GPUは要りません。構成は2通�
 - [デスクトップの開発手順](desktop/README.md)
 - [Chrome拡張](chrome-extension/README.md)
 - [仕様](docs/SPEC.md)
+- [翻訳ワーカーのプールとボランティア運用の設計案](docs/VOLUNTEER_TRANSLATION.md)
 - [Releaseの作成と更新署名](docs/RELEASING.md)
 - [訳の繰り返しと揺れの調査](docs/REPEAT_INVESTIGATION.md)
 
