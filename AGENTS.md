@@ -10,6 +10,7 @@ Claude Code は [CLAUDE.md](CLAUDE.md) からこのファイルを読む。
 - `server/static/index.html`: Web の画面 (HTML 1 枚、ビルドなし)。区切りと自動で翻訳の規則は SPEC の 4 章
 - `tools/mock_plamo.py`: 翻訳エンジンのモック。試験はこれを相手にする。本物の翻訳エンジンには試験でつながない
 - `docs/SPEC.md`: デスクトップのクライアントの仕様
+- `docs/VOLUNTEER_TRANSLATION.md`: 翻訳ワーカーのプールとボランティア枠の仕様 (未実装)。実装する前に 3 章の脅威と対策を読む
 - 本番のデプロイの設定 (nginx、oauth2-proxy、Authentik、VM) は別の非公開のリポジトリにある。ここには置かない
 - `deploy/compose/`: 自分で立てる人向けの構成 (Tailscale + Pocket ID、[docs/SELF_HOSTING_COMPOSE.md](docs/SELF_HOSTING_COMPOSE.md))。
   本番の設定ではない。サーバーのイメージのタグは、そのタグの版が出てから上げる
