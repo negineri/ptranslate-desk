@@ -3,6 +3,7 @@
 
 import http.client
 import json
+import socket
 import urllib.parse
 from contextlib import contextmanager
 
@@ -22,10 +23,18 @@ class MockWorker:
 
     def open_connection(self):
         if self.tls_context is None:
-            return http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
-        return http.client.HTTPSConnection(
-            self.host, self.port, timeout=self.timeout, context=self.tls_context
-        )
+            conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+        else:
+            conn = http.client.HTTPSConnection(
+                self.host, self.port, timeout=self.timeout, context=self.tls_context
+            )
+        try:
+            conn.connect()
+            conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            conn.close()
+            raise
+        return conn
 
     @contextmanager
     def reuse_connection(self):

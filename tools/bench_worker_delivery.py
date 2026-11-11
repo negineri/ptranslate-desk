@@ -155,11 +155,15 @@ def delayed_worker_port(broker_port, rtt_ms):
         return
     ready = Future()
     delay = rtt_ms / 2000
+    connections = set()
+    writers = set()
+    closing = False
 
     async def relay(client_reader, client_writer):
         broker_writer = None
         try:
             broker_reader, broker_writer = await asyncio.open_connection("127.0.0.1", broker_port)
+            writers.add(broker_writer)
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(delay_stream(client_reader, broker_writer, delay))
                 tasks.create_task(delay_stream(broker_reader, client_writer, delay))
@@ -175,11 +179,23 @@ def delayed_worker_port(broker_port, rtt_ms):
                 )
             else:
                 await asyncio.gather(client_writer.wait_closed(), return_exceptions=True)
+            writers.discard(client_writer)
+            writers.discard(broker_writer)
+
+    def accept(reader, writer):
+        if closing:
+            writer.close()
+            return
+        writers.add(writer)
+        task = asyncio.create_task(relay(reader, writer))
+        connections.add(task)
+        task.add_done_callback(connections.discard)
 
     async def run():
+        nonlocal closing
         stopped = asyncio.Event()
         try:
-            listener = await asyncio.start_server(relay, "127.0.0.1", 0)
+            listener = await asyncio.start_server(accept, "127.0.0.1", 0)
         except Exception as error:
             ready.set_exception(error)
             return
@@ -188,6 +204,14 @@ def delayed_worker_port(broker_port, rtt_ms):
                 (listener.sockets[0].getsockname()[1], asyncio.get_running_loop(), stopped)
             )
             await stopped.wait()
+            closing = True
+            listener.close()
+            if connections:
+                _, pending = await asyncio.wait(connections, timeout=2)
+                if pending:
+                    for writer in writers:
+                        writer.transport.abort()
+                    await asyncio.gather(*pending)
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         task = executor.submit(asyncio.run, run())
@@ -302,7 +326,16 @@ def register_worker(server, hub, index, port):
     return worker
 
 
-def samples_with_checks(server, hub, count, concurrency, engine, worker_port, reuse_connection):
+def samples_with_checks(
+    server,
+    hub,
+    count,
+    concurrency,
+    engine,
+    worker_port,
+    reuse_connection,
+    production_rates,
+):
     # 検査中のワーカーがいても、同時送信に必要な枠を確保する。
     workers = [
         register_worker(server, hub, index, worker_port) for index in range(max(5, concurrency * 2))
@@ -310,7 +343,43 @@ def samples_with_checks(server, hub, count, concurrency, engine, worker_port, re
     stop = threading.Event()
     completed = threading.Condition()
     checks = Counter()
+    assignment_waits = []
+    wait_timeouts = []
+    current_job = threading.local()
     record = hub.checks.health.record
+    after_delivery = hub.checks.after_delivery
+    translate = server.pool.translate
+    choose = server.pool.choose
+    wait = hub.condition.wait
+
+    def track_translation(*args):
+        current_job.timeouts = 0
+        try:
+            return translate(*args)
+        finally:
+            del current_job.timeouts
+
+    def track_wait(timeout=None):
+        notified = wait(timeout)
+        if timeout == 0.1 and not notified and hasattr(current_job, "timeouts"):
+            current_job.timeouts += 1
+        return notified
+
+    def track_assignment(job, candidates, assigned):
+        first = not assigned
+        selected = choose(job, candidates, assigned)
+        if first and selected is not None:
+            assignment_waits.append((time.monotonic() - job.created) * 1000)
+            wait_timeouts.append(current_job.timeouts)
+        return selected
+
+    def track_delivery(*args, **kwargs):
+        accepted = after_delivery(*args, **kwargs)
+        with completed:
+            checks["deliveries"] += 1
+            checks["audits_queued"] += accepted
+            completed.notify_all()
+        return accepted
 
     def record_check(worker, passed=None, timed_out=False, canary=True):
         record(worker, passed=passed, timed_out=timed_out, canary=canary)
@@ -326,6 +395,10 @@ def samples_with_checks(server, hub, count, concurrency, engine, worker_port, re
 
     with (
         patch.object(hub.checks.health, "record", record_check),
+        patch.object(hub.checks, "after_delivery", track_delivery),
+        patch.object(hub.condition, "wait", track_wait),
+        patch.object(server.pool, "translate", track_translation),
+        patch.object(server.pool, "choose", track_assignment),
         ThreadPoolExecutor(max_workers=len(workers)) as executor,
     ):
         tasks = [executor.submit(serve_worker, worker) for worker in workers]
@@ -333,14 +406,25 @@ def samples_with_checks(server, hub, count, concurrency, engine, worker_port, re
             with hub.condition:
                 if not hub.condition.wait_for(lambda: len(hub.ready) == len(workers), timeout=5):
                     raise RuntimeError("模擬ワーカーの待機を確認できませんでした")
+            started = time.perf_counter()
             times = concurrent_samples(server, count, concurrency)
+            delivery_seconds = time.perf_counter() - started
             with completed:
                 during_delivery = {
                     "canaries_passed_during_delivery": checks["canary"],
                     "audits_passed_during_delivery": checks["audit"],
                 }
                 if not completed.wait_for(
-                    lambda: checks["failed"] or (checks["audit"] == count and checks["canary"]),
+                    lambda: (
+                        checks["failed"]
+                        or (
+                            checks["deliveries"] == count
+                            and checks["audit"] == checks["audits_queued"]
+                            and (
+                                production_rates or (checks["audit"] == count and checks["canary"])
+                            )
+                        )
+                    ),
                     timeout=10,
                 ):
                     raise RuntimeError("確認用ジョブと抜き取りの完了を確認できませんでした")
@@ -358,6 +442,10 @@ def samples_with_checks(server, hub, count, concurrency, engine, worker_port, re
                 **during_delivery,
                 "canaries_passed": checks["canary"],
                 "audits_passed": checks["audit"],
+                "volunteer_deliveries_per_second": round(count / delivery_seconds, 2),
+                "assignment_wait_p95_ms": round(p95(assignment_waits), 2),
+                "assignments_after_wait_timeout": sum(count > 0 for count in wait_timeouts),
+                "assignment_wait_timeouts": sum(wait_timeouts),
             }
     return times, totals
 
@@ -372,6 +460,7 @@ def samples(
     tls=False,
     worker_rtt_ms=0,
     reuse_connection=False,
+    production_rates=False,
 ):
     server_tls, client_tls = tls_contexts(state_dir) if tls else (None, None)
     canary = state_dir / "canary.json"
@@ -396,9 +485,9 @@ def samples(
         "API_KEY": "",
         "CANARY_FILE": str(canary),
         "AUDIT_UPSTREAMS": json.dumps([{"url": engine, "slots": concurrency}]),
-        "CANARY_RATE": "1",
-        "AUDIT_RATE": "1",
-        "AUDIT_BACKLOG": str(count),
+        "CANARY_RATE": "0.05" if production_rates else "1",
+        "AUDIT_RATE": "0.02" if production_rates else "1",
+        "AUDIT_BACKLOG": "50" if production_rates else str(count),
         "QUEUE_TIMEOUT": 4,
     }
     with (
@@ -421,7 +510,14 @@ def samples(
         hub.poll_seconds = 5
         if with_checks:
             volunteer_times, totals = samples_with_checks(
-                server, hub, count, concurrency, engine, worker_port, reuse_connection
+                server,
+                hub,
+                count,
+                concurrency,
+                engine,
+                worker_port,
+                reuse_connection,
+                production_rates,
             )
             return direct_times, volunteer_times, totals
         worker = register_worker(server, hub, 0, worker_port)
@@ -447,6 +543,11 @@ def main():
     parser.add_argument("--samples", type=int, default=30)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--with-checks", action="store_true")
+    parser.add_argument(
+        "--production-check-rates",
+        action="store_true",
+        help="検査の予約率に本番の既定値（確認用5%%、抜き取り2%%）を使う",
+    )
     parser.add_argument(
         "--tls", action="store_true", help="仲介への接続をHTTPSにする（openssl が必要）"
     )
@@ -477,10 +578,11 @@ def main():
                 url,
                 Path(directory),
                 args.concurrency,
-                args.with_checks or args.concurrency > 1,
+                args.with_checks or args.concurrency > 1 or args.production_check_rates,
                 tls=args.tls,
                 worker_rtt_ms=args.worker_rtt_ms,
                 reuse_connection=args.reuse_worker_connection,
+                production_rates=args.production_check_rates,
             )
         except (OSError, subprocess.SubprocessError, RuntimeError) as error:
             parser.exit(
@@ -495,6 +597,7 @@ def main():
                 "tls": args.tls,
                 "worker_rtt_ms": args.worker_rtt_ms,
                 "reuse_worker_connection": args.reuse_worker_connection,
+                "production_check_rates": args.production_check_rates,
                 "direct_p95_ms": round(p95(direct), 2),
                 "volunteer_p95_ms": round(p95(volunteer), 2),
                 "p95_delta_ms": round(p95(volunteer) - p95(direct), 2),
