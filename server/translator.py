@@ -80,6 +80,9 @@ WORKER_MODEL_SHA256 = os.environ.get("TR_WORKER_MODEL_SHA256", "")
 MIN_AGENT_VERSION = os.environ.get("TR_MIN_AGENT_VERSION", "")
 AUDIT_UPSTREAMS = os.environ.get("TR_AUDIT_UPSTREAMS", "")
 CANARY_FILE = os.environ.get("TR_CANARY_FILE", "")
+CANARY_RATE = os.environ.get("TR_CANARY_RATE", "0.05")
+AUDIT_RATE = os.environ.get("TR_AUDIT_RATE", "0.02")
+AUDIT_BACKLOG = os.environ.get("TR_AUDIT_BACKLOG", "50")
 PROBATION_JOBS = env_int("TR_PROBATION_JOBS", 20)
 API_KEY = os.environ.get("TR_API_KEY", "")
 MODEL = os.environ.get("TR_MODEL", "plamo-3-translate")
@@ -1867,7 +1870,7 @@ class WorkerHealth:
                 and not worker.get("owner_quarantined", False)
             )
 
-    def record(self, worker, passed=None, timed_out=False):
+    def record(self, worker, passed=None, timed_out=False, canary=True):
         wid, owner = worker["id"], worker["owner"]
         with self.lock:
             stats = self.workers.setdefault(
@@ -1905,7 +1908,10 @@ class WorkerHealth:
                 ] += 1
                 bucket["timeouts"] += int(timed_out)
             stats["recent"].append(passed is None)
-            stats["streak"] = stats["streak"] + 1 if passed is True else 0
+            if passed is not True:
+                stats["streak"] = 0
+            elif canary:
+                stats["streak"] += 1
             if passed is False:
                 now = time.monotonic()
                 failures = owner_stats["failures"]
@@ -1930,6 +1936,7 @@ class WorkerHealth:
                 self.registry.set_state(wid, "quarantine", generation)
             elif (
                 passed is True
+                and canary
                 and stats["streak"] >= self.probation_jobs
                 and not worker.get("owner_quarantined", False)
             ):
@@ -2023,6 +2030,14 @@ class CanaryChecks:
         self.executor = ThreadPoolExecutor(
             max_workers=self.pool.total_slots, thread_name_prefix="canary"
         )
+        self.canary_rate = float(CANARY_RATE)
+        self.audit_rate = float(AUDIT_RATE)
+        backlog = int(AUDIT_BACKLOG)
+        if not (0 < self.canary_rate <= 1 and 0 < self.audit_rate <= 1 and backlog > 0):
+            raise ValueError("確認用ジョブと抜き取りの率・待ち行列の設定が不正です")
+        self.audit_queue = queue.Queue(maxsize=backlog)
+        self.audit_thread = None
+        self.due_canaries = {}
         self.reference_timeout = 120
         self.reload_interval = 1
         self.stats_interval = 60
@@ -2031,6 +2046,64 @@ class CanaryChecks:
         thread = threading.Thread(target=self.run, daemon=True)
         thread.start()
         self.thread = thread
+        audit_thread = threading.Thread(target=self.run_audits, daemon=True)
+        audit_thread.start()
+        self.audit_thread = audit_thread
+
+    @staticmethod
+    def sampled(rate):
+        return secrets.randbits(53) / (1 << 53) < rate
+
+    def after_delivery(self, worker, req, translated):
+        """配信完了後に呼ぶ。検査の完了や待ち行列の空きを待たない。"""
+        if self.cancel.is_set() or not self.health.eligible(worker):
+            return False
+        wid = worker["id"]
+        generation = worker["owner_generation"]
+        with self.lock:
+            if self.cancel.is_set():
+                return False
+            if self.sampled(self.canary_rate):
+                self.due_canaries[wid] = generation
+            if not self.sampled(self.audit_rate):
+                return False
+            try:
+                self.audit_queue.put_nowait((wid, generation, req, translated))
+            except queue.Full:
+                return False
+            return True
+
+    def run_audits(self):
+        while not self.cancel.is_set():
+            try:
+                item = self.audit_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                self.audit(*item)
+            except (HttpError, OSError, ValueError, sqlite3.Error):
+                pass
+            except Exception as error:
+                log.error("worker audit failed: %s", type(error).__name__)
+            finally:
+                self.audit_queue.task_done()
+                item = None
+
+    def audit(self, wid, generation, req, translated):
+        if self.hub.registry.info(wid)["owner_generation"] != generation:
+            return
+        reference = self.reference(req)
+        if reference is None or self.cancel.is_set():
+            return
+        current = self.hub.registry.info(wid)
+        if current["owner_generation"] == generation:
+            passed = not check_translation(req, translated, reference)
+            self.health.record(current, passed=passed, canary=False)
+
+    def needs_canary(self, worker):
+        if not self.health.eligible(worker):
+            return True
+        return self.due_canaries.get(worker["id"]) == worker["owner_generation"]
 
     def reload_if_changed(self):
         signature = None
@@ -2135,7 +2208,7 @@ class CanaryChecks:
                         worker
                         for worker in ready
                         if worker["id"] not in self.busy_workers
-                        and not self.health.eligible(worker)
+                        and self.needs_canary(worker)
                         and not worker.get("owner_quarantined", False)
                         and self.sample_ids
                         - self.used.get(worker["owner"], set())
@@ -2181,8 +2254,9 @@ class CanaryChecks:
                 if worker["id"] in self.hub.ready:
                     _, network = self.hub.ready[worker["id"]]
                     self.hub.ready[worker["id"]] = (worker, network)
-            if self.health.eligible(worker) or worker.get("owner_quarantined", False):
-                return
+            with self.lock:
+                if not self.needs_canary(worker) or worker.get("owner_quarantined", False):
+                    return
             reference = self.reference(req)
             if reference is None or self.cancel.is_set():
                 self.cancel.wait(1)
@@ -2193,6 +2267,10 @@ class CanaryChecks:
             outcome = self.hub.execute_probe(
                 req, events, self.cancel, timeout=25, target_worker=worker["id"], attempts=1
             )
+            if outcome not in ("cancelled", "unavailable"):
+                with self.lock:
+                    if self.due_canaries.get(worker["id"]) == worker["owner_generation"]:
+                        self.due_canaries.pop(worker["id"], None)
             text, finished = [], False
             while not events.empty():
                 kind, value = events.get_nowait()
@@ -2222,7 +2300,13 @@ class CanaryChecks:
         if self.thread is not None:
             self.thread.join(timeout=6)
         self.executor.shutdown(wait=True, cancel_futures=True)
+        if self.audit_thread is not None:
+            self.audit_thread.join()
         with self.lock:
+            while not self.audit_queue.empty():
+                self.audit_queue.get_nowait()
+                self.audit_queue.task_done()
+            self.due_canaries.clear()
             self.busy_workers.clear()
             self.reserved.clear()
 

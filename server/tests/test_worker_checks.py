@@ -377,6 +377,53 @@ class CanaryApiTest(unittest.TestCase):
             json.loads(run_admin(self.helper.state, "list-owners").stdout)[0]["revoked"]
         )
 
+    def qualified_worker(self):
+        mock, data = self.helper.worker()
+        worker = self.helper.hub.registry.info(data["worker_id"])
+        for _ in range(2):
+            self.checks.health.record(worker, passed=True)
+        return mock, worker
+
+    def test_completed_delivery_can_schedule_canary_for_qualified_worker(self):
+        mock, worker = self.qualified_worker()
+        with patch.object(self.checks, "sampled", side_effect=[True, False]) as sample:
+            self.assertFalse(
+                self.checks.after_delivery(worker, request(), "Delivered translation.")
+            )
+        self.assertEqual(
+            [call.args[0] for call in sample.call_args_list],
+            [self.checks.canary_rate, self.checks.audit_rate],
+        )
+        self.checks.start()
+        self.answer(mock)
+        self.helper.wait(lambda: worker["id"] not in self.checks.due_canaries)
+        self.helper.wait(lambda: self.checks.health.workers[worker["id"]]["streak"] == 3)
+
+    def test_delivery_audit_is_bounded_and_quarantines_corruption(self):
+        _, worker = self.qualified_worker()
+        req = request()
+        self.checks.audit_queue.maxsize = 1
+        with patch.object(self.checks, "sampled", side_effect=[False, True, False, True]):
+            self.assertTrue(
+                self.checks.after_delivery(worker, req, "Corrupted https://evil.example/")
+            )
+            self.assertFalse(self.checks.after_delivery(worker, req, "Dropped second sample."))
+        with self.assertNoLogs(tr.log, "WARNING"):
+            self.checks.start()
+            self.helper.wait(
+                lambda: self.helper.hub.registry.info(worker["id"])["state"] == "quarantine"
+            )
+        self.assertEqual(self.stats["requests"], 1)
+        self.assertTrue(self.checks.audit_queue.empty())
+        self.assertNotIn(b"evil.example", self.helper.state.read_bytes())
+
+    def test_passing_audit_does_not_count_towards_probation(self):
+        _, worker = self.qualified_worker()
+        req = request()
+        self.checks.audit(worker["id"], worker["owner_generation"], req, "[en] " + req["text"])
+        self.assertEqual(self.checks.health.workers[worker["id"]]["streak"], 2)
+        self.assertEqual(self.checks.health.workers[worker["id"]]["passed"], 3)
+
     def test_private_corpus_permissions_and_input_are_checked(self):
         self.canaries.chmod(0o644)
         if tr.os.name != "nt":
