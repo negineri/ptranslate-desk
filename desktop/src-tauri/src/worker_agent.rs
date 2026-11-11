@@ -386,12 +386,16 @@ pub(crate) const READY_LINE: &[u8] = b"{\"status\":\"ready\"}\n";
 pub(crate) const ASSIGNED_LINE: &[u8] = b"{\"status\":\"assigned\"}\n";
 pub(crate) const START_COMMAND: &[u8] = b"go\n";
 
-fn run_from_parent(ports: Ports) -> Result<&'static str> {
+fn restricted_runtime(ports: Ports) -> Result<tokio::runtime::Runtime> {
     worker_sandbox::apply(ports)?;
-    let rt = tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|_| ())?;
+        .map_err(|_| ())
+}
+
+fn run_from_parent(ports: Ports) -> Result<&'static str> {
+    let rt = restricted_runtime(ports)?;
     {
         let mut output = io::stdout().lock();
         output.write_all(READY_LINE).map_err(|_| ())?;
@@ -441,6 +445,105 @@ pub(crate) fn entry() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_agent_communicates_after_seatbelt() {
+        use crate::worker_relay::BrokerRelay;
+        use std::process::Stdio;
+        use tokio::{
+            io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+            net::TcpListener,
+            process::Command,
+        };
+
+        const PROBE: &str = "PTRANSLATE_SEATBELT_AGENT_TEST";
+        if let Ok(ports) = std::env::var(PROBE) {
+            let ports = Ports::parse(ports.split(',').map(std::ffi::OsString::from)).unwrap();
+            let runtime = restricted_runtime(ports).expect("制限後にランタイムを起動できません");
+            let mut input = Zeroizing::new(Vec::new());
+            io::stdin().lock().read_to_end(&mut input).unwrap();
+            let agent = Agent::new(serde_json::from_slice(&input).unwrap())
+                .ok()
+                .expect("制限後にクライアントを構築できません");
+            drop(input);
+            runtime.block_on(async {
+                let response = agent.client.get(agent.broker.clone()).send().await;
+                // 仲介のモックは ClientHello を確認して接続を閉じる。
+                assert!(response.is_err());
+                let response = agent
+                    .client
+                    .get(format!("http://127.0.0.1:{}/", ports.engine))
+                    .send()
+                    .await
+                    .expect("制限後にエンジンへ接続できません");
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.text().await.unwrap(), "mock engine");
+            });
+            return;
+        }
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let broker = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let engine = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url =
+                    Url::parse(&format!("https://{}/", broker.local_addr().unwrap())).unwrap();
+                let relay = BrokerRelay::start(&url).await.unwrap();
+                let engine_port = engine.local_addr().unwrap().port();
+                let input = Zeroizing::new(
+                    serde_json::to_vec(&Bootstrap {
+                        broker: url.to_string(),
+                        worker_secret: format!("ptw_{}", "a".repeat(64)),
+                        model_sha256: "b".repeat(64),
+                        agent_version: "0.5.0".into(),
+                        engine_port,
+                        engine_secret: "mock".into(),
+                        relay_port: Some(relay.port),
+                        relay_secret: Some(relay.secret.as_str().to_owned()),
+                    })
+                    .unwrap(),
+                );
+                let mut child = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "worker_agent::tests::macos_agent_communicates_after_seatbelt",
+                        "--nocapture",
+                    ])
+                    .env_clear()
+                    .env(PROBE, format!("{},{}", relay.port, engine_port))
+                    .stdin(Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap();
+                timeout(Duration::from_secs(10), async {
+                    child.stdin.take().unwrap().write_all(&input).await.unwrap();
+                    let serve = async {
+                        let (mut socket, _) = broker.accept().await.unwrap();
+                        assert_eq!(socket.read_u8().await.unwrap(), 0x16);
+                        drop(socket);
+
+                        let (socket, _) = engine.accept().await.unwrap();
+                        let mut request = BufReader::new(socket);
+                        let mut line = String::new();
+                        request.read_line(&mut line).await.unwrap();
+                        assert_eq!(line, "GET / HTTP/1.1\r\n");
+                        while line != "\r\n" {
+                            line.clear();
+                            assert_ne!(request.read_line(&mut line).await.unwrap(), 0);
+                        }
+                        mock_response(request.into_inner(), "mock engine").await;
+                    };
+                    let (_, status) = tokio::join!(serve, child.wait());
+                    assert!(status.unwrap().success());
+                })
+                .await
+                .expect("子の通信試験が時間内に終わりませんでした");
+            });
+    }
 
     fn assignment() -> Assignment {
         serde_json::from_value(json!({
