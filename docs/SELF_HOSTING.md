@@ -190,6 +190,9 @@ Pythonサービスとコンテナはどちらか一方を使います。
 | `TR_UPSTREAM_SLOTS` | 4 | `TR_UPSTREAMS` が空のときの実行枠。1〜1000の整数。エンジンの並列数より多い分はエンジン側で待つ。`TR_UPSTREAMS` 指定時は使用・検証しない |
 | `TR_STATE_FILE` | 空 | ワーカー登録用SQLite。空ならワーカーAPIは無効。POSIXでは親を0700にする。利用者ジョブの接続は未実装 |
 | `TR_WORKER_MODEL_SHA256` | 空 | ワーカーAPIを有効にする場合に必須。承認するモデルの小文字16進数64桁 |
+| `TR_AUDIT_UPSTREAMS` | 空 | 確認用ジョブの基準を作る運営のエンジン。`url` と `slots` のJSON配列。`TR_CANARY_FILE` と両方指定して検査を有効にする |
+| `TR_CANARY_FILE` | 空 | 非公開の合成ジョブのJSON配列。16MiB・10,000件まで。所有者だけが読める0600にし、本番の文をリポジトリに置かない |
+| `TR_PROBATION_JOBS` | 20 | 試用と端末の検疫から合格するまでに必要な連続合格数。正の整数 |
 | `TR_WORKERS_PER_OWNER` | 2 | 所有者あたりの登録上限 |
 | `TR_MIN_AGENT_VERSION` | 空 | 受けるエージェントの最小版（数値3つ）。空なら `0.0.0` |
 | `TR_ANON_ENABLED` | 0 | 匿名の資格のAPIを有効にするか。前段からだけ仲介に接続できる構成で使う |

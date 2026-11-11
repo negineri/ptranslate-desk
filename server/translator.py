@@ -37,6 +37,7 @@ import socket
 import socketserver
 import sqlite3
 import stat
+import unicodedata
 import sys
 import threading
 import time
@@ -76,6 +77,9 @@ STATE_FILE = os.environ.get("TR_STATE_FILE", "")
 WORKERS_PER_OWNER = env_int("TR_WORKERS_PER_OWNER", 2)
 WORKER_MODEL_SHA256 = os.environ.get("TR_WORKER_MODEL_SHA256", "")
 MIN_AGENT_VERSION = os.environ.get("TR_MIN_AGENT_VERSION", "")
+AUDIT_UPSTREAMS = os.environ.get("TR_AUDIT_UPSTREAMS", "")
+CANARY_FILE = os.environ.get("TR_CANARY_FILE", "")
+PROBATION_JOBS = env_int("TR_PROBATION_JOBS", 20)
 API_KEY = os.environ.get("TR_API_KEY", "")
 MODEL = os.environ.get("TR_MODEL", "plamo-3-translate")
 # 1 回 (1 区切り) の原文の上限 (文字)。PLaMo のコンテキスト (16K トークン) は原文と訳の
@@ -560,6 +564,9 @@ class UpstreamCancellation:
     def is_set(self):
         return self._event.is_set()
 
+    def wait(self, timeout):
+        return self._event.wait(timeout)
+
     def set(self):
         self._event.set()
         with self._lock:
@@ -697,10 +704,22 @@ class TranslationHTTPServer(ThreadingHTTPServer):
                 if not STATE_FILE:
                     raise HttpError(404, "ワーカーの登録は無効です")
                 registry = WorkerRegistry(STATE_FILE, WORKERS_PER_OWNER)
+                hub = None
                 try:
-                    self.workers = WorkerHub(registry, WORKER_MODEL_SHA256, MIN_AGENT_VERSION)
+                    hub = WorkerHub(registry, WORKER_MODEL_SHA256, MIN_AGENT_VERSION)
+                    if CANARY_FILE or AUDIT_UPSTREAMS:
+                        if not CANARY_FILE or not AUDIT_UPSTREAMS:
+                            raise ValueError("確認用ジョブと検証用エンジンは両方指定してください")
+                        hub.checks = CanaryChecks(
+                            hub, parse_upstreams(AUDIT_UPSTREAMS, ""), CANARY_FILE, PROBATION_JOBS
+                        )
+                        hub.checks.start()
+                    self.workers = hub
                 except Exception:
-                    registry.close()
+                    if hub is not None:
+                        hub.close()
+                    else:
+                        registry.close()
                     raise
             return self.workers
 
@@ -1050,7 +1069,15 @@ class Handler(BaseHTTPRequestHandler):
                 raise HttpError(400, "ワーカーを指定してください")
             return self.send_json(200, hub.registry.renew(owner, body["worker_id"]))
         if method == "GET" and path == "/api/worker/mine":
-            return self.send_json(200, {"workers": hub.registry.mine(owner)})
+            listing = hub.registry.mine(owner)
+            if hub.checks is not None:
+                for record in listing:
+                    try:
+                        if hub.checks.health.eligible(hub.registry.info(record["worker_id"])):
+                            record["state"] = "ready"
+                    except HttpError:
+                        pass
+            return self.send_json(200, {"workers": listing})
         if method == "DELETE" and re.fullmatch(r"/api/worker/[0-9a-f]{32}", path):
             hub.registry.delete(owner, path.rsplit("/", 1)[1])
             return self.send_json(200, {"deleted": True})
@@ -1224,6 +1251,12 @@ class WorkerRegistry:
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, owner TEXT NOT NULL, digest TEXT UNIQUE NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL)"
             )
+            if "quarantined" not in {
+                row[1] for row in self.db.execute("PRAGMA table_info(owners)")
+            }:
+                self.db.execute(
+                    "ALTER TABLE owners ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0"
+                )
 
     def register(self, owner, terms):
         if type(terms) is not int or terms != WORKER_TERMS_VERSION:
@@ -1241,6 +1274,9 @@ class WorkerRegistry:
                 >= self.per_owner
             ):
                 raise HttpError(429, "登録できる端末の数を超えています")
+            held = self.db.execute(
+                "SELECT quarantined FROM owners WHERE name=?", (owner,)
+            ).fetchone()
             worker_id, secret = secrets.token_hex(16), "ptw_" + secrets.token_hex(32)
             self.db.execute(
                 "INSERT INTO owners(name, terms, agreed) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET terms=excluded.terms, agreed=excluded.agreed",
@@ -1253,7 +1289,7 @@ class WorkerRegistry:
                     owner,
                     hashlib.sha256(secret.encode()).hexdigest(),
                     int(time.time()) + WORKER_TTL,
-                    "probation",
+                    "quarantine" if held and held[0] else "probation",
                 ),
             )
             return {"worker_id": worker_id, "secret": secret, "expires_in": WORKER_TTL}
@@ -1268,13 +1304,50 @@ class WorkerRegistry:
             raise HttpError(401, "ワーカーの資格が無効です")
         with self.lock:
             row = self.db.execute(
-                "SELECT id,owner,expires,state FROM workers WHERE digest=?",
+                "SELECT w.id,w.owner,w.expires,w.state,o.quarantined,o.revoked FROM workers w JOIN owners o ON w.owner=o.name WHERE w.digest=?",
                 (hashlib.sha256(secret.encode()).hexdigest(),),
             ).fetchone()
-            if not row or row[2] <= time.time() or row[3] == "revoked":
+            if not row or row[2] <= time.time() or row[3] == "revoked" or row[5]:
                 raise HttpError(401, "ワーカーの資格が無効です")
-            self.check_owner(row[1])
-            return {"id": row[0], "owner": row[1], "expires": row[2], "state": row[3]}
+            return {
+                "id": row[0],
+                "owner": row[1],
+                "expires": row[2],
+                "state": row[3],
+                "owner_quarantined": bool(row[4]),
+            }
+
+    def info(self, worker_id):
+        with self.lock:
+            row = self.db.execute(
+                "SELECT w.id,w.owner,w.expires,w.state,o.quarantined,o.revoked FROM workers w JOIN owners o ON w.owner=o.name WHERE w.id=?",
+                (worker_id,),
+            ).fetchone()
+            if not row or row[2] <= time.time() or row[3] == "revoked" or row[5]:
+                raise HttpError(401, "ワーカーの資格が無効です")
+            return {
+                "id": row[0],
+                "owner": row[1],
+                "expires": row[2],
+                "state": row[3],
+                "owner_quarantined": bool(row[4]),
+            }
+
+    def quarantine_owner(self, owner):
+        with self.lock, self.db:
+            self.db.execute("UPDATE owners SET quarantined=1 WHERE name=? AND revoked=0", (owner,))
+            self.db.execute(
+                "UPDATE workers SET state='quarantine' WHERE owner=? AND state!='revoked'", (owner,)
+            )
+
+    def release_owner(self, owner):
+        with self.lock, self.db:
+            self.check_owner(owner)
+            self.db.execute("UPDATE owners SET quarantined=0 WHERE name=? AND revoked=0", (owner,))
+            self.db.execute(
+                "UPDATE workers SET state='probation' WHERE owner=? AND state='quarantine'",
+                (owner,),
+            )
 
     def owned(self, owner, worker_id):
         self.check_owner(owner)
@@ -1319,10 +1392,17 @@ class WorkerRegistry:
         if state not in ("probation", "quarantine", "revoked"):
             raise ValueError("ワーカーの状態が不正です")
         with self.lock, self.db:
-            self.db.execute("UPDATE workers SET state=? WHERE id=?", (state, worker_id))
+            changed = (
+                self.db.execute(
+                    "UPDATE workers SET state=? WHERE id=? AND (state!='revoked' OR ?='revoked') AND (?!='probation' OR EXISTS (SELECT 1 FROM owners o WHERE o.name=workers.owner AND o.revoked=0 AND o.quarantined=0))",
+                    (state, worker_id, state, state),
+                ).rowcount
+                > 0
+            )
         # DBのロックを解放してからHubへ通知し、ロックの順序を逆転させない。
         if state == "revoked" and self.revocation_callback:
             self.revocation_callback(worker_id=worker_id)
+        return changed
 
     def revoke_owner(self, owner):
         with self.lock, self.db:
@@ -1369,6 +1449,7 @@ class WorkerHub:
         self.assignments = {}
         self.poll_seconds, self.first_seconds, self.deadline_seconds = 25, 20, 120
         self.closed = False
+        self.checks = None
         self.revoked_workers = set()
         self.revoked_owners = set()
         self.registry.revocation_callback = self.notify_revoked
@@ -1379,6 +1460,8 @@ class WorkerHub:
                 self.revoked_workers.add(worker_id)
             if owner is not None:
                 self.revoked_owners.add(owner)
+            if self.checks is not None:
+                self.checks.health.invalidate(worker_id, owner)
             for wid, (worker, _) in list(self.ready.items()):
                 if wid in self.revoked_workers or worker["owner"] in self.revoked_owners:
                     del self.ready[wid]
@@ -1453,18 +1536,19 @@ class WorkerHub:
             and now - assignment["last"] < self.first_seconds
         )
 
-    def _fail(self, assignment_id):
+    def _fail(self, assignment_id, reason="worker_failed"):
         assignment = self.assignments.pop(assignment_id, None)
         if assignment:
+            assignment["failure"] = reason
             assignment["events"].put(("error", "worker_failed"))
             self.condition.notify_all()
 
-    def execute_probe(self, req, events, cancel, timeout=120):
+    def execute_probe(self, req, events, cancel, timeout=120, target_worker=None, attempts=2):
         """モックと、後続の確認用ジョブのための経路。利用者APIからは呼ばない。"""
         req = parse_request(worker_input(req))
         excluded = set()
         excluded_networks = set()
-        for attempt in range(2):
+        for attempt in range(attempts):
             started = time.monotonic()
             assignment_id = None
             with self.condition:
@@ -1475,6 +1559,9 @@ class WorkerHub:
                         (wid, worker, network)
                         for wid, (worker, network) in self.ready.items()
                         if worker["owner"] not in excluded
+                        and wid not in self.revoked_workers
+                        and worker["owner"] not in self.revoked_owners
+                        and (target_worker is None or wid == target_worker)
                         and (not network or network not in excluded_networks)
                     ]
                     if candidates:
@@ -1497,6 +1584,7 @@ class WorkerHub:
                             "events": queue.Queue(),
                             "owner": worker["owner"],
                         }
+                        assigned = self.assignments[assignment_id]
                         self.deliveries[wid] = {
                             "assignment_id": assignment_id,
                             "deadline_seconds": self.deadline_seconds,
@@ -1508,7 +1596,7 @@ class WorkerHub:
             if not assignment_id:
                 if not cancel.is_set():
                     events.put(("worker_failed", "翻訳ワーカーに接続できません"))
-                return
+                return "cancelled" if cancel.is_set() else "unavailable"
             sent = False
             try:
                 while not cancel.is_set():
@@ -1517,7 +1605,7 @@ class WorkerHub:
                         if not assignment:
                             break
                         if not self._live(assignment):
-                            self._fail(assignment_id)
+                            self._fail(assignment_id, "timeout")
                             break
                         result_queue = assignment["events"]
                     try:
@@ -1525,24 +1613,24 @@ class WorkerHub:
                     except queue.Empty:
                         continue
                     if cancel.is_set():
-                        return
+                        return "cancelled"
                     if kind == "error":
                         break
                     if kind == "text":
                         sent = True
                     events.put((kind, value))
                     if kind == "done":
-                        return
+                        return "success"
             finally:
                 with self.condition:
                     self.assignments.pop(assignment_id, None)
                     self.deliveries.pop(wid, None)
                     self.condition.notify_all()
             if cancel.is_set():
-                return
-            if sent or attempt:
+                return "cancelled"
+            if sent or attempt == attempts - 1:
                 events.put(("worker_failed", "翻訳ワーカーとの接続が途中で切れました"))
-                return
+                return assigned.get("failure", "worker_failed")
 
     def result(self, secret, body):
         worker = self.valid(secret)
@@ -1556,7 +1644,7 @@ class WorkerHub:
             if assignment.get("finished"):
                 return {"stop": True}
             if not self._live(assignment):
-                self._fail(aid)
+                self._fail(aid, "timeout")
                 return {"stop": True}
             seq = body.get("seq")
             if type(seq) is not int or seq < 0:
@@ -1631,16 +1719,371 @@ class WorkerHub:
                 ):
                     stop.append(aid)
                     if assignment and assignment["worker"] == worker["id"]:
-                        self._fail(aid)
+                        self._fail(aid, "timeout")
             return {"stop": stop}
 
     def close(self):
+        if self.checks is not None:
+            self.checks.close()
         with self.condition:
             self.closed = True
             for aid in list(self.assignments):
                 self._fail(aid)
             self.condition.notify_all()
         self.registry.close()
+
+
+def normalized_translation(text):
+    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
+
+
+def translation_links(text):
+    urls = re.findall(
+        r"(?:[A-Za-z][A-Za-z0-9+.-]{1,31}://|www\.)[^\s<>\"'\u3000\u3001\u3002]+",
+        text,
+        re.IGNORECASE,
+    )
+    emails = re.findall(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", text)
+    return {value.rstrip(".,;:!?)]}") for value in urls + emails}
+
+
+def translation_numbers(text):
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"(?<=\d),(?=\d{3}(?:\D|$))", "", text)
+    return set(re.findall(r"\d+(?:\.\d+)?", text))
+
+
+def matches_target_script(text, target):
+    letters = [c for c in text if unicodedata.category(c).startswith("L")]
+    if len(letters) < 20:
+        return True  # 短い固有名詞や記号だけでは判定しない。
+    groups = {
+        "LATIN": "en az ca ceb de es et eu fr hr hu id it jv lt lv ms nl pl sk sl sw tl uz vi",
+        "CYRILLIC": "be bg kk ru",
+        "ARABIC": "ar fa ur",
+        "BENGALI": "bn",
+        "GUJARATI": "gu",
+        "HEBREW": "he",
+        "DEVANAGARI": "hi mr ne",
+        "TAMIL": "ta",
+        "TELUGU": "te",
+        "MALAYALAM": "ml",
+        "SINHALA": "si",
+        "THAI": "th",
+        "KHMER": "km",
+        "MYANMAR": "my",
+        "GEORGIAN": "ka",
+        "ARMENIAN": "hy",
+        "GURMUKHI": "pa",
+        "HANGUL": "ko",
+    }
+    scripts = next(([script] for script, codes in groups.items() if target in codes.split()), [])
+    if target == "sr":
+        scripts = ["LATIN", "CYRILLIC"]
+    elif target == "ja":
+        scripts = ["HIRAGANA", "KATAKANA", "CJK"]
+    elif target in ("zh-hans", "zh-hant"):
+        scripts = ["CJK"]
+    if not scripts:
+        return False
+    matching = sum(any(script in unicodedata.name(c, "") for script in scripts) for c in letters)
+    return matching / len(letters) >= 0.2
+
+
+def check_translation(req, translated, reference):
+    """内容を返さず、判定理由の固定コードだけを返す。"""
+    output, expected = normalized_translation(translated), normalized_translation(reference)
+    reasons = []
+    a = {output[n : n + 2] for n in range(max(0, len(output) - 1))}
+    b = {expected[n : n + 2] for n in range(max(0, len(expected) - 1))}
+    similarity = (
+        1.0 if output == expected else (2 * len(a & b) / (len(a) + len(b)) if a or b else 0)
+    )
+    if not output or similarity < 0.6:
+        reasons.append("similarity")
+    allowed = (
+        req["text"]
+        + "\n"
+        + "\n".join(source + "\n" + target for source, target in req["glossary"])
+        + "\n"
+        + reference
+    )
+    if not translation_links(translated) <= translation_links(allowed):
+        reasons.append("links")
+    if not translation_numbers(translated) <= translation_numbers(reference):
+        reasons.append("numbers")
+    if not matches_target_script(translated, req["target"]):
+        reasons.append("language")
+    return tuple(reasons)
+
+
+class WorkerHealth:
+    """成績は数と時刻だけ。内容や基準の訳を保持しない。"""
+
+    def __init__(self, registry, probation_jobs=20):
+        if probation_jobs <= 0:
+            raise ValueError("TR_PROBATION_JOBS は正の整数にしてください")
+        self.registry, self.probation_jobs = registry, probation_jobs
+        self.lock = threading.RLock()
+        self.workers = {}
+        self.owners = {}
+        self.qualified = set()
+
+    def invalidate(self, worker_id=None, owner=None):
+        with self.lock:
+            if worker_id is not None:
+                self.qualified.discard(worker_id)
+            if owner is not None:
+                self.qualified.difference_update(
+                    wid for wid, stats in self.workers.items() if stats["owner"] == owner
+                )
+
+    def eligible(self, worker):
+        with self.lock:
+            return (
+                worker["id"] in self.qualified
+                and worker["state"] == "probation"
+                and not worker.get("owner_quarantined", False)
+            )
+
+    def record(self, worker, passed=None, timed_out=False):
+        wid, owner = worker["id"], worker["owner"]
+        with self.lock:
+            stats = self.workers.setdefault(
+                wid,
+                {
+                    "owner": owner,
+                    "passed": 0,
+                    "failed": 0,
+                    "errors": 0,
+                    "timeouts": 0,
+                    "streak": 0,
+                    "recent": deque(maxlen=20),
+                },
+            )
+            owner_stats = self.owners.setdefault(
+                owner,
+                {"passed": 0, "failed": 0, "errors": 0, "timeouts": 0, "failures": deque(maxlen=3)},
+            )
+            for bucket in (stats, owner_stats):
+                bucket[
+                    "passed" if passed is True else "failed" if passed is False else "errors"
+                ] += 1
+                bucket["timeouts"] += int(timed_out)
+            stats["recent"].append(passed is None)
+            stats["streak"] = stats["streak"] + 1 if passed is True else 0
+            if passed is False:
+                now = time.monotonic()
+                failures = owner_stats["failures"]
+                while failures and failures[0] <= now - 86400:
+                    failures.popleft()
+                failures.append(now)
+                self.qualified.discard(wid)
+                self.registry.set_state(wid, "quarantine")
+                if len(failures) >= 3:
+                    self.registry.quarantine_owner(owner)
+                    self.qualified.difference_update(
+                        worker_id
+                        for worker_id, record in self.workers.items()
+                        if record["owner"] == owner
+                    )
+            elif (
+                passed is None
+                and len(stats["recent"]) >= 10
+                and sum(stats["recent"]) / len(stats["recent"]) >= 0.5
+            ):
+                self.qualified.discard(wid)
+                self.registry.set_state(wid, "quarantine")
+            elif (
+                passed is True
+                and stats["streak"] >= self.probation_jobs
+                and not worker.get("owner_quarantined", False)
+            ):
+                if self.registry.set_state(wid, "probation"):
+                    self.qualified.add(wid)
+                else:
+                    self.qualified.discard(wid)
+
+    def release_owner(self, owner):
+        self.registry.release_owner(owner)
+        with self.lock:
+            self.owners.pop(owner, None)
+            for wid, stats in self.workers.items():
+                if stats["owner"] == owner:
+                    stats["streak"] = 0
+                    stats["recent"].clear()
+                    self.qualified.discard(wid)
+
+
+class CanaryChecks:
+    """1本の検査経路。基準生成と照合中の内容はメモリだけに置く。"""
+
+    def __init__(self, hub, upstreams, canary_file, probation_jobs=20):
+        fd = os.open(canary_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16 * 1024 * 1024:
+                raise ValueError("確認用ジョブは16MiB以下の通常ファイルにしてください")
+            if os.name != "nt" and (metadata.st_uid != os.getuid() or metadata.st_mode & 0o077):
+                raise ValueError("確認用ジョブのファイルを所有者本人の0600にしてください")
+            with os.fdopen(fd, "r", encoding="utf-8") as source:
+                fd = None
+                try:
+                    data = json.load(source)
+                except (ValueError, UnicodeError):
+                    raise ValueError("確認用ジョブのJSONが不正です") from None
+        finally:
+            if fd is not None:
+                os.close(fd)
+        if not isinstance(data, list) or not data or len(data) > 10000:
+            raise ValueError("確認用ジョブは1〜10000件のJSON配列にしてください")
+        self.samples = []
+        seen = set()
+        allowed = {"text", "target_lang", "source_lang", "form", "context", "glossary", "history"}
+        for body in data:
+            if not isinstance(body, dict) or set(body) - allowed:
+                raise ValueError("確認用ジョブの項目が不正です")
+            try:
+                req = parse_request(body)
+            except HttpError:
+                raise ValueError("確認用ジョブの入力が不正です") from None
+            digest = hashlib.sha256(req["text"].encode()).hexdigest()
+            if digest not in seen:
+                self.samples.append((digest, req))
+                seen.add(digest)
+        self.hub = hub
+        self.pool = DirectPool(upstreams)
+        self.health = WorkerHealth(hub.registry, probation_jobs)
+        self.used = {}
+        self.cancel = UpstreamCancellation()
+        self.thread = None
+        self.reference_timeout = 120
+
+    def start(self):
+        thread = threading.Thread(target=self.run, daemon=True)
+        thread.start()
+        self.thread = thread
+
+    def reference(self, req):
+        events = queue.Queue()
+        cancel = UpstreamCancellation()
+        job = self.pool.submit("canary", "interactive")
+        index = self.pool.acquire(job, self.cancel)
+        if index is None:
+            return None
+
+        def translate():
+            try:
+                upstream_stream(
+                    build_prompt(req),
+                    max_tokens(req["text"]),
+                    events,
+                    cancel,
+                    self.pool.urls[index],
+                )
+            finally:
+                self.pool.release(job, index)
+
+        thread = threading.Thread(target=translate, daemon=True)
+        try:
+            thread.start()
+        except Exception:
+            self.pool.release(job, index)
+            raise
+        result, size = [], 0
+        deadline = time.monotonic() + self.reference_timeout
+        try:
+            while not self.cancel.is_set() and time.monotonic() < deadline:
+                try:
+                    kind, value = events.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if kind == "text":
+                    size += len(value)
+                    if size > max_tokens(req["text"]) * 6:
+                        return None
+                    result.append(value)
+                elif kind == "done":
+                    return (
+                        "".join(result).strip()
+                        if value == "stop"
+                        and result
+                        and matches_target_script("".join(result), req["target"])
+                        else None
+                    )
+                else:
+                    return None
+            return None
+        finally:
+            cancel.set()
+            thread.join(timeout=5.2)
+
+    def run(self):
+        while not self.cancel.is_set():
+            with self.hub.condition:
+                candidates = [
+                    worker
+                    for worker, _ in self.hub.ready.values()
+                    if not self.health.eligible(worker)
+                    and not worker.get("owner_quarantined", False)
+                    and len(self.used.get(worker["owner"], ())) < len(self.samples)
+                ]
+                worker = secrets.choice(candidates) if candidates else None
+                if worker is None:
+                    self.hub.condition.wait(0.2)
+                    continue
+            unused = [
+                (digest, req)
+                for digest, req in self.samples
+                if digest not in self.used.get(worker["owner"], set())
+            ]
+            digest, req = secrets.choice(unused)
+            try:
+                worker = self.hub.registry.info(worker["id"])
+                with self.hub.condition:
+                    if worker["id"] in self.hub.ready:
+                        _, network = self.hub.ready[worker["id"]]
+                        self.hub.ready[worker["id"]] = (worker, network)
+                if self.health.eligible(worker) or worker.get("owner_quarantined", False):
+                    continue
+                reference = self.reference(req)
+                if reference is None or self.cancel.is_set():
+                    self.cancel.wait(1)
+                    continue
+                self.used.setdefault(worker["owner"], set()).add(digest)
+                events = queue.Queue()
+                outcome = self.hub.execute_probe(
+                    req, events, self.cancel, timeout=25, target_worker=worker["id"], attempts=1
+                )
+                text = []
+                finished = False
+                while not events.empty():
+                    kind, value = events.get_nowait()
+                    if kind == "text":
+                        text.append(value)
+                    elif kind == "done":
+                        finished = value == "stop"
+                if outcome not in ("cancelled", "unavailable") and not self.cancel.is_set():
+                    current = self.hub.registry.info(worker["id"])
+                    verdict = (
+                        not check_translation(req, "".join(text), reference) if finished else None
+                    )
+                    self.health.record(current, passed=verdict, timed_out=outcome == "timeout")
+            except (HttpError, OSError, ValueError, sqlite3.Error):
+                self.cancel.wait(1)
+            except Exception as error:
+                log.error("canary check failed: %s", type(error).__name__)
+                self.cancel.wait(1)
+            finally:
+                reference = req = None
+                text = None
+
+    def close(self):
+        self.cancel.set()
+        with self.hub.condition:
+            self.hub.condition.notify_all()
+        if self.thread is not None:
+            self.thread.join(timeout=6)
 
 
 class JournalFormatter(logging.Formatter):
