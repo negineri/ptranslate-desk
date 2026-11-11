@@ -225,6 +225,13 @@ fn should_release(active: usize, last: Instant, now: Instant, minutes: u64) -> b
     active == 0
         && now.saturating_duration_since(last) >= Duration::from_secs(minutes.saturating_mul(60))
 }
+struct MeasurementGuards<'a> {
+    _worker: tokio::sync::MutexGuard<'a, ()>,
+    _starting: tokio::sync::MutexGuard<'a, ()>,
+    _change: tokio::sync::MutexGuard<'a, ()>,
+    _measuring: tokio::sync::MutexGuard<'a, ()>,
+}
+
 struct ResumeAfterMeasurement(AppHandle);
 impl Drop for ResumeAfterMeasurement {
     fn drop(&mut self) {
@@ -414,6 +421,34 @@ impl Local {
         *self.settings.lock().unwrap() = settings;
         self.configured.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    async fn prepare_measurement<'a>(
+        &'a self,
+        lifecycle: &'a crate::worker_supervisor::Lifecycle,
+        pending_translation: impl FnOnce() -> bool,
+    ) -> Result<MeasurementGuards<'a>, String> {
+        let measuring = self
+            .measuring
+            .try_lock()
+            .map_err(|_| "デバイスはすでに計測中です")?;
+        self.measurement_cancel.reset();
+        // ワーカーの準備も starting を取るため、先に停止と回収を待つ。
+        let change = tokio::select! {
+            _ = self.measurement_cancel.canceled() => return Err("計測を中止しました".into()),
+            guard = lifecycle.stop_for_engine_change() => guard,
+        };
+        let starting = tokio::select! {
+            _ = self.measurement_cancel.canceled() => return Err("計測を中止しました".into()),
+            guard = self.starting.lock() => guard,
+        };
+        let worker = self.stop_for_measurement(pending_translation())?;
+        Ok(MeasurementGuards {
+            _worker: worker,
+            _starting: starting,
+            _change: change,
+            _measuring: measuring,
+        })
     }
 
     fn stop_for_measurement(
@@ -838,22 +873,16 @@ pub async fn measure_local_devices(
         );
     }
     let local = app.state::<Local>();
-    let _measuring = local
-        .measuring
-        .try_lock()
-        .map_err(|_| "デバイスはすでに計測中です")?;
-    local.measurement_cancel.reset();
-    let _starting = tokio::select! {
-        _ = local.measurement_cancel.canceled() => return Err("計測を中止しました".into()),
-        guard = local.starting.lock() => guard,
-    };
-    let pending_translation = app
-        .state::<crate::Backend>()
-        .session
-        .lock()
-        .unwrap()
-        .has_pending_translation();
-    let _worker = local.stop_for_measurement(pending_translation)?;
+    let lifecycle = app.state::<crate::worker_supervisor::Lifecycle>();
+    let _measurement = local
+        .prepare_measurement(&lifecycle, || {
+            app.state::<crate::Backend>()
+                .session
+                .lock()
+                .unwrap()
+                .has_pending_translation()
+        })
+        .await?;
     let _resume = ResumeAfterMeasurement(app.clone());
     let mut devices = tokio::select! {
         _ = local.measurement_cancel.canceled() => return Err("計測を中止しました。デバイスは手動でも選べます".into()),
@@ -926,7 +955,6 @@ pub async fn measure_local_devices(
             benchmark::measure(&app, &progress, gpu).await?;
         }
     }
-    drop(_starting);
     if local.measurement_cancel.canceled.load(Ordering::SeqCst) {
         return Err("計測を中止しました。デバイスは手動でも選べます".into());
     }
@@ -1412,6 +1440,33 @@ mod tests {
         assert!(last >= now);
         assert!(!local.release_if_idle(last + Duration::from_secs(59)));
         assert!(local.release_if_idle(last + Duration::from_secs(60)));
+    }
+
+    #[tokio::test]
+    async fn measurement_requests_worker_stop_and_waits_before_stopping_engine() {
+        let local = Local::new(Settings::default(), true).unwrap();
+        let lifecycle = crate::worker_supervisor::Lifecycle::default();
+        local.ready.store(true, Ordering::SeqCst);
+        let (run, stop) = lifecycle.begin().await.unwrap();
+        let standby = local.worker_standby();
+        let measurement = local.prepare_measurement(&lifecycle, || false);
+        tokio::pin!(measurement);
+        tokio::select! {
+            _ = &mut measurement => panic!("ワーカーの回収前に計測を開始した"),
+            result = stop => result.unwrap(),
+        }
+        assert!(local.ready.load(Ordering::SeqCst));
+        drop(standby);
+        drop(run);
+        let measuring = measurement.await.unwrap();
+        assert!(!local.ready.load(Ordering::SeqCst));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), lifecycle.begin())
+                .await
+                .is_err()
+        );
+        drop(measuring);
+        assert!(lifecycle.begin().await.is_ok());
     }
 
     #[test]

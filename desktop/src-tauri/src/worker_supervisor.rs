@@ -55,7 +55,7 @@ struct Running {
     finished: watch::Receiver<()>,
 }
 
-struct RunLease<'a> {
+pub(crate) struct RunLease<'a> {
     lifecycle: &'a Lifecycle,
     _finished: watch::Sender<()>,
 }
@@ -67,7 +67,7 @@ impl Drop for RunLease<'_> {
 }
 
 impl Lifecycle {
-    async fn begin(&self) -> Result<(RunLease<'_>, oneshot::Receiver<()>), String> {
+    pub(crate) async fn begin(&self) -> Result<(RunLease<'_>, oneshot::Receiver<()>), String> {
         let _change = self.changes.lock().await;
         let mut current = self.current.lock().unwrap();
         if current.is_some() {
