@@ -23,7 +23,15 @@ panel.innerHTML = `<summary>翻訳の処理を提供する</summary>
       <button type="submit">登録する</button>
       <button type="button" id="worker-renew" hidden>資格を更新</button>
       <button type="button" id="worker-revoke" hidden>登録を解除</button>
+      <button type="button" id="worker-forget" hidden>この端末からだけ削除する</button>
     </div>
+    <fieldset id="worker-forget-confirmation" hidden>
+      <legend>端末の資格を削除</legend>
+      <p class="hint">提供先の登録は期限 (最長 7 日) が切れるまで残ります。</p>
+      <label><input type="checkbox" id="worker-forget-agree"> 確認して、この端末からだけ削除する</label>
+      <button type="button" id="worker-forget-commit">削除する</button>
+      <button type="button" id="worker-forget-cancel">キャンセル</button>
+    </fieldset>
   </form>
   <p class="hint" role="status"></p>`;
 settingsPage.append(panel);
@@ -33,6 +41,9 @@ const register = form.querySelector("button[type=submit]");
 const renew = form.querySelector("#worker-renew");
 const revoke = form.querySelector("#worker-revoke");
 const status = panel.querySelector("[role=status]");
+const forget = form.querySelector("#worker-forget");
+const confirmation = form.querySelector("#worker-forget-confirmation");
+const agree = form.querySelector("#worker-forget-agree");
 const fields = [...form.querySelectorAll("input[name]")];
 let state;
 let busy = false;
@@ -47,6 +58,13 @@ function render() {
   register.hidden = registered;
   renew.hidden = revoke.hidden = !registered;
   renew.disabled = revoke.disabled = busy;
+  forget.hidden = !registered || !state?.can_forget;
+  forget.disabled = busy;
+  confirmation.disabled = busy;
+  if (!registered) {
+    confirmation.hidden = true;
+    agree.checked = false;
+  }
   if (!state?.supported) {
     status.textContent = "この端末では翻訳の処理を提供できません。";
   } else if (registered) {
@@ -55,6 +73,7 @@ function render() {
   } else {
     status.textContent = "未登録";
   }
+  if (state?.message) status.textContent = state.message;
 }
 
 async function operate(command, args) {
@@ -69,6 +88,7 @@ async function operate(command, args) {
     terms.checked = false;
   } catch (failure) {
     error = String(failure);
+    if (command === "revoke_worker" && state) state.can_forget = true;
   } finally {
     busy = false;
     render();
@@ -84,6 +104,14 @@ form.addEventListener("submit", (event) => {
 });
 renew.onclick = () => operate("renew_worker");
 revoke.onclick = () => operate("revoke_worker");
+forget.onclick = () => { agree.checked = false; confirmation.hidden = false; };
+form.querySelector("#worker-forget-cancel").onclick = () => {
+  confirmation.hidden = true;
+  agree.checked = false;
+};
+form.querySelector("#worker-forget-commit").onclick = () => {
+  if (agree.checked) void operate("forget_worker_registration", { confirmed: true });
+};
 render();
 // 資格情報ストアを開くのは、利用者が参加設定を開いたときだけ。
 panel.addEventListener("toggle", () => {

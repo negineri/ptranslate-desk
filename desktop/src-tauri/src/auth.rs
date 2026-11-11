@@ -24,14 +24,14 @@ const LOGIN_REQUIRED: &str = "ログインし直してください";
 
 type Secret = Zeroizing<String>;
 
-trait Vault: Send + Sync {
+pub(crate) trait Vault: Send + Sync {
     fn load(&self) -> Result<Option<Secret>, String>;
     fn save(&self, value: &str) -> Result<(), String>;
     fn clear(&self) -> Result<(), String>;
 }
 
-struct OsVault {
-    account: String,
+pub(crate) struct OsVault {
+    pub(crate) account: String,
 }
 impl OsVault {
     fn entry(&self) -> Result<keyring::Entry, String> {
@@ -130,6 +130,17 @@ impl Auth {
 
     pub(crate) fn for_worker(client: Client, connection: crate::connection::Connection) -> Self {
         Self::with_account(client, connection, "worker-login-")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn worker_test_auth(
+        client: Client,
+        connection: crate::connection::Connection,
+        vault: Arc<dyn Vault>,
+    ) -> Self {
+        let mut auth = Self::for_worker(client, connection);
+        auth.vault = vault;
+        auth
     }
 
     fn with_account(
