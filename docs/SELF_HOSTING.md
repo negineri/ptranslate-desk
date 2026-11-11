@@ -188,6 +188,13 @@ Pythonサービスとコンテナはどちらか一方を使います。
 | `TR_MAX_ACTIVE_PER_USER`            | 2                                             | 1 人が同時に流せる翻訳の数                       |
 | `TR_UPSTREAMS` | 空 | 複数エンジンのJSON配列。例: `[{"url":"http://127.0.0.1:8080/v1/completions","slots":2}]`。各 `slots` は1〜1000 |
 | `TR_UPSTREAM_SLOTS` | 4 | `TR_UPSTREAMS` が空のときの実行枠。1〜1000の整数。エンジンの並列数より多い分はエンジン側で待つ。`TR_UPSTREAMS` 指定時は使用・検証しない |
+| `TR_ANON_ENABLED` | 0 | 匿名の資格のAPIを有効にするか。前段からだけ仲介に接続できる構成で使う |
+| `TR_TOKEN_KEY` | 空 | 匿名を有効にする場合に必須。32バイト以上の秘密の鍵。リポジトリ・ログには入れない |
+| `TR_ANON_ISSUE_PER_MINUTE` | 100 | 全体の資格発行の試みの1分の上限 |
+| `TR_ANON_SHARE` | 0.5 | 登録済みの待ちがある場合の匿名の実行枠の割合（0より大きく1以下、最低1枠） |
+| `TR_CLIENT_IP_HEADER` | 空 | 信頼する前段が上書きするIPヘッダー。空ならIP単位の制限を使わない |
+| `TR_COUNTRY_HEADER` / `TR_ALLOWED_COUNTRIES` | 空 / 空 | 信頼する前段の国ヘッダーと許可する国のカンマ区切り一覧（例 `JP`）。一覧が空なら制限しない |
+| `TR_MAX_OPEN_REQUESTS` | 1000 | 開いた接続の上限。超過は503 |
 | `TR_UPSTREAM_TIMEOUT` | 600 | 翻訳エンジンとの通信タイムアウト（秒） |
 | `TR_HEARTBEAT_SECONDS` | 15 | SSEのハートビート間隔（秒） |
 | `TR_USERINFO_URL` | 空 | IdPのuserinfo。`X-Forwarded-User` が無く前段が検証したBearerだけがあるとき、ここから `preferred_username` を引く（access tokenにユーザー名が入らないIdP向け。[かんたん構築ガイド](SELF_HOSTING_COMPOSE.md)） |

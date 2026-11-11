@@ -9,7 +9,8 @@
   PLaMo は指示に従わない翻訳専用のモデルなので、プロンプトに指示の文を入れない
 - 待っている間も 15 秒ごとにコメント行を送る (Cloudflare は 100 秒応答の無い接続を切る)
 - 利用者は前段の認証プロキシ (oauth2-proxy など) が付ける X-Forwarded-User で区別する。
-  認証は持たないので、待ち受けは前段からしか届かない場所 (127.0.0.1 など) にする。
+  OIDC の認証は前段で行う。匿名を有効にした場合は仲介が署名した資格を検証する。
+  待ち受けは前段からしか届かない場所 (127.0.0.1 など) にする。
   TR_USERINFO_URL を設定したときは、X-Forwarded-User が無く前段が検証した Bearer だけがあれば、
   IdP の userinfo から preferred_username を引く (access token にユーザー名が入らない IdP 向け)
   原文と訳はログにも残さない
@@ -21,6 +22,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
+import ipaddress
+import secrets
 import http.client
 import json
 import logging
@@ -38,6 +42,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import dataclass
+from collections import deque
+from http.cookies import SimpleCookie
 
 
 def env_int(name: str, default: int) -> int:
@@ -51,10 +57,19 @@ STATIC_DIR = Path(os.environ.get("TR_STATIC_DIR", Path(__file__).resolve().paren
 UPSTREAM_URL = os.environ.get("TR_UPSTREAM_URL", "")
 UPSTREAM_SLOTS = os.environ.get("TR_UPSTREAM_SLOTS", "4")
 UPSTREAMS = os.environ.get("TR_UPSTREAMS", "")
+ANON_ENABLED = os.environ.get("TR_ANON_ENABLED", "0") == "1"
+TOKEN_KEY = os.environ.get("TR_TOKEN_KEY", "").encode()
+ANON_TTL = 30 * 86400
+ANON_SHARE = float(os.environ.get("TR_ANON_SHARE", "0.5"))
+ANON_ISSUE_PER_MINUTE = env_int("TR_ANON_ISSUE_PER_MINUTE", 100)
+CLIENT_IP_HEADER = os.environ.get("TR_CLIENT_IP_HEADER", "")
+COUNTRY_HEADER = os.environ.get("TR_COUNTRY_HEADER", "")
+ALLOWED_COUNTRIES = frozenset(os.environ.get("TR_ALLOWED_COUNTRIES", "").split(",")) - {""}
 POOL_KIND = os.environ.get("TR_POOL_KIND", "direct")
 QUEUE_TIMEOUT = env_int("TR_QUEUE_TIMEOUT", 120)
 AGING_SECONDS = env_int("TR_AGING_SECONDS", 30)
 MAX_QUEUE = env_int("TR_MAX_QUEUE", 256)
+MAX_OPEN_REQUESTS = env_int("TR_MAX_OPEN_REQUESTS", 1000)
 API_KEY = os.environ.get("TR_API_KEY", "")
 MODEL = os.environ.get("TR_MODEL", "plamo-3-translate")
 # 1 回 (1 区切り) の原文の上限 (文字)。PLaMo のコンテキスト (16K トークン) は原文と訳の
@@ -162,6 +177,56 @@ class HttpError(Exception):
         self.code = code
 
 
+class WindowCounter:
+    """時間窓の集計だけをメモリに保持。満杯時に生きた制限を消さない。"""
+
+    def __init__(self, seconds, capacity=10000):
+        self.seconds = seconds
+        self.capacity = capacity
+        self.entries = {}
+        self.lock = threading.Lock()
+
+    def charge(self, key, amount, limit):
+        now = time.monotonic()
+        with self.lock:
+            for old in list(self.entries):
+                buckets, total = self.entries[old]
+                while buckets and buckets[0][0] <= now - self.seconds:
+                    total -= buckets.popleft()[1]
+                if buckets:
+                    self.entries[old] = (buckets, total)
+                else:
+                    del self.entries[old]
+            buckets, total = self.entries.get(key, (deque(), 0))
+            if total + amount > limit:
+                raise HttpError(429, "利用の上限に達しました。しばらくしてから送ってください")
+            if key not in self.entries and len(self.entries) >= self.capacity:
+                raise HttpError(503, "利用が集中しています", "busy")
+            # 秒単位でまとめ、期限は最後の要求に合わせる（最大1秒保守的）。
+            if buckets and int(buckets[-1][0]) == int(now):
+                _, count = buckets.pop()
+                buckets.append((now, count + amount))
+            else:
+                buckets.append((now, amount))
+            self.entries[key] = (buckets, total + amount)
+
+
+def anonymous_credential():
+    payload = f"pta_{secrets.token_hex(16)}.{int(time.time()) + ANON_TTL}"
+    signature = hmac.new(TOKEN_KEY, payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def verify_anonymous(token):
+    if not ANON_ENABLED or not re.fullmatch(r"pta_[0-9a-f]{32}\.[0-9]{1,12}\.[0-9a-f]{64}", token):
+        raise HttpError(401, "匿名の資格が無効です。取り直してください")
+    payload, signature = token.rsplit(".", 1)
+    expected = hmac.new(TOKEN_KEY, payload.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected) or int(payload.split(".")[1]) <= time.time():
+        raise HttpError(401, "匿名の資格が無効です。取り直してください")
+    return "anonymous:" + payload.split(".")[0][4:]  # 登録済みの利用者名と衝突させない。
+
+
 def token_expiry(token: str) -> float | None:
     """JWT の exp (UNIX 時刻)。署名は前段と userinfo が確かめるので、ここでは覚えておく期間にだけ使う。"""
     try:
@@ -192,7 +257,7 @@ def user_from_userinfo(token: str) -> str:
         resp = conn.getresponse()
         body = resp.read(65536)
     except (OSError, http.client.HTTPException) as e:
-        log.warning("userinfo failed: %s", e)
+        log.warning("userinfo failed: %s", type(e).__name__)
         raise HttpError(502, "認証サーバーに接続できませんでした")
     finally:
         conn.close()
@@ -351,12 +416,18 @@ class Job:
     user: str
     purpose: str
     created: float
+    tier: str = "registered"
+    network: str = ""
 
 
 class DirectPool:
     def __init__(self, upstreams, timeout=120, aging=30, max_queue=256):
         self.urls = [url for url, _ in upstreams]
         self.free = [slots for _, slots in upstreams]
+        self.total_slots = sum(self.free)
+        self.anonymous_running = 0
+        self.network_running = {}
+        self.tier_turn = {}
         self.timeout = timeout
         self.aging = aging
         self.max_queue = max_queue
@@ -366,11 +437,13 @@ class DirectPool:
         self.turns = {}
         self.cursor = 0
 
-    def submit(self, user, purpose):
+    def submit(self, user, purpose, tier="registered", network=""):
         with self.condition:
             if len(self.waiting) >= self.max_queue:
                 return None
-            job = Job(user, purpose, time.monotonic())
+            if sum(j.user == user for j in self.waiting) >= (4 if tier == "anonymous" else 8):
+                raise HttpError(429, "待ち行列に置ける数を超えています")
+            job = Job(user, purpose, time.monotonic(), tier, network)
             self.waiting.append(job)
             self.condition.notify_all()
             return job
@@ -380,6 +453,18 @@ class DirectPool:
         eligible = [
             j for j in self.waiting if j.purpose == "interactive" or j.user not in self.pages
         ]
+        registered_waiting = any(j.tier == "registered" for j in self.waiting)
+        # 1枠のプールでも匿名を進めるため、比率の枠は最低1とする。
+        anonymous_limit = max(1, int(self.total_slots * ANON_SHARE))
+        eligible = [
+            j
+            for j in eligible
+            if j.tier != "anonymous"
+            or (
+                (not registered_waiting or self.anonymous_running < anonymous_limit)
+                and (not j.network or self.network_running.get(j.network, 0) < 4)
+            )
+        ]
         if not eligible:
             return None
 
@@ -388,6 +473,14 @@ class DirectPool:
 
         rank = min(map(priority, eligible))
         candidates = [j for j in eligible if priority(j) == rank]
+        tiers = {j.tier for j in candidates}
+        tier = (
+            ("anonymous" if self.tier_turn.get(rank, 0) == 4 else "registered")
+            if len(tiers) == 2
+            else next(iter(tiers))
+        )
+        candidates = [j for j in candidates if j.tier == tier]
+        rank = (rank, tier)
         users = list(dict.fromkeys(j.user for j in candidates))
         turns = [user for user in self.turns.get(rank, []) if user in users]
         turns.extend(user for user in users if user not in turns)
@@ -416,7 +509,14 @@ class DirectPool:
                         0,
                         PURPOSES.index(job.purpose) - int(now - job.created > self.aging),
                     )
-                    turns = self.turns[rank]
+                    self.tier_turn[rank] = (self.tier_turn.get(rank, 0) + 1) % 5
+                    turns = self.turns[(rank, job.tier)]
+                    if job.tier == "anonymous":
+                        self.anonymous_running += 1
+                        if job.network:
+                            self.network_running[job.network] = (
+                                self.network_running.get(job.network, 0) + 1
+                            )
                     turns.remove(job.user)
                     turns.append(job.user)
                     if job.purpose != "interactive":
@@ -432,6 +532,12 @@ class DirectPool:
     def release(self, job, index):
         with self.condition:
             self.free[index] += 1
+            if job.tier == "anonymous":
+                self.anonymous_running -= 1
+                if job.network:
+                    self.network_running[job.network] -= 1
+                    if not self.network_running[job.network]:
+                        del self.network_running[job.network]
             if job.purpose != "interactive":
                 self.pages.discard(job.user)
             self.condition.notify_all()
@@ -579,9 +685,55 @@ def upstream_stream(
 
 
 class TranslationHTTPServer(ThreadingHTTPServer):
+    def process_request(self, request, client_address):
+        if not self.open_requests.acquire(blocking=False):
+            try:
+                request.settimeout(1)
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\nRetry-After: 5\r\n\r\n"
+                )
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.open_requests.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.open_requests.release()
+
+    def handle_error(self, request, client_address):
+        log.error("HTTP接続の処理に失敗しました")
+
     def get_pool(self):
         with active_lock:
             if not hasattr(self, "pool"):
+                if ANON_ENABLED and (len(TOKEN_KEY) < 32 or ANON_ISSUE_PER_MINUTE <= 0):
+                    raise ValueError("匿名の資格には32バイト以上の鍵と正の発行上限が必要です")
+                if ANON_ENABLED and PUBLIC_SERVER_URL:
+                    public = urllib.parse.urlsplit(PUBLIC_SERVER_URL)
+                    if (
+                        public.scheme != "https"
+                        or not public.hostname
+                        or public.username is not None
+                        or public.password is not None
+                        or public.path
+                        or public.query
+                        or public.fragment
+                    ):
+                        raise ValueError("匿名のCookieにはHTTPSの公開オリジンを指定してください")
+                    public.port
+                if not 0 < ANON_SHARE <= 1:
+                    raise ValueError("TR_ANON_SHARE は0より大きく1以下にしてください")
+                if ALLOWED_COUNTRIES and not COUNTRY_HEADER:
+                    raise ValueError("国の制限には TR_COUNTRY_HEADER が必要です")
                 if POOL_KIND != "direct":
                     raise ValueError("ボランティア枠はまだ実装していません")
                 if min(QUEUE_TIMEOUT, AGING_SECONDS, MAX_QUEUE) <= 0:
@@ -595,6 +747,12 @@ class TranslationHTTPServer(ThreadingHTTPServer):
             return self.pool
 
     def server_bind(self):
+        if MAX_OPEN_REQUESTS <= 0:
+            raise ValueError("TR_MAX_OPEN_REQUESTS は正の整数にしてください")
+        self.open_requests = threading.BoundedSemaphore(MAX_OPEN_REQUESTS)
+        self.issue_global = WindowCounter(60)
+        self.issue_network = WindowCounter(3600)
+        self.character_limits = WindowCounter(3600)
         # HTTPServer.server_bind の getfqdn による逆引きは不要。
         # macOS のランナーでは名前解決待ちで起動が遅れることがある。
         socketserver.TCPServer.server_bind(self)
@@ -604,25 +762,89 @@ class TranslationHTTPServer(ThreadingHTTPServer):
 class Handler(BaseHTTPRequestHandler):
     server_version = "translator"
     protocol_version = "HTTP/1.1"
+    timeout = 120
 
     def log_message(self, fmt, *args):  # アクセスログは nginx が取る
         pass
 
     def user(self) -> str:
         user = self.headers.get("X-Forwarded-User", "")
+        self.tier = "registered"
+        scheme, _, token = self.headers.get("Authorization", "").partition(" ")
+        token = token.strip()
+        if not user and scheme.lower() == "bearer" and token.startswith(("pta_", "ptw_")):
+            self.tier = "anonymous"
+            return verify_anonymous(token)
+        if not user and not self.headers.get("Authorization") and self.headers.get("Cookie"):
+            cookies = SimpleCookie()
+            try:
+                cookies.load(self.headers["Cookie"])
+            except Exception:
+                raise HttpError(401, "Cookie が不正です")
+            if "__Host-pta" in cookies:
+                self.check_origin()
+                self.tier = "anonymous"
+                return verify_anonymous(cookies["__Host-pta"].value)
         if not user and USERINFO_URL:
-            scheme, _, token = self.headers.get("Authorization", "").partition(" ")
             if scheme.lower() == "bearer" and token.strip():
                 return user_from_userinfo(token.strip())
         if not USER_RE.match(user):
             raise HttpError(401, "ログインしていません")
         return user
 
+    def check_origin(self):
+        if not PUBLIC_SERVER_URL or self.headers.get("Origin") != PUBLIC_SERVER_URL:
+            raise HttpError(403, "送信元を確認できません")
+
+    def client_network(self):
+        if not CLIENT_IP_HEADER:
+            return ""
+        try:
+            address = ipaddress.ip_address(self.headers.get(CLIENT_IP_HEADER, ""))
+            if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+                address = address.ipv4_mapped
+            return str(
+                ipaddress.ip_network(
+                    f"{address}/{24 if address.version == 4 else 48}", strict=False
+                )
+            )
+        except ValueError:
+            raise HttpError(403, "接続元を確認できません")
+
+    def issue_anonymous(self):
+        if not ANON_ENABLED:
+            raise HttpError(404, "Not found")
+        self.server.get_pool()  # 鍵と設定の検証を発行前に行う。
+        if self.read_json_body() != {}:
+            raise HttpError(400, "本文は空のJSONオブジェクトにしてください")
+        web = self.headers.get("Origin") is not None
+        if web:
+            self.check_origin()
+        network = self.client_network()
+        try:
+            self.server.issue_global.charge("global", 1, ANON_ISSUE_PER_MINUTE)
+        except HttpError as error:
+            if error.status == 429:
+                raise HttpError(503, "資格の発行が集中しています", "busy")
+            raise
+        if network:
+            self.server.issue_network.charge(network, 1, 5)
+        credential = anonymous_credential()
+        self.response_cookie = (
+            f"__Host-pta={credential}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={ANON_TTL}"
+            if web
+            else None
+        )
+        self.send_json(200, {"expires_in": ANON_TTL, **({} if web else {"credential": credential})})
+
     def send_json(self, status: int, data) -> None:
         body = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if getattr(self, "response_cookie", None):
+            self.send_header("Set-Cookie", self.response_cookie)
+            self.response_cookie = None
         if status == 503:
             self.send_header("Retry-After", "5")
         self.send_header("Cache-Control", "private, no-store")
@@ -633,10 +855,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def read_json_body(self) -> dict:
-        if not self.headers.get("Content-Type", "").startswith("application/json"):
+        if (
+            self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            != "application/json"
+        ):
             # 別のサイトのフォームから送らせない (JSON はプリフライトが要る)
             raise HttpError(415, "Content-Type は application/json にしてください")
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise HttpError(400, "Content-Length が不正です")
+        if length < 0 or self.headers.get("Transfer-Encoding"):
+            raise HttpError(400, "要求の長さが不正です")
         limit = (MAX_PROMPT_CHARS + MAX_CHARS * 4) * 4 + 64 * 1024
         if length > limit:
             raise HttpError(413, "リクエストが大きすぎます")
@@ -651,6 +881,8 @@ class Handler(BaseHTTPRequestHandler):
     def dispatch(self, method: str) -> None:
         path = urllib.parse.urlsplit(self.path).path
         try:
+            if ALLOWED_COUNTRIES and self.headers.get(COUNTRY_HEADER, "") not in ALLOWED_COUNTRIES:
+                raise HttpError(403, "この地域からは利用できません", "region")
             if method == "GET" and path in ("/", "/index.html"):
                 return self.serve_static("index.html", "text/html; charset=utf-8")
             if method == "GET" and path == "/translation.mjs":
@@ -661,19 +893,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_static("favicon.ico", "image/vnd.microsoft.icon")
             if not path.startswith("/api/"):
                 raise HttpError(404, "Not found")
+            if method == "POST" and path == "/api/anonymous":
+                return self.issue_anonymous()
             user = self.user()
             if method == "GET" and path == "/api/config":
                 return self.send_json(
                     200,
                     {
-                        "user": user,
+                        "user": "" if self.tier == "anonymous" else user,
                         "pool": {"kind": "direct"},
-                        "tier": "registered",
+                        "tier": self.tier,
                         "languages": [{"code": c, "name": n} for c, n in LANGUAGES],
                         "max_chars": MAX_CHARS,
                         "max_glossary": MAX_GLOSSARY,
                         "concurrency": {
-                            "max_in_flight": MAX_ACTIVE_PER_USER,
+                            "max_in_flight": 1 if self.tier == "anonymous" else MAX_ACTIVE_PER_USER,
                             "scope": "user",
                         },
                         "desktop_connection": {
@@ -691,7 +925,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
         except Exception:
-            log.exception("request %s %s failed", method, path)
+            log.error("request %s failed", method)
             try:
                 self.send_json(500, {"error": "サーバーの内部エラーです"})
             except Exception:
@@ -738,18 +972,28 @@ class Handler(BaseHTTPRequestHandler):
             raise HttpError(400, "group が不正です")
         req = parse_request(body)
         pool = self.server.get_pool()
+        tier = getattr(self, "tier", "registered")
+        network = self.client_network() if tier == "anonymous" else ""
+        user_limit = 1 if tier == "anonymous" else MAX_ACTIVE_PER_USER
         with active_lock:
-            if active.get(user, 0) >= MAX_ACTIVE_PER_USER or (
-                purpose != "interactive"
-                and page_active.get(user, 0) >= max(1, MAX_ACTIVE_PER_USER - 1)
+            if active.get(user, 0) >= user_limit or (
+                purpose != "interactive" and page_active.get(user, 0) >= max(1, user_limit - 1)
             ):
                 raise HttpError(
                     429,
                     "同時に訳せる数を超えています。前の翻訳が終わってから送ってください",
                 )
-            job = pool.submit(user, purpose)
+            job = pool.submit(user, purpose, tier, network)
             if job is None:
                 raise HttpError(503, "翻訳の待ち行列が一杯です", "busy")
+            try:
+                self.server.character_limits.charge(
+                    (tier, user), len(req["text"]), 100000 if tier == "anonymous" else 600000
+                )
+            except HttpError:
+                with pool.condition:
+                    pool._remove(job)
+                raise
             active[user] = active.get(user, 0) + 1
             if purpose != "interactive":
                 page_active[user] = page_active.get(user, 0) + 1
@@ -811,7 +1055,7 @@ class Handler(BaseHTTPRequestHandler):
             # 原文と訳は残さない (長さと言語だけ)
             log.info(
                 "user=%s %s->%s chars=%d out=%d glossary=%d history=%d finish=%s seconds=%.1f",
-                user,
+                "anonymous" if tier == "anonymous" else user,
                 req["source"] or "auto",
                 req["target"],
                 len(req["text"]),
