@@ -227,6 +227,66 @@ fn stop_request(app: AppHandle, window: WebviewWindow, id: String) {
     }
 }
 
+async fn read_translation_config(mut response: reqwest::Response) -> Result<Value, ()> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
+        if body.len() + chunk.len() > 64 * 1024 {
+            return Err(());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice::<Value>(&body)
+        .ok()
+        .filter(Value::is_object)
+        .ok_or(())
+}
+
+fn translation_body(server: &str, config: &Value, mut body: Value) -> Option<Value> {
+    let fields = body.as_object_mut()?;
+    if fields.remove("desktop_server")?.as_str()? != server {
+        return None;
+    }
+    if config["pool"]["kind"] == "volunteer" {
+        let version = config["pool"]["consent_version"]
+            .as_u64()
+            .filter(|v| *v > 0)?;
+        if fields.get("consent").and_then(Value::as_u64) != Some(version) {
+            return None;
+        }
+    } else {
+        fields.remove("consent");
+    }
+    Some(body)
+}
+
+fn json_response(stream: &Channel<Message>, status: u16, body: &Value) -> Result<(), ()> {
+    stream.send(Message::Start { status }).map_err(|_| ())?;
+    stream
+        .send(Message::Bytes {
+            bytes: serde_json::to_vec(body).map_err(|_| ())?,
+        })
+        .map_err(|_| ())
+}
+
+async fn login_required(
+    app: &AppHandle,
+    auth: &Arc<auth::Auth>,
+    stream: &Channel<Message>,
+    status: u16,
+) -> Result<(), ()> {
+    let _ = stream.send(Message::LoginRequired { status });
+    let _ = auth.invalidate().await;
+    if Arc::ptr_eq(auth, &app.state::<Backend>().auth()) {
+        publish_auth(
+            app,
+            Some(format!(
+                "サーバーが {status} を返しました。ログインし直してください"
+            )),
+        );
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn start_request(
     app: AppHandle,
@@ -283,8 +343,34 @@ fn start_request(
             if use_local {
                 return local::request(&app, &route, body.as_ref(), &stream).await;
             }
-            let mut response = match auth.send(method, path, body.as_ref()).await {
-                Ok(response) => response,
+            // config と翻訳を同じ認証・接続先に固定する。
+            let send =
+                async {
+                    let config = auth.send(Method::GET, "/api/config", None).await?;
+                    if !config.status().is_success() {
+                        return Ok::<_, String>(Some(config));
+                    }
+                    let mut config = read_translation_config(config)
+                        .await
+                        .map_err(|_| "翻訳の設定を読み込めませんでした".to_string())?;
+                    if !translation {
+                        config["desktop_server"] = Value::String(auth.server().into());
+                        json_response(&stream, 200, &config).map_err(|_| String::new())?;
+                        return Ok(None);
+                    }
+                    let Some(body) =
+                        body.and_then(|body| translation_body(auth.server(), &config, body))
+                    else {
+                        json_response(&stream, 409, &serde_json::json!({
+                        "error": "翻訳先または同意の版が変わりました。もう一度翻訳してください"
+                    })).map_err(|_| String::new())?;
+                        return Ok(None);
+                    };
+                    auth.send(method, path, Some(&body)).await.map(Some)
+                };
+            let mut response = match send.await {
+                Ok(Some(response)) => response,
+                Ok(None) => return Ok(()),
                 Err(_) if !auth.is_authenticated() => {
                     let _ = stream.send(Message::LoginRequired { status: 401 });
                     if Arc::ptr_eq(&auth, &app.state::<Backend>().auth()) {
@@ -294,20 +380,29 @@ fn start_request(
                 }
                 Err(_) => return Err(()),
             };
-            if response.status() == 401 || response.status() == 403 {
-                let status = response.status().as_u16();
-                // nginx の 403 HTML は読まず、状態の番号だけを渡す。
-                let _ = stream.send(Message::LoginRequired { status });
-                let _ = auth.invalidate().await;
-                if Arc::ptr_eq(&auth, &app.state::<Backend>().auth()) {
-                    publish_auth(
-                        &app,
-                        Some(format!(
-                            "サーバーが {status} を返しました。ログインし直してください"
-                        )),
-                    );
+            if translation && response.status() == 403 {
+                // 同意の版が確認直後に変わった場合は、ログイン状態を維持する。
+                let is_json = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.starts_with("application/json"));
+                if is_json {
+                    let error = read_translation_config(response).await?;
+                    if error["code"] == "consent_required" {
+                        return json_response(
+                            &stream,
+                            409,
+                            &serde_json::json!({
+                                "error": "同意の版が変わりました。もう一度翻訳してください"
+                            }),
+                        );
+                    }
+                    return login_required(&app, &auth, &stream, 403).await;
                 }
-                return Ok(());
+            }
+            if response.status() == 401 || response.status() == 403 {
+                return login_required(&app, &auth, &stream, response.status().as_u16()).await;
             }
             stream
                 .send(Message::Start {
@@ -611,4 +706,32 @@ fn main() {
             resident::show_main(_app);
         }
     });
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn volunteer_translation_requires_the_current_origin_and_version() {
+        let server = "https://translate.example.com";
+        let config = json!({"pool": {"kind": "volunteer", "consent_version": 2}});
+        for body in [
+            json!({"desktop_server": "https://other.example.com", "consent": 2}),
+            json!({"desktop_server": server, "consent": 1}),
+            json!({"desktop_server": server}),
+        ] {
+            assert!(translation_body(server, &config, body).is_none());
+        }
+        let body = json!({"desktop_server": server, "consent": 2, "text": "Hello"});
+        assert_eq!(
+            translation_body(server, &config, body.clone()),
+            Some(json!({"consent": 2, "text": "Hello"}))
+        );
+        assert_eq!(
+            translation_body(server, &json!({}), body),
+            Some(json!({"text": "Hello"}))
+        );
+    }
 }

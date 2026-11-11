@@ -545,6 +545,10 @@ impl Auth {
         self.forget(&mut credentials)
     }
 
+    pub(crate) fn server(&self) -> &str {
+        &self.server
+    }
+
     pub async fn send(
         &self,
         method: Method,
