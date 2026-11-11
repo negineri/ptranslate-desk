@@ -35,9 +35,7 @@ await Promise.all([
     .replace(/<dialog id="volunteer-consent"[\s\S]*?<\/dialog>/, consentDialog)
     .replace("const runKey = JSON.stringify([text, common]);\n  if (auto && runKey === lastKey && !controller) return;", "const localOverride = translationMode();\n  const wasRunning = controller !== null;")
     .replace('  try {\n    els.out.textContent = "";', `  try {
-    const response = await fetch("api/config", { signal: mine.signal, localOverride });
-    if (!response.ok) throw new Error("翻訳先を確認できませんでした");
-    const current = await response.json();
+    const current = await loadDesktopConfig(localOverride, mine.signal);
     mine.signal.throwIfAborted();
     $("volunteer-destination").hidden = current.pool?.kind !== "volunteer";
     Object.assign(common, volunteerFields(current, { auto }));
@@ -46,11 +44,38 @@ await Promise.all([
     els.out.textContent = "";`)
     .replace("JSON.stringify([common, source, prev ? prev.source : null])", "JSON.stringify([localOverride, common, source, prev ? prev.source : null])")
     .replace("}, mine.signal);", "}, mine.signal, localOverride);")
-    .replace('els.go.addEventListener("click", () => run());', `document.addEventListener("translation-settings-applied", () => {
+    .replace('  if (res.status === 401) { location.reload(); throw', '  if (res.status === 409) invalidateDesktopConfig();\n  if (res.status === 401) { location.reload(); throw')
+    .replace('  const res = await fetch("api/config");\n  if (res.status === 401) { location.reload(); return; }\n  if (!res.ok) throw new Error(`HTTP ${res.status}`);\n  config = await res.json();',
+      '  config = await loadDesktopConfig(translationMode());')
+    .replace('els.go.addEventListener("click", () => run());', `let desktopConfig = null;
+let configGeneration = 0;
+
+function invalidateDesktopConfig() {
+  desktopConfig = null;
+  configGeneration++;
+  $("volunteer-destination").hidden = true;
+}
+
+async function loadDesktopConfig(localOverride, signal) {
+  if (desktopConfig?.localOverride === localOverride) return desktopConfig.value;
+  const generation = configGeneration;
+  const response = await fetch("api/config", { signal, localOverride });
+  if (!response.ok) throw new Error("翻訳先を確認できませんでした");
+  const value = await response.json();
+  signal?.throwIfAborted();
+  if (generation === configGeneration) desktopConfig = { localOverride, value };
+  return value;
+}
+
+function resetDesktopTranslation() {
+  invalidateDesktopConfig();
   els.stop.click();
   cache.clear();
   lastKey = null;
-});
+}
+
+document.addEventListener("translation-destination-changed", resetDesktopTranslation);
+document.addEventListener("translation-settings-applied", resetDesktopTranslation);
 els.go.addEventListener("click", () => run());`)
     .replace("<section>", "<section inert>")
     .replace("  restore();", '  restore();\n  document.querySelector("section").inert = false;\n  document.dispatchEvent(new Event("desktop-ready"));')),

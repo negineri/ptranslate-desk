@@ -24,11 +24,13 @@ test("翻訳中に原文を元に戻すと、以前の訳と完了表示に戻�
   const el = (id) => window.document.getElementById(id);
   const sent = [];
   let interrupted;
+  let configReads = 0;
   Object.assign(window, translation, {
     volunteerFields,
     translationMode: () => false,
     fetch: async (route, { body, signal } = {}) => {
       if (route === "api/config") {
+        configReads++;
         return Response.json({ desktop_server: "https://translate.example", languages: [] });
       }
       assert.equal(route, "api/translate");
@@ -65,4 +67,51 @@ test("翻訳中に原文を元に戻すと、以前の訳と完了表示に戻�
   assert.equal(el("out").textContent, "元の訳");
   assert.match(el("status").textContent, /^訳し終わりました/);
   assert.deepEqual(sent, ["Original text", "Changed text"]);
+  assert.equal(configReads, 1);
+});
+
+test("409 と翻訳先変更の後だけ設定を取り直す", async (t) => {
+  const { window } = new JSDOM(html, { url: "https://app.example", runScripts: "outside-only" });
+  t.after(() => window.close());
+  const el = (id) => window.document.getElementById(id);
+  const configReads = [];
+  const sent = [];
+  let local = false;
+  let server = "https://first.example";
+  Object.assign(window, translation, {
+    volunteerFields,
+    translationMode: () => local,
+    fetch: async (route, { body, localOverride } = {}) => {
+      if (route === "api/config") {
+        configReads.push(localOverride);
+        return Response.json({ languages: [], ...(localOverride ? {} : { desktop_server: server }) });
+      }
+      const { desktop_server } = JSON.parse(body);
+      sent.push(desktop_server);
+      if (!localOverride && desktop_server !== server) {
+        return Response.json({ error: "翻訳先が変わりました" }, { status: 409 });
+      }
+      return new Response('data: {"t":"訳"}\n\ndata: {"done":true,"finish":"stop"}\n\n');
+    },
+  });
+  const ready = new Promise((resolve) => window.document.addEventListener("desktop-ready", resolve, { once: true }));
+  const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
+  window.eval(script.replace(/^import .*$/gm, ""));
+  await ready;
+
+  server = "https://second.example";
+  el("src").value = "Sample text";
+  el("go").click();
+  await waitFor(() => el("status").textContent === "翻訳先が変わりました");
+  assert.deepEqual(configReads, [false]);
+  el("go").click();
+  await waitFor(() => el("status").textContent === "訳し終わりました");
+  assert.deepEqual(configReads, [false, false]);
+
+  local = true;
+  window.document.dispatchEvent(new window.Event("translation-destination-changed"));
+  el("go").click();
+  await waitFor(() => sent.length === 3 && el("stop").hidden);
+  assert.deepEqual(configReads, [false, false, true]);
+  assert.deepEqual(sent, ["https://first.example", "https://second.example", undefined]);
 });
