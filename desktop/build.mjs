@@ -33,7 +33,7 @@ await Promise.all([
     .replace("async function requestTranslation(body, onText, signal)", "async function requestTranslation(body, onText, signal, localOverride)")
     .replace("body: JSON.stringify(body), signal });", "body: JSON.stringify(body), signal, localOverride });")
     .replace(/<dialog id="volunteer-consent"[\s\S]*?<\/dialog>/, consentDialog)
-    .replace("const runKey = JSON.stringify([text, common]);\n  if (auto && runKey === lastKey && !controller) return;", "const localOverride = translationMode();")
+    .replace("const runKey = JSON.stringify([text, common]);\n  if (auto && runKey === lastKey && !controller) return;", "const localOverride = translationMode();\n  const wasRunning = controller !== null;")
     .replace('  try {\n    els.out.textContent = "";', `  try {
     const response = await fetch("api/config", { signal: mine.signal, localOverride });
     if (!response.ok) throw new Error("翻訳先を確認できませんでした");
@@ -42,7 +42,7 @@ await Promise.all([
     $("volunteer-destination").hidden = current.pool?.kind !== "volunteer";
     Object.assign(common, volunteerFields(current, { auto }));
     const runKey = JSON.stringify([text, common, localOverride]);
-    if (auto && runKey === lastKey) return;
+    if (auto && runKey === lastKey && !wasRunning) return;
     els.out.textContent = "";`)
     .replace("JSON.stringify([common, source, prev ? prev.source : null])", "JSON.stringify([localOverride, common, source, prev ? prev.source : null])")
     .replace("}, mine.signal);", "}, mine.signal, localOverride);")

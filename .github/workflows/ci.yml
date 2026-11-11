@@ -47,6 +47,8 @@ jobs:
       - run: npm ci --ignore-scripts
         working-directory: chrome-extension
       - run: node --test chrome-extension/tests/*.test.mjs
+      - run: node desktop/build.mjs
+      - run: node --test desktop/tests/*.test.mjs
 
   desktop-windows:
     needs: version
