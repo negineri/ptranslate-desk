@@ -12,6 +12,7 @@ use tokio::{
 use zeroize::Zeroizing;
 
 const LIFETIME: Duration = Duration::from_secs(170);
+const POWER_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_GRACE: Duration = Duration::from_secs(6);
 const MAX_LINE: usize = 64;
@@ -92,7 +93,7 @@ async fn supervise(
     mut update: impl FnMut(Status),
     lifetime: Duration,
     grace: Duration,
-    allow_bootstrap: impl FnOnce() -> bool,
+    mut can_wait: impl FnMut() -> bool,
 ) -> Result<Status, ()> {
     let mut child = command.kill_on_drop(true).spawn().map_err(|_| ())?;
     let mut stdin = child.stdin.take().ok_or(())?;
@@ -106,15 +107,37 @@ async fn supervise(
         {
             return Err(());
         }
-        if !allow_bootstrap() {
+        if !can_wait() {
             return Ok(Status::Paused);
         }
         stdin.write_all(&input).await.map_err(|_| ())?;
         stdin.flush().await.map_err(|_| ())?;
         drop(input);
         let mut last = None;
+        let mut power_check = tokio::time::interval_at(
+            tokio::time::Instant::now() + POWER_CHECK_INTERVAL,
+            POWER_CHECK_INTERVAL,
+        );
+        power_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let line = read_line(&mut reader).await?;
+            let line = if last.is_none() {
+                // 同じ読み取りを保持し、電源確認のたびに途中の通知を捨てない。
+                let pending = read_line(&mut reader);
+                tokio::pin!(pending);
+                loop {
+                    tokio::select! {
+                        biased;
+                        line = &mut pending => break line?,
+                        _ = power_check.tick() => {
+                            if !can_wait() {
+                                return Ok(Status::Paused);
+                            }
+                        }
+                    }
+                }
+            } else {
+                read_line(&mut reader).await?
+            };
             if line.is_empty() {
                 return match last {
                     Some(Status::Working) | None => Err(()),
@@ -171,6 +194,7 @@ mod tests {
         script: &str,
         stop: oneshot::Receiver<()>,
         update: impl FnMut(Status),
+        can_wait: impl FnMut() -> bool,
     ) -> Result<Status, ()> {
         let mut command = Command::new("/bin/sh");
         command
@@ -185,7 +209,7 @@ mod tests {
             update,
             Duration::from_secs(2),
             Duration::from_millis(200),
-            || true,
+            can_wait,
         )
         .await
     }
@@ -203,7 +227,7 @@ mod tests {
             ("read config; printf '%080d' 0", Err(())),
         ] {
             let (_tx, rx) = oneshot::channel();
-            assert_eq!(mock(&format!("{ready}{script}"), rx, |_| {}).await, expected);
+            assert_eq!(mock(&format!("{ready}{script}"), rx, |_| {}, || true).await, expected);
         }
     }
 
@@ -248,6 +272,35 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn power_loss_stops_waiting_but_does_not_stop_working() {
+        let ready = "printf '%s\\n' '{\"status\":\"ready\"}'; read config; ";
+        let (_tx, rx) = oneshot::channel();
+        let mut checks = 0;
+        assert_eq!(
+            mock(
+                &format!("{ready}if read extra; then exit 1; fi"),
+                rx,
+                |_| {},
+                || {
+                    checks += 1;
+                    checks == 1
+                }
+            )
+            .await,
+            Ok(Status::Paused)
+        );
+
+        let (_tx, rx) = oneshot::channel();
+        let powered = std::cell::Cell::new(true);
+        let script = format!("{ready}printf '%s\\n' '{{\"status\":\"working\"}}'; sleep 1; printf '%s\\n' '{{\"status\":\"completed\"}}'");
+        assert_eq!(
+            mock(&script, rx, |_| powered.set(false), || powered.get()).await,
+            Ok(Status::Completed)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn stop_closes_input_and_unresponsive_child_is_reaped() {
         let working = "printf '%s\\n' '{\"status\":\"ready\"}'; read config; printf '%s\\n' '{\"status\":\"working\"}'; ";
         for (after_work, expected) in [
@@ -256,10 +309,15 @@ mod tests {
         ] {
             let (tx, rx) = oneshot::channel();
             let mut tx = Some(tx);
-            let result = mock(&format!("{working}{after_work}"), rx, |status| {
-                assert_eq!(status, Status::Working);
-                tx.take().unwrap().send(()).unwrap();
-            })
+            let result = mock(
+                &format!("{working}{after_work}"),
+                rx,
+                |status| {
+                    assert_eq!(status, Status::Working);
+                    tx.take().unwrap().send(()).unwrap();
+                },
+                || true,
+            )
             .await;
             assert_eq!(result, expected);
         }
