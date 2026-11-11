@@ -736,6 +736,22 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("翻訳アプリを起動できませんでした");
     app.run(|_app, _event| {
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = &_event {
+            let (first, finished) = _app
+                .state::<worker_supervisor::Lifecycle>()
+                .begin_shutdown();
+            if finished.is_some() && *code != Some(tauri::RESTART_EXIT_CODE) {
+                api.prevent_exit();
+                if first {
+                    let app = _app.clone();
+                    let code = code.unwrap_or(0);
+                    tauri::async_runtime::spawn(async move {
+                        worker_supervisor::Lifecycle::wait_for_exit(finished).await;
+                        app.exit(code);
+                    });
+                }
+            }
+        }
         if let tauri::RunEvent::Exit = _event {
             _app.state::<local::Local>().stop();
         }

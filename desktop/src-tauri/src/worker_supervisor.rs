@@ -47,7 +47,13 @@ pub(crate) fn can_accept(
 #[derive(Default)]
 pub(crate) struct Lifecycle {
     changes: AsyncMutex<()>,
-    current: Mutex<Option<Running>>,
+    state: Mutex<LifecycleState>,
+}
+
+#[derive(Default)]
+struct LifecycleState {
+    current: Option<Running>,
+    shutting_down: bool,
 }
 
 struct Running {
@@ -62,20 +68,23 @@ pub(crate) struct RunLease<'a> {
 
 impl Drop for RunLease<'_> {
     fn drop(&mut self) {
-        self.lifecycle.current.lock().unwrap().take();
+        self.lifecycle.state.lock().unwrap().current.take();
     }
 }
 
 impl Lifecycle {
     pub(crate) async fn begin(&self) -> Result<(RunLease<'_>, oneshot::Receiver<()>), String> {
         let _change = self.changes.lock().await;
-        let mut current = self.current.lock().unwrap();
-        if current.is_some() {
+        let mut state = self.state.lock().unwrap();
+        if state.shutting_down {
+            return Err("アプリを終了しています".into());
+        }
+        if state.current.is_some() {
             return Err("翻訳ワーカーはすでに動いています".into());
         }
         let (stop, requested) = oneshot::channel();
         let (done, finished) = watch::channel(());
-        *current = Some(Running {
+        state.current = Some(Running {
             stop: Some(stop),
             finished,
         });
@@ -91,19 +100,31 @@ impl Lifecycle {
     // 停止待ちと設定変更を同じガードで守り、途中に次の子が起動しないようにする。
     pub(crate) async fn stop_for_engine_change(&self) -> MutexGuard<'_, ()> {
         let change = self.changes.lock().await;
-        let finished = {
-            let mut current = self.current.lock().unwrap();
-            current.as_mut().map(|run| {
-                if let Some(stop) = run.stop.take() {
-                    let _ = stop.send(());
-                }
-                run.finished.clone()
-            })
-        };
+        let finished = Self::request_stop(&mut self.state.lock().unwrap());
+        Self::wait_for_exit(finished).await;
+        change
+    }
+
+    fn request_stop(state: &mut LifecycleState) -> Option<watch::Receiver<()>> {
+        state.current.as_mut().map(|run| {
+            if let Some(stop) = run.stop.take() {
+                let _ = stop.send(());
+            }
+            run.finished.clone()
+        })
+    }
+
+    // 終了イベントから同期的に呼び、新しい子の登録と終了開始の競合を防ぐ。
+    pub(crate) fn begin_shutdown(&self) -> (bool, Option<watch::Receiver<()>>) {
+        let mut state = self.state.lock().unwrap();
+        let first = !std::mem::replace(&mut state.shutting_down, true);
+        (first, Self::request_stop(&mut state))
+    }
+
+    pub(crate) async fn wait_for_exit(finished: Option<watch::Receiver<()>>) {
         if let Some(mut finished) = finished {
             let _ = finished.changed().await;
         }
-        change
     }
 }
 
@@ -320,6 +341,27 @@ mod tests {
         assert!(lifecycle.changes.try_lock().is_err());
         drop(change);
         assert!(lifecycle.begin().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_the_current_run_and_rejects_new_runs() {
+        let lifecycle = Lifecycle::default();
+        let (run, stop) = lifecycle.begin().await.unwrap();
+        let (first, finished) = lifecycle.begin_shutdown();
+        assert!(first);
+        stop.await.unwrap();
+        let waiting = Lifecycle::wait_for_exit(finished);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        assert!(!lifecycle.begin_shutdown().0);
+        drop(run);
+        waiting.await;
+        assert!(lifecycle.begin().await.is_err());
+        assert!(lifecycle.begin_shutdown().1.is_none());
     }
 
     #[test]
