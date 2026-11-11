@@ -31,6 +31,7 @@ struct Model {
     configs: usize,
     anonymous_issues: usize,
     anonymous_translations: usize,
+    reject_anonymous_translation: bool,
     anonymous_token: Option<Secret>,
     force_401: bool,
     always_401: bool,
@@ -76,6 +77,7 @@ impl Fixture {
             configs: 0,
             anonymous_issues: 0,
             anonymous_translations: 0,
+            reject_anonymous_translation: false,
             anonymous_token: None,
             force_401: false,
             always_401: false,
@@ -225,7 +227,31 @@ impl Fixture {
                             (200, "application/json", reply, String::new())
                         } else if path == "/api/translate" {
                             model.anonymous_translations += 1;
-                            (401, "application/json", "{}".into(), String::new())
+                            let authorized = model.anonymous_token.as_ref().is_some_and(|token| {
+                                headers.get("authorization").is_some_and(|value| {
+                                    value == &format!("Bearer {}", token.as_str())
+                                }) && token
+                                    .split('.')
+                                    .nth(1)
+                                    .and_then(|value| value.parse::<u64>().ok())
+                                    .is_some_and(|expiry| {
+                                        expiry
+                                            > SystemTime::now()
+                                                .duration_since(UNIX_EPOCH)
+                                                .unwrap()
+                                                .as_secs()
+                                    })
+                            });
+                            (
+                                if authorized && !model.reject_anonymous_translation {
+                                    200
+                                } else {
+                                    401
+                                },
+                                "application/json",
+                                "{}".into(),
+                                String::new(),
+                            )
                         } else if path == "/api/config"
                             && headers
                                 .get("authorization")
@@ -569,6 +595,7 @@ async fn anonymous_credentials_restore_renew_and_clear_without_replaying_transla
         .unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(fixture.state.lock().unwrap().anonymous_issues, 2);
+    fixture.state.lock().unwrap().reject_anonymous_translation = true;
     let error = restored
         .send(
             Method::POST,
@@ -589,4 +616,60 @@ async fn anonymous_credentials_restore_renew_and_clear_without_replaying_transla
     assert!(vault.load().unwrap().is_none());
     assert!(!restored.is_authenticated());
     assert_eq!(fixture.state.lock().unwrap().revokes, 0);
+}
+
+#[tokio::test]
+async fn anonymous_start_restores_saved_account_without_issuing_a_credential() {
+    let fixture = Fixture::new().await;
+    fixture.login(&fixture.auth()).await;
+    let mut auth = fixture.auth();
+    auth.anonymous_vault = Some(Arc::new(MemoryVault::default()));
+    assert!(!auth.is_authenticated());
+    assert_eq!(
+        auth.login_anonymous().await.unwrap_err(),
+        "現在の利用を終了してから匿名で始めてください"
+    );
+    assert!(auth.is_authenticated());
+    assert!(!auth.is_anonymous());
+    let model = fixture.state.lock().unwrap();
+    assert_eq!(model.refreshes, 1);
+    assert_eq!(model.anonymous_issues, 0);
+}
+
+#[tokio::test]
+async fn restore_clears_invalid_anonymous_credential_and_restores_account() {
+    let fixture = Fixture::new().await;
+    fixture.login(&fixture.auth()).await;
+    let mut auth = fixture.auth();
+    let vault = Arc::new(MemoryVault::default());
+    vault.save("invalid").unwrap();
+    auth.anonymous_vault = Some(vault.clone());
+    auth.restore().await.unwrap();
+    assert!(vault.load().unwrap().is_none());
+    assert!(auth.is_authenticated());
+    assert!(!auth.is_anonymous());
+}
+
+#[tokio::test]
+async fn expired_anonymous_credential_is_renewed_before_first_translation() {
+    let fixture = Fixture::new().await;
+    let mut auth = fixture.auth();
+    let vault = Arc::new(MemoryVault::default());
+    let expired = format!("pta_{}.1.{}", "0".repeat(32), "a".repeat(64));
+    vault.save(&expired).unwrap();
+    fixture.state.lock().unwrap().anonymous_token = Some(Zeroizing::new(expired));
+    auth.anonymous_vault = Some(vault);
+    auth.restore().await.unwrap();
+    let response = auth
+        .send(
+            Method::POST,
+            "/api/translate",
+            Some(&json!({"text":"Sample"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let model = fixture.state.lock().unwrap();
+    assert_eq!(model.anonymous_issues, 1);
+    assert_eq!(model.anonymous_translations, 1);
 }

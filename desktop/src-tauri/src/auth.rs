@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -418,9 +418,13 @@ impl Auth {
             .ok_or("設定で接続先を指定してください")?;
         let _busy = self.begin_connection_change()?;
         let epoch = *self.cancellation.borrow();
+        let _ = self.restore().await;
         let mut credentials = self.credentials.lock().await;
         if self.is_authenticated() {
             return Err("現在の利用を終了してから匿名で始めてください".into());
+        }
+        if *self.cancellation.borrow() != epoch {
+            return Err(LOGIN_REQUIRED.into());
         }
         let token = self.issue_anonymous().await?;
         let response = self
@@ -449,19 +453,48 @@ impl Auth {
         Ok(())
     }
 
+    async fn renew_anonymous(&self, credentials: &mut Credentials) -> Result<(), String> {
+        let epoch = *self.cancellation.borrow();
+        let fresh = self.issue_anonymous().await;
+        if *self.cancellation.borrow() != epoch || !self.is_anonymous() {
+            return Err(LOGIN_REQUIRED.into());
+        }
+        let fresh = fresh?;
+        self.anonymous_vault
+            .as_ref()
+            .ok_or(LOGIN_REQUIRED)?
+            .save(fresh.as_str())?;
+        credentials.anonymous = Some(fresh);
+        Ok(())
+    }
+
     async fn send_anonymous(
         &self,
         method: Method,
         path: &str,
         body: Option<&Value>,
     ) -> Result<Response, String> {
-        let token = self
-            .credentials
-            .lock()
-            .await
-            .anonymous
-            .clone()
-            .ok_or(LOGIN_REQUIRED)?;
+        let token = {
+            let mut credentials = self.credentials.lock().await;
+            let token = credentials
+                .anonymous
+                .as_ref()
+                .filter(|_| self.is_anonymous())
+                .ok_or(LOGIN_REQUIRED)?;
+            let expires = token
+                .split('.')
+                .nth(1)
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or(LOGIN_REQUIRED)?;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| "端末の時刻を確認できませんでした")?
+                .as_secs();
+            if expires.saturating_sub(now) < 60 {
+                self.renew_anonymous(&mut credentials).await?;
+            }
+            credentials.anonymous.clone().ok_or(LOGIN_REQUIRED)?
+        };
         let send = |token: &Secret| {
             let mut request = self
                 .client
@@ -485,16 +518,7 @@ impl Auth {
             .filter(|_| self.is_anonymous())
             .ok_or(LOGIN_REQUIRED)?;
         if current.as_str() == token.as_str() {
-            let epoch = *self.cancellation.borrow();
-            let fresh = self.issue_anonymous().await?;
-            if *self.cancellation.borrow() != epoch || !self.is_anonymous() {
-                return Err(LOGIN_REQUIRED.into());
-            }
-            self.anonymous_vault
-                .as_ref()
-                .ok_or(LOGIN_REQUIRED)?
-                .save(fresh.as_str())?;
-            credentials.anonymous = Some(fresh);
+            self.renew_anonymous(&mut credentials).await?;
         }
         let fresh = credentials.anonymous.clone().ok_or(LOGIN_REQUIRED)?;
         drop(credentials);
@@ -515,13 +539,13 @@ impl Auth {
         credentials.initialized = true;
         if let Some(vault) = &self.anonymous_vault {
             if let Some(token) = vault.load()? {
-                if !valid_anonymous(token.as_str()) {
-                    return Err("保存されている匿名の資格が不正です".into());
+                if valid_anonymous(token.as_str()) {
+                    credentials.anonymous = Some(token);
+                    self.anonymous.store(true, Ordering::SeqCst);
+                    self.authenticated.store(true, Ordering::SeqCst);
+                    return Ok(());
                 }
-                credentials.anonymous = Some(token);
-                self.anonymous.store(true, Ordering::SeqCst);
-                self.authenticated.store(true, Ordering::SeqCst);
-                return Ok(());
+                vault.clear()?;
             }
         }
         if self.mock || !self.is_configured() || self.vault.load()?.is_none() {
