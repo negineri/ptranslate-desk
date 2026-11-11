@@ -1,6 +1,6 @@
 //! 1件だけ動くエージェントの親側。権限制限を整えるまで画面からは起動しない。
 #![allow(dead_code)]
-use crate::worker_agent::{Bootstrap, READY_LINE};
+use crate::worker_agent::{Bootstrap, ASSIGNED_LINE, READY_LINE, START_COMMAND};
 use serde::Deserialize;
 use std::{process::Stdio, time::Duration};
 use tokio::{
@@ -114,13 +114,14 @@ async fn supervise(
         stdin.flush().await.map_err(|_| ())?;
         drop(input);
         let mut last = None;
+        let mut granted = false;
         let mut power_check = tokio::time::interval_at(
             tokio::time::Instant::now() + POWER_CHECK_INTERVAL,
             POWER_CHECK_INTERVAL,
         );
         power_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let line = if last.is_none() {
+            let line = if !granted && last.is_none() {
                 // 同じ読み取りを保持し、電源確認のたびに途中の通知を捨てない。
                 let pending = read_line(&mut reader);
                 tokio::pin!(pending);
@@ -144,9 +145,21 @@ async fn supervise(
                     Some(status) => Ok(status),
                 };
             }
+            if line == ASSIGNED_LINE {
+                if granted || last.is_some() {
+                    return Err(());
+                }
+                if !can_wait() {
+                    return Ok(Status::Paused);
+                }
+                stdin.write_all(START_COMMAND).await.map_err(|_| ())?;
+                stdin.flush().await.map_err(|_| ())?;
+                granted = true;
+                continue;
+            }
             let event: Update = serde_json::from_slice(&line).map_err(|_| ())?;
             match (last, event.status) {
-                (None, Status::Working) => update(Status::Working),
+                (None, Status::Working) if granted => update(Status::Working),
                 (None, Status::Waiting | Status::Paused | Status::Error)
                 | (Some(Status::Working), Status::Completed | Status::Paused | Status::Error) => {}
                 _ => return Err(()),
@@ -219,9 +232,9 @@ mod tests {
     async fn accepts_only_bounded_status_and_successful_exit() {
         let ready = "printf '%s\\n' '{\"status\":\"ready\"}'; ";
         for (script, expected) in [
-            ("read config; printf '%s\\n' '{\"status\":\"working\"}' '{\"status\":\"completed\"}'", Ok(Status::Completed)),
+            ("read config; printf '%s\\n' '{\"status\":\"assigned\"}'; read permission; test \"$permission\" = go || exit 1; printf '%s\\n' '{\"status\":\"working\"}' '{\"status\":\"completed\"}'", Ok(Status::Completed)),
             ("read config; printf '%s\\n' '{\"status\":\"waiting\"}'", Ok(Status::Waiting)),
-            ("read config; printf '%s\\n' '{\"status\":\"working\"}'", Err(())),
+            ("read config; printf '%s\\n' '{\"status\":\"assigned\"}'; read permission; test \"$permission\" = go || exit 1; printf '%s\\n' '{\"status\":\"working\"}'", Err(())),
             ("read config; printf '%s\\n' '{\"status\":\"waiting\",\"text\":\"x\"}'", Err(())),
             ("read config; printf '%s\\n' '{\"status\":\"waiting\"}'; exit 1", Err(())),
             ("read config; printf '%080d' 0", Err(())),
@@ -292,7 +305,7 @@ mod tests {
 
         let (_tx, rx) = oneshot::channel();
         let powered = std::cell::Cell::new(true);
-        let script = format!("{ready}printf '%s\\n' '{{\"status\":\"working\"}}'; sleep 1; printf '%s\\n' '{{\"status\":\"completed\"}}'");
+        let script = format!("{ready}printf '%s\\n' '{{\"status\":\"assigned\"}}'; read permission; test \"$permission\" = go || exit 1; printf '%s\\n' '{{\"status\":\"working\"}}'; sleep 1; printf '%s\\n' '{{\"status\":\"completed\"}}'");
         assert_eq!(
             mock(&script, rx, |_| powered.set(false), || powered.get()).await,
             Ok(Status::Completed)
@@ -301,8 +314,30 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn assignment_is_not_started_when_the_final_power_check_fails() {
+        let (_tx, rx) = oneshot::channel();
+        let script = "printf '%s\\n' '{\"status\":\"ready\"}'; read config; printf '%s\\n' '{\"status\":\"assigned\"}'; if read permission; then exit 1; fi";
+        let mut checks = 0;
+        assert_eq!(
+            mock(
+                script,
+                rx,
+                |_| panic!("unexpected working status"),
+                || {
+                    checks += 1;
+                    checks == 1
+                }
+            )
+            .await,
+            Ok(Status::Paused)
+        );
+        assert_eq!(checks, 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn stop_closes_input_and_unresponsive_child_is_reaped() {
-        let working = "printf '%s\\n' '{\"status\":\"ready\"}'; read config; printf '%s\\n' '{\"status\":\"working\"}'; ";
+        let working = "printf '%s\\n' '{\"status\":\"ready\"}'; read config; printf '%s\\n' '{\"status\":\"assigned\"}'; read permission; test \"$permission\" = go || exit 1; printf '%s\\n' '{\"status\":\"working\"}'; ";
         for (after_work, expected) in [
             ("if read extra; then exit 1; fi", Ok(Status::Paused)),
             ("while :; do :; done", Err(())),

@@ -293,6 +293,7 @@ impl Agent {
     async fn run(
         &self,
         mut parent_closed: tokio::sync::oneshot::Receiver<()>,
+        permission: impl std::future::Future<Output = Result<()>>,
     ) -> Result<&'static str> {
         let poll = json!({
             "agent_version":self.config.agent_version,
@@ -315,13 +316,16 @@ impl Agent {
         let seq = AtomicU64::new(0);
         let result = match assignment_prompt(&assignment) {
             Ok((prompt, limit)) => {
-                status("working");
                 tokio::select! {
                     _ = &mut parent_closed => Err(()),
                     stop = self.stop_requested(&assignment.assignment_id) => stop.map(|_| false),
                     result = timeout(
                         Duration::from_secs(assignment.deadline_seconds),
-                        self.translate(&assignment, &seq, prompt, limit),
+                        async {
+                            permission.await?;
+                            status("working");
+                            self.translate(&assignment, &seq, prompt, limit).await
+                        },
                     ) => result.map_err(|_| ()).and_then(|value| value),
                 }
             }
@@ -349,6 +353,9 @@ fn status(value: &'static str) {
 
 pub(crate) const READY_LINE: &[u8] = b"{\"status\":\"ready\"}\n";
 
+pub(crate) const ASSIGNED_LINE: &[u8] = b"{\"status\":\"assigned\"}\n";
+pub(crate) const START_COMMAND: &[u8] = b"go\n";
+
 fn apply_restrictions() -> Result<()> {
     // OS別の権限制限を適用できるまで、資格を受け取る経路を閉じる。
     Err(())
@@ -373,12 +380,25 @@ fn run_from_parent() -> Result<&'static str> {
     let agent = Agent::new(serde_json::from_slice(&input).map_err(|_| ())?)?;
     drop(input);
     let (tx, rx) = tokio::sync::oneshot::channel();
+    let (allow, permission) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        let _ = io::stdin().read(&mut [0]);
+        let mut stdin = io::stdin().lock();
+        let mut command = [0; START_COMMAND.len()];
+        if stdin.read_exact(&mut command).is_ok() && command == START_COMMAND {
+            let _ = allow.send(());
+            let _ = stdin.read(&mut [0]);
+        }
         let _ = tx.send(());
     });
     let rt = tokio::runtime::Runtime::new().map_err(|_| ())?;
-    rt.block_on(agent.run(rx))
+    rt.block_on(agent.run(rx, async {
+        {
+            let mut output = io::stdout().lock();
+            output.write_all(ASSIGNED_LINE).map_err(|_| ())?;
+            output.flush().map_err(|_| ())?;
+        }
+        permission.await.map_err(|_| ())
+    }))
 }
 
 pub(crate) fn entry() {
@@ -468,7 +488,7 @@ mod tests {
             .unwrap();
     }
 
-    async fn mock_assignment(stop: bool) {
+    async fn mock_assignment(stop: bool, allowed: bool) {
         let broker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let engine = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut agent = Agent::new(Bootstrap {
@@ -502,6 +522,11 @@ mod tests {
             let (socket, route, body) = mock_request(&broker).await;
             assert_eq!(route, "/api/worker/result");
             assert_eq!(body["seq"], 0);
+            if !allowed {
+                assert_eq!(body["error"], "engine");
+                mock_response(socket, r#"{"stop":false}"#).await;
+                return;
+            }
             assert_eq!(body["text"], "こんにちは");
             assert_eq!(body["done"], false);
             mock_response(socket, &json!({"stop":stop}).to_string()).await;
@@ -515,6 +540,12 @@ mod tests {
             }
         };
         let engine_work = async {
+            if !allowed {
+                assert!(timeout(Duration::from_millis(100), engine.accept())
+                    .await
+                    .is_err());
+                return;
+            }
             let (socket, route, body) = mock_request(&engine).await;
             assert_eq!(route, "/v1/completions");
             assert_eq!(body["temperature"], 0);
@@ -529,21 +560,37 @@ mod tests {
             mock_response(socket, &wire).await;
         };
         let (result, _, _) = timeout(Duration::from_secs(5), async {
-            tokio::join!(agent.run(receiver), broker_work, engine_work)
+            tokio::join!(
+                agent.run(
+                    receiver,
+                    std::future::ready(allowed.then_some(()).ok_or(()))
+                ),
+                broker_work,
+                engine_work
+            )
         })
         .await
         .unwrap();
-        assert_eq!(result.unwrap(), if stop { "paused" } else { "completed" });
+        if allowed {
+            assert_eq!(result.unwrap(), if stop { "paused" } else { "completed" });
+        } else {
+            assert!(result.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn denied_assignment_is_returned_without_starting_the_engine() {
+        mock_assignment(false, false).await;
     }
 
     #[tokio::test]
     async fn worker_relays_one_assignment_to_a_local_engine() {
-        mock_assignment(false).await;
+        mock_assignment(false, true).await;
     }
 
     #[tokio::test]
     async fn worker_stops_when_broker_refuses_further_results() {
-        mock_assignment(true).await;
+        mock_assignment(true, true).await;
     }
 
     #[test]
