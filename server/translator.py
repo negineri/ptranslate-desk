@@ -752,7 +752,8 @@ class TranslationHTTPServer(ThreadingHTTPServer):
         self.open_requests = threading.BoundedSemaphore(MAX_OPEN_REQUESTS)
         self.issue_global = WindowCounter(60)
         self.issue_network = WindowCounter(3600)
-        self.character_limits = WindowCounter(3600)
+        self.character_limits_registered = WindowCounter(3600)
+        self.character_limits_anonymous = WindowCounter(3600)
         # HTTPServer.server_bind の getfqdn による逆引きは不要。
         # macOS のランナーでは名前解決待ちで起動が遅れることがある。
         socketserver.TCPServer.server_bind(self)
@@ -772,7 +773,7 @@ class Handler(BaseHTTPRequestHandler):
         self.tier = "registered"
         scheme, _, token = self.headers.get("Authorization", "").partition(" ")
         token = token.strip()
-        if not user and scheme.lower() == "bearer" and token.startswith(("pta_", "ptw_")):
+        if not user and scheme.lower() == "bearer" and token.startswith("pta_"):
             self.tier = "anonymous"
             return verify_anonymous(token)
         if not user and not self.headers.get("Authorization") and self.headers.get("Cookie"):
@@ -793,8 +794,17 @@ class Handler(BaseHTTPRequestHandler):
         return user
 
     def check_origin(self):
-        if not PUBLIC_SERVER_URL or self.headers.get("Origin") != PUBLIC_SERVER_URL:
-            raise HttpError(403, "送信元を確認できません")
+        origin = self.headers.get("Origin")
+        if PUBLIC_SERVER_URL and (
+            origin == PUBLIC_SERVER_URL
+            or (
+                origin is None
+                and self.headers.get("Sec-Fetch-Site") == "same-origin"
+                and self.command in ("GET", "HEAD")
+            )
+        ):
+            return
+        raise HttpError(403, "送信元を確認できません")
 
     def client_network(self):
         if not CLIENT_IP_HEADER:
@@ -817,9 +827,10 @@ class Handler(BaseHTTPRequestHandler):
         self.server.get_pool()  # 鍵と設定の検証を発行前に行う。
         if self.read_json_body() != {}:
             raise HttpError(400, "本文は空のJSONオブジェクトにしてください")
-        web = self.headers.get("Origin") is not None
-        if web:
-            self.check_origin()
+        origin = self.headers.get("Origin")
+        web = bool(PUBLIC_SERVER_URL) and origin == PUBLIC_SERVER_URL
+        if not web and origin is not None and not origin.startswith("chrome-extension://"):
+            raise HttpError(403, "送信元を確認できません")
         network = self.client_network()
         try:
             self.server.issue_global.charge("global", 1, ANON_ISSUE_PER_MINUTE)
@@ -924,8 +935,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(e.status, {"error": e.message, **({"code": e.code} if e.code else {})})
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
-        except Exception:
-            log.error("request %s failed", method)
+        except Exception as error:
+            # 未知のパスやクエリーには資格や入力が含まれ得る。
+            log_path = (
+                path
+                if path
+                in (
+                    "/",
+                    "/index.html",
+                    "/translation.mjs",
+                    "/logo.png",
+                    "/favicon.ico",
+                    "/api/anonymous",
+                    "/api/config",
+                    "/api/translate",
+                )
+                else "<unknown>"
+            )
+            log.error("request %s %s failed: %s", method, log_path, type(error).__name__)
             try:
                 self.send_json(500, {"error": "サーバーの内部エラーです"})
             except Exception:
@@ -987,9 +1014,12 @@ class Handler(BaseHTTPRequestHandler):
             if job is None:
                 raise HttpError(503, "翻訳の待ち行列が一杯です", "busy")
             try:
-                self.server.character_limits.charge(
-                    (tier, user), len(req["text"]), 100000 if tier == "anonymous" else 600000
+                counter = (
+                    self.server.character_limits_anonymous
+                    if tier == "anonymous"
+                    else self.server.character_limits_registered
                 )
+                counter.charge(user, len(req["text"]), 100000 if tier == "anonymous" else 600000)
             except HttpError:
                 with pool.condition:
                     pool._remove(job)

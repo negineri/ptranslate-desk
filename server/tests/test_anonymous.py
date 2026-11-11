@@ -137,6 +137,22 @@ class AnonymousTest(unittest.TestCase):
         for headers in (cookie_header, {**cookie_header, "Origin": "https://evil.example.com"}):
             response, _ = self.call("GET", "/api/config", headers=headers)
             self.assertEqual(response.status, 403)
+        for site in ("cross-site", "same-site"):
+            response, _ = self.call(
+                "GET", "/api/config", headers={**cookie_header, "Sec-Fetch-Site": site}
+            )
+            self.assertEqual(response.status, 403)
+        response, _ = self.call(
+            "GET", "/api/config", headers={**cookie_header, "Sec-Fetch-Site": "same-origin"}
+        )
+        self.assertEqual(response.status, 200)
+        response, _ = self.call(
+            "POST",
+            "/api/translate",
+            {"text": "test", "target_lang": "ja"},
+            {**cookie_header, "Sec-Fetch-Site": "same-origin"},
+        )
+        self.assertEqual(response.status, 403)
         response, _ = self.call("GET", "/api/config", headers={**cookie_header, **origin})
         self.assertEqual(response.status, 200)
         response, _ = self.call(
@@ -147,6 +163,69 @@ class AnonymousTest(unittest.TestCase):
             "POST", "/api/anonymous", {}, {"Content-Type": "application/json-fake"}
         )
         self.assertEqual(response.status, 415)
+
+    def test_extension_issuance_and_no_cors(self):
+        response, data = self.call(
+            "POST", "/api/anonymous", {}, {"Origin": "chrome-extension://test-id"}
+        )
+        self.assertEqual(response.status, 200)
+        self.assertIn("credential", json.loads(data))
+        self.assertIsNone(response.getheader("Set-Cookie"))
+        self.assertIsNone(response.getheader("Access-Control-Allow-Origin"))
+        response, _ = self.call(
+            "OPTIONS",
+            "/api/anonymous",
+            headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        self.assertEqual(response.status, 501)
+        self.assertFalse(
+            any(name.lower().startswith("access-control-") for name, _ in response.getheaders())
+        )
+
+    def test_anonymous_capacity_does_not_block_registered(self):
+        self.app.character_limits_anonymous = tr.WindowCounter(3600, capacity=1)
+        self.app.character_limits_anonymous.charge("filled", 1, 100000)
+        token = self.issue()
+        response, _ = self.call(
+            "POST",
+            "/api/translate",
+            {"text": "test", "target_lang": "ja"},
+            {"Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(response.status, 503)
+        self.assertFalse(self.app.get_pool().waiting)
+        response, data = self.call(
+            "POST",
+            "/api/translate",
+            {"text": "test", "target_lang": "ja"},
+            {"X-Forwarded-User": "new-user"},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertIn(b'"done": true', data)
+        self.assertIn("new-user", self.app.character_limits_registered.entries)
+
+    def test_internal_error_logs_type_and_safe_path_only(self):
+        with (
+            patch.object(
+                tr.Handler, "user", side_effect=ValueError("private-source private-token 192.0.2.1")
+            ),
+            self.assertLogs(tr.log, "ERROR") as logs,
+        ):
+            response, _ = self.call("GET", "/api/config?private-query")
+            self.assertEqual(response.status, 500)
+            response, _ = self.call("GET", "/api/private-token")
+            self.assertEqual(response.status, 500)
+        self.assertEqual(
+            logs.output,
+            [
+                "ERROR:translator:request GET /api/config failed: ValueError",
+                "ERROR:translator:request GET <unknown> failed: ValueError",
+            ],
+        )
 
     def test_issuance_ip_global_and_region(self):
         for suffix in range(1, 6):
@@ -172,7 +251,7 @@ class AnonymousTest(unittest.TestCase):
         token = self.issue()
         user = tr.verify_anonymous(token)
         headers = {"Authorization": f"Bearer {token}"}
-        self.app.character_limits.charge(("anonymous", user), 100000, 100000)
+        self.app.character_limits_anonymous.charge(user, 100000, 100000)
         response, _ = self.call(
             "POST", "/api/translate", {"text": "test", "target_lang": "ja"}, headers
         )
