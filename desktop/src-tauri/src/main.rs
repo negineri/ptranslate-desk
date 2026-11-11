@@ -13,9 +13,11 @@ mod resident;
 mod settings;
 #[cfg(feature = "smoke-test")]
 mod smoke;
+mod translation;
 mod updates;
 #[cfg(target_os = "windows")]
 mod windows;
+mod worker_agent;
 
 #[cfg(feature = "smoke-test")]
 #[tauri::command]
@@ -340,6 +342,10 @@ fn start_request(
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--worker-agent")) {
+        worker_agent::entry();
+        return;
+    }
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     if chrome_bridge::host_entry() {
         return;
