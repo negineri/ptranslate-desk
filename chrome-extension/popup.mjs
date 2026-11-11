@@ -1,5 +1,5 @@
 import { sessionFetch } from "./transport.mjs";
-import { loadSettings, requestSettings } from "./settings.mjs";
+import { loadSettings, requestSettings, volunteerFields } from "./settings.mjs";
 import { doneMessage, errorMessage, loadConfig, remedy, translateInto } from "./translate.mjs";
 
 const $ = (id) => document.getElementById(id);
@@ -44,11 +44,12 @@ async function takeText() {
   const key = `selection:${id}`;
   const stored = await chrome.storage.session.get(key);
   await chrome.storage.session.remove(key);
-  return typeof stored[key] === "string" ? stored[key] : "";
+  return stored[key];
 }
 
 async function main() {
-  const text = await takeText();
+  const selection = await takeText();
+  const text = typeof selection === "string" ? selection : selection?.text || "";
   if (!text.trim()) {
     setStatus({ text: "訳す文が見つかりませんでした。文を選んでからもう一度試してください", cls: "err" });
     return;
@@ -59,9 +60,13 @@ async function main() {
   setStatus({ text: "訳しています" });
   try {
     const config = await loadConfig({ signal: abort.signal, fetch });
-    const common = requestSettings(text, settings, config);
+    const blocked = selection?.incognito || chrome.extension?.inIncognitoContext
+      ? "シークレットウィンドウではボランティア枠を使えません"
+      : selection?.safe !== true ? "編集欄の外で選んだ文だけをボランティア枠へ送れます" : "";
+    const consent = await volunteerFields(settings, config, blocked);
+    const common = { ...requestSettings(text, settings, config), ...consent };
     const name = (code) => config.languages?.find((l) => l.code === code)?.name || code;
-    $("direction").textContent = `${common.source_lang ? name(common.source_lang) : "自動で判定"} → ${name(common.target_lang)}`;
+    $("direction").textContent = `${consent.consent ? "ボランティア枠 · " : ""}${common.source_lang ? name(common.source_lang) : "自動で判定"} → ${name(common.target_lang)}`;
     if (common.source_lang && common.source_lang === common.target_lang) throw new Error("原文と訳す先が同じ言語です");
     const { truncated } = await translateInto($("translation"), text, common, {
       signal: abort.signal, fetch,

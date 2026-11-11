@@ -434,3 +434,30 @@ test("一括翻訳で番号が重複した場合はすべて個別に訳し直�
   assert.deepEqual(messages.filter((m) => m.type === "block").map(({ text }) => text),
     labels.map((label) => `訳 ${label}`));
 });
+
+test("ボランティア枠には接続先の現行版に同意した通常ウィンドウからだけ送る", async (t) => {
+  const previous = globalThis.chrome;
+  t.after(() => { globalThis.chrome = previous; });
+  const blocks = [{ id: 1, text: "A paragraph" }];
+  for (const [stored, incognito, expected] of [
+    [{}, false, "consent_required"],
+    [{ [`volunteer-consent:${SERVER}`]: 1 }, false, "consent_required"],
+    [{ "volunteer-consent:https://other.example": 2 }, false, "consent_required"],
+    [{ [`volunteer-consent:${SERVER}`]: 2 }, true, "server"],
+    [{ [`volunteer-consent:${SERVER}`]: 2 }, false, null],
+  ]) {
+    globalThis.chrome = { storage: { local: { get: async () => stored } } };
+    const server = fakeServer({ config: () => Response.json({
+      ...CONFIG, pool: { kind: "volunteer", consent_version: 2 },
+    }) });
+    const messages = await runPage(blocks, server, { incognito }, [1]).finished;
+    if (expected) {
+      assert.equal(server.requests.length, 0);
+      assert.equal(messages.at(-1).code, expected);
+    } else {
+      assert.equal(server.requests[0].body.consent, 2);
+      assert.equal(messages[0].volunteer, true);
+      assert.equal(messages.at(-1).type, "done");
+    }
+  }
+});

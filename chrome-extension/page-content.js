@@ -261,6 +261,7 @@
   }
 
   function collect() {
+    if (document.designMode === "on") return [];
     const clipCache = new WeakMap();
     const groups = []; // 同じ親要素を持つ、連続する文字のノード
     function visit(root) {
@@ -281,7 +282,14 @@
           continue;
         }
         const el = textContainer(node);
-        if (!textVisible(el, clipCache)) {
+        let editable = false;
+        for (let parent = node.assignedSlot || el; parent; parent = composedParent(parent)) {
+          if (parent.isContentEditable || parent.hasAttribute("contenteditable") || SKIP_TAGS.has(parent.tagName)) {
+            editable = true;
+            break;
+          }
+        }
+        if (editable || !textVisible(el, clipCache)) {
           previous = null;
           continue;
         }
@@ -440,16 +448,19 @@
     port = mine;
     let total = 0;
     let done = 0;
+    let destination = "";
     const waiting = new Set();
-    const progress = () => activity(waiting.size
+    const progress = () => activity(destination + (waiting.size
       ? `順番待ち ${done} / ${total}`
-      : `翻訳中 ${done} / ${total}`, "", ["stop", ...(originals.size ? ["restore"] : [])]);
+      : `翻訳中 ${done} / ${total}`), "", ["stop", ...(originals.size ? ["restore"] : [])]);
     mine.onMessage.addListener((msg) => {
       if (port !== mine) return;
       if (msg.type === "start") {
         total = msg.total;
-        activity(total ? `翻訳中 0 / ${total}` : "対象なし", total ? "" : "ok",
-          total ? ["stop"] : []);
+        destination = msg.volunteer ? "ボランティア枠 · " : "";
+        if (msg.volunteer) clearActivity();
+        if (total) progress();
+        else activity("対象なし", "ok");
       } else if (msg.type === "waiting") {
         if (msg.waiting) waiting.add(msg.id);
         else waiting.delete(msg.id);

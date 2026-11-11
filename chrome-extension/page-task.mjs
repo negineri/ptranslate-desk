@@ -3,7 +3,7 @@
 import { MAX_IN_FLIGHT } from "./scheduler.mjs";
 import { splitText, translateChunk } from "./translation.mjs";
 import { apiFetch, pinConnection, RelayError } from "./relay.mjs";
-import { requestSettings } from "./settings.mjs";
+import { requestSettings, volunteerFields } from "./settings.mjs";
 import { ensureOk, LoginRequired } from "./translate.mjs";
 
 export const MAX_BLOCKS = 3000;
@@ -129,7 +129,9 @@ export function runPageTask(port, deps) {
     });
     // 訳す先の自動はページ全体の文で決める
     const sample = blocks.map((b) => b.text).join("\n");
-    const common = requestSettings(sample, settings, config);
+    const consent = await volunteerFields(settings, config,
+      deps.incognito ? "シークレットウィンドウではボランティア枠を使えません" : "");
+    const common = { ...requestSettings(sample, settings, config), ...consent };
     if (common.source_lang && common.source_lang === common.target_lang) {
       throw new RelayError("same-lang", "原文と訳す先が同じ言語です");
     }
@@ -137,7 +139,7 @@ export function runPageTask(port, deps) {
     const todo = candidates.slice(0, MAX_BLOCKS);
     const omitted = candidates.length - todo.length;
     const name = (code) => config.languages?.find((l) => l.code === code)?.name || code;
-    post({ type: "start", total: todo.length, target: common.target_lang, targetName: name(common.target_lang) });
+    post({ type: "start", total: todo.length, target: common.target_lang, targetName: name(common.target_lang), ...(consent.consent ? { volunteer: true } : {}) });
     let previous = null;
     let truncated = 0;
     let done = 0;
@@ -260,6 +262,7 @@ export function runPageTask(port, deps) {
 
 // 失敗を画面に出す言葉と、手当ての種類にする
 export function describe(e) {
+  if (e?.code === "consent_required") return { code: e.code, message: e.message, remedy: "options" };
   if (e instanceof LoginRequired) return { code: "login", message: e.message };
   if (e instanceof RelayError) {
     const remedy = e.code === "no-server" || e.code === "no-permission" ? "options" : undefined;

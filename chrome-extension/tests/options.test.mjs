@@ -119,3 +119,25 @@ test("未接続でも保存済みの自動設定やほかの言語を勝手に�
   const p = await setup(t, { stored: { target: "auto" } });
   assert.equal(p.$("target").value, "auto");
 });
+
+test("ボランティア枠への同意は明示操作まで保存せず、確認済みの接続先と版にひも付ける", async (t) => {
+  const server = "https://translate.example.com";
+  const key = `volunteer-consent:${server}`;
+  const p = await setup(t, { stored: { server, [key]: 1 }, fetch: async () => Response.json({
+    languages: [], pool: { kind: "volunteer", consent_version: 2 },
+  }) });
+  assert.equal(p.$("volunteer-consent").hidden, false);
+  assert.equal(p.local[key], 1);
+  p.$("server").value = "https://other.example.com";
+  p.$("server").dispatchEvent(new p.dom.window.Event("input"));
+  assert.equal(p.$("volunteer-consent").hidden, true);
+  p.$("volunteer-agree").click();
+  assert.equal(p.local[key], 1);
+  p.$("server").value = server;
+  p.$("save").click();
+  await wait(() => !p.$("volunteer-consent").hidden);
+  p.$("volunteer-agree").click();
+  await wait(() => p.$("volunteer-consent").hidden);
+  assert.equal(p.local[key], 2);
+  assert.equal(p.local["volunteer-consent:https://other.example.com"], undefined);
+});
