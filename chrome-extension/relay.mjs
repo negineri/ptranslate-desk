@@ -1,11 +1,14 @@
+import { anonymousKey, normalizeServerUrl } from "./settings.mjs";
 import { nativeFetch } from "./native.mjs";
 import { MAX_IN_FLIGHT, Scheduler } from "./scheduler.mjs";
 const scheduler = new Scheduler();
 const limits = new Map();
+const credentialOperations = new Map();
+const ANONYMOUS_TOKEN = /^pta_[0-9a-f]{32}\.([0-9]{1,12})\.[0-9a-f]{64}$/;
 
 // background で API を呼び、応答を拡張の画面へ port で流す。
 // 画面 (popup.html など) は Web ページの中の iframe でも動くので、Cookie を確実に付けられる
-// background からだけサーバーへつなぐ。デスクトップの start_request と同じく 2 つの API だけ通す
+// background からだけサーバーへつなぐ。匿名資格の発行と削除は設定画面からだけ受ける。
 export const ROUTES = Object.freeze({ "api/config": "GET", "api/translate": "POST" });
 export const READ_TIMEOUT_MS = 120_000;
 
@@ -56,7 +59,9 @@ export function relay(port, deps) {
   async function run({ route, body, connection } = {}) {
     // 接続先は信頼済みの拡張画面だけが渡す。権限は要求ごとに確かめる。
     const requestDeps = connection ? await pinConnection(deps, connection) : deps;
-    const res = await apiFetch(route, body, requestDeps, abort);
+    const res = route === "api/anonymous" || route === "anonymous/forget"
+      ? await anonymousAction(route, requestDeps, abort)
+      : await apiFetch(route, body, requestDeps, abort);
     post({ type: "head", status: res.status });
     if (!res.body) return post({ type: "end" });
     const reader = res.body.getReader();
@@ -81,15 +86,100 @@ export async function pinConnection(deps, settings = undefined) {
   return { ...deps, settings: async () => snapshot, server: async () => server };
 }
 
+// 同じ接続先で発行・更新・削除が重なっても、削除後に更新結果が残らないようにする。
+async function withCredential(key, operation) {
+  const pending = (credentialOperations.get(key) ?? Promise.resolve()).catch(() => {}).then(operation);
+  credentialOperations.set(key, pending);
+  try { return await pending; }
+  finally { if (credentialOperations.get(key) === pending) credentialOperations.delete(key); }
+}
+
+async function issueCredential(server, deps, abort) {
+  const response = await httpFetch("api/anonymous", "{}", { ...deps, timeoutMs: 15000 }, abort, server);
+  if (response.status !== 200 || !response.body) {
+    await response.body?.cancel();
+    const message = response.status === 404 ? "この接続先では匿名利用を使えません"
+      : response.status === 429 || response.status === 503 ? "資格を発行できません。しばらく待ってから試してください"
+        : "匿名の資格を発行できませんでした";
+    throw new RelayError("anonymous", message);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "", size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 4096) throw new Error();
+      text += decoder.decode(value, { stream: true });
+    }
+    const token = JSON.parse(text + decoder.decode()).credential;
+    if (typeof token === "string" && ANONYMOUS_TOKEN.test(token)) return token;
+  } catch {
+    abort.signal.throwIfAborted();
+  } finally { await reader.cancel().catch(() => {}); }
+  throw new RelayError("anonymous", "匿名の資格を受け取れませんでした");
+}
+
+async function anonymousAction(route, deps, abort) {
+  const settings = await deps.settings?.();
+  if (!deps.anonymousActions || !deps.anonymousStorage || settings?.mode === "local") {
+    throw new RelayError("route", "不明な API です");
+  }
+  const server = normalizeServerUrl(settings?.server ?? await deps.server());
+  const key = anonymousKey(server);
+  await withCredential(key, async () => {
+    abort.signal.throwIfAborted();
+    if (route === "anonymous/forget") {
+      await deps.anonymousStorage.remove(key);
+    } else {
+      const token = await issueCredential(server, deps, abort);
+      abort.signal.throwIfAborted();
+      await deps.anonymousStorage.set({ [key]: token });
+    }
+  });
+  return { status: 204, body: null };
+}
+
+async function authenticatedFetch(route, body, deps, abort, server) {
+  const storage = deps.anonymousStorage;
+  if (!storage || !server) return httpFetch(route, body, deps, abort, server);
+  const origin = normalizeServerUrl(server);
+  const key = anonymousKey(origin);
+  let token = (await storage.get(key))[key];
+  if (typeof token !== "string" || !ANONYMOUS_TOKEN.test(token)) {
+    return httpFetch(route, body, deps, abort, origin);
+  }
+  const renew = (previous) => withCredential(key, async () => {
+    abort.signal.throwIfAborted();
+    const current = (await storage.get(key))[key];
+    if (current !== previous) {
+      if (typeof current === "string" && ANONYMOUS_TOKEN.test(current)) return current;
+      throw new RelayError("anonymous", "匿名利用を終了しました");
+    }
+    const fresh = await issueCredential(origin, deps, abort);
+    abort.signal.throwIfAborted();
+    await storage.set({ [key]: fresh });
+    return fresh;
+  });
+  if (Number(ANONYMOUS_TOKEN.exec(token)[1]) * 1000 <= Date.now()) token = await renew(token);
+  const response = await httpFetch(route, body, deps, abort, origin, token);
+  if (response.status !== 401) return response;
+  await response.body?.cancel();
+  const fresh = await renew(token);
+  if (route === "api/config") return httpFetch(route, body, deps, abort, origin, fresh);
+  throw new RelayError("anonymous", "匿名の資格を更新しました。もう一度翻訳してください");
+}
+
 // background から API を 1 回呼ぶ。返す body は読むたびに時間切れを延ばし、abort で止まる。
 // 失敗は RelayError (route・no-server・no-permission・timeout) か、接続の失敗 (そのほかの例外)
 export async function apiFetch(route, body, deps, abort) {
-  const method = ROUTES[route];
-  if (!method) throw new RelayError("route", "不明な API です");
+  if (!Object.hasOwn(ROUTES, route)) throw new RelayError("route", "不明な API です");
   const settings = await deps.settings?.();
   const local = settings?.mode === "local";
   const server = local ? "local" : settings?.server ?? await deps.server();
-  const send = () => local ? (deps.nativeFetch ?? nativeFetch)(route, body, abort) : httpFetch(route, body, deps, abort, server);
+  const send = () => local ? (deps.nativeFetch ?? nativeFetch)(route, body, abort) : authenticatedFetch(route, body, deps, abort, server);
   const key = local ? "local" : server;
   if (route === "api/config") {
     const res = await send();
@@ -107,12 +197,13 @@ export async function apiFetch(route, body, deps, abort) {
   return scheduler.run(key, limits.get(key) ?? 1, abort.signal, send);
 }
 
-async function httpFetch(route, body, deps, abort, server) {
-  const method = ROUTES[route];
+async function httpFetch(route, body, deps, abort, server, token) {
+  const method = route === "api/anonymous" ? "POST" : ROUTES[route];
   if (!server) throw new RelayError("no-server", "接続先が未設定です。設定でサーバーURLを入れ、「接続」を押してください");
   if (!(await deps.hasPermission(server))) {
     throw new RelayError("no-permission", "サーバーへの接続が許可されていません。設定で「接続」を押してください");
   }
+  abort.signal.throwIfAborted();
   let timer;
   const timeoutMs = deps.timeoutMs ?? READ_TIMEOUT_MS;
   const arm = () => {
@@ -125,9 +216,12 @@ async function httpFetch(route, body, deps, abort, server) {
   try {
     res = await deps.fetch(`${server}/${route}`, {
       method,
-      headers: method === "POST" ? { "Content-Type": "application/json" } : {},
+      headers: {
+        ...(method === "POST" ? { "Content-Type": "application/json" } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: method === "POST" ? body : undefined,
-      credentials: "include",
+      credentials: token || route === "api/anonymous" ? "omit" : "include",
       // 認証プロキシのログイン画面への転送は追わず、ログインしていないとして扱う
       redirect: "manual",
       cache: "no-store",

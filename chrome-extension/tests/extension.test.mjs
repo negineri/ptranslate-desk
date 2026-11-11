@@ -159,3 +159,48 @@ test("新しい設定の翻訳先は日本語にし、保存済みの自動設�
   assert.equal(sanitize({}).target, "ja");
   assert.equal(sanitize({ target: "auto" }).target, "auto");
 });
+
+test("匿名資格を画面に返さず、接続先を分け、401 では資格だけ更新する", async () => {
+  const credential = (n) => `pta_${String(n).padStart(32, "0")}.9999999999.${"a".repeat(64)}`;
+  const values = {};
+  const calls = [];
+  let issued = 0;
+  const deps = {
+    anonymousStorage: {
+      get: async (key) => ({ [key]: values[key] }),
+      set: async (entries) => Object.assign(values, entries),
+      remove: async (key) => { delete values[key]; },
+    },
+    fetch: async (url, init) => {
+      calls.push({ url, init });
+      if (url.endsWith("/api/anonymous")) return Response.json({ credential: credential(++issued) });
+      if (url.endsWith("/api/translate")) return new Response(null, { status: 401 });
+      return Response.json({ tier: init.headers.Authorization ? "anonymous" : "registered" });
+    },
+  };
+  await assert.rejects(extensionFetch("api/anonymous", {}, connectTo(deps)), (error) => error.code === "route");
+  assert.equal(issued, 0);
+  const fetch = sessionFetch({ mode: "server", server: SERVER }, connectTo({ ...deps, anonymousActions: true }));
+  const result = await fetch("api/anonymous");
+  assert.equal(result.status, 204);
+  assert.equal(await result.text(), "");
+  assert.equal(calls[0].init.body, "{}");
+  assert.equal(calls[0].init.credentials, "omit");
+  assert.equal(calls[0].init.redirect, "manual");
+  const config = await fetch("api/config");
+  assert.equal((await config.json()).tier, "anonymous");
+  assert.equal(calls[1].init.headers.Authorization, `Bearer ${credential(1)}`);
+  assert.equal(calls[1].init.credentials, "omit");
+
+  const other = sessionFetch({ mode: "server", server: "https://other.example" }, connectTo(deps));
+  assert.equal((await (await other("api/config")).json()).tier, "registered");
+  assert.equal(calls[2].init.headers.Authorization, undefined);
+  await assert.rejects(fetch("api/translate", { body: '{"text":"A sentence"}' }), /資格を更新しました/);
+  assert.equal(issued, 2);
+  assert.equal(calls.filter(({ url }) => url.endsWith("/api/translate")).length, 1);
+  assert.equal((await (await fetch("api/config")).json()).tier, "anonymous");
+  assert.equal(calls.at(-1).init.headers.Authorization, `Bearer ${credential(2)}`);
+  assert.equal((await fetch("anonymous/forget")).status, 204);
+  assert.deepEqual(values, {});
+  assert.equal((await (await fetch("api/config")).json()).tier, "registered");
+});

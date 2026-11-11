@@ -141,3 +141,24 @@ test("ボランティア枠への同意は明示操作まで保存せず、確�
   assert.equal(p.local[key], 2);
   assert.equal(p.local["volunteer-consent:https://other.example.com"], undefined);
 });
+
+test("設定から匿名利用を開始・終了し、同じ接続先の状態を読み直す", async (t) => {
+  const server = "https://translate.example.com";
+  let anonymous = false;
+  const p = await setup(t, { stored: { server }, fetch: async (route) => {
+    if (route === "api/anonymous" || route === "anonymous/forget") {
+      anonymous = route === "api/anonymous";
+      return new Response(null, { status: 204 });
+    }
+    return anonymous ? Response.json({ tier: "anonymous", languages: [] }) : new Response(null, { status: 401 });
+  } });
+  assert.equal(p.$("anonymous-start").hidden, false);
+  p.$("anonymous-start").click();
+  await wait(() => p.$("status").textContent === "匿名で接続できました");
+  assert.equal(p.$("anonymous-forget").hidden, false);
+  p.$("anonymous-forget").click();
+  await wait(() => !p.$("anonymous-start").hidden);
+  assert.ok(p.requests.every(({ connection }) => connection.server === server));
+  assert.deepEqual(p.requests.map(({ route }) => route),
+    ["api/config", "api/anonymous", "api/config", "anonymous/forget", "api/config"]);
+});

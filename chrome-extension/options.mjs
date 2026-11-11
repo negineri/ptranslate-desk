@@ -11,10 +11,15 @@ export function mountOptions({ document = globalThis.document, chrome = globalTh
   const setStatus = (id, { text, cls = "" }) => {
     $(id).textContent = text; $(id).className = "hint " + cls;
   };
+  const hideAnonymous = () => {
+    $("anonymous-start").hidden = true;
+    $("anonymous-forget").hidden = true;
+  };
   const begin = () => {
     operation?.abort(); operation = new AbortController();
     $("login").hidden = true;
     clearOffer();
+    hideAnonymous();
     return operation;
   };
   const cancel = () => operation?.abort();
@@ -24,6 +29,10 @@ export function mountOptions({ document = globalThis.document, chrome = globalTh
     if (mine.signal.aborted) return;
     setStatus("status", errorMessage(error));
     $("login").hidden = remedy(error) !== "login";
+    if (settings?.mode === "server" && settings.server && $("server").value === settings.server) {
+      $("anonymous-start").hidden = remedy(error) !== "login" && error.code !== "anonymous";
+      $("anonymous-forget").hidden = error.code !== "anonymous";
+    }
   };
   async function read(snapshot, signal) {
     const abort = new AbortController();
@@ -46,6 +55,7 @@ export function mountOptions({ document = globalThis.document, chrome = globalTh
       if ([...select.options].some((option) => option.value === settings[id])) select.value = settings[id];
     }
     localReady = snapshot.mode === "local";
+    $("anonymous-forget").hidden = config.tier !== "anonymous" || localReady;
     if (!localReady && config.pool?.kind === "volunteer") {
       const version = config.pool.consent_version;
       if (!Number.isSafeInteger(version) || version < 1) throw new Error("ボランティア枠の同意の版を確認できませんでした");
@@ -62,11 +72,12 @@ export function mountOptions({ document = globalThis.document, chrome = globalTh
     }
     await chrome.storage.session.set({ connectedTo: connectionKey(snapshot) });
     if (mine.signal.aborted) return;
-    setStatus("status", { text: snapshot.mode === "local" ? "このPCのローカル翻訳に接続できました" : config.pool?.kind === "volunteer" ? "ボランティア枠に接続できました" : `接続できました (${config.user} でログイン中)`, cls: "ok" });
+    setStatus("status", { text: snapshot.mode === "local" ? "このPCのローカル翻訳に接続できました" : config.tier === "anonymous" ? "匿名で接続できました" : config.pool?.kind === "volunteer" ? "ボランティア枠に接続できました" : `接続できました (${config.user} でログイン中)`, cls: "ok" });
   }
   function showMode() {
     cancel();
     clearOffer();
+    hideAnonymous();
     $("server-fields").hidden = $("mode").value === "local";
     $("local-help").hidden = $("mode").value !== "local";
     $("login").hidden = true;
@@ -98,7 +109,7 @@ export function mountOptions({ document = globalThis.document, chrome = globalTh
       return;
     }
   }
-  $("server").addEventListener("input", () => { cancel(); clearOffer(); });
+  $("server").addEventListener("input", () => { cancel(); clearOffer(); hideAnonymous(); });
   $("volunteer-agree").addEventListener("click", async () => {
     if (!offer) return;
     const current = offer;
@@ -142,6 +153,20 @@ export function mountOptions({ document = globalThis.document, chrome = globalTh
       await connected(snapshot, await read(snapshot, mine.signal), mine);
     }).catch((error) => failed(error, mine));
   });
+  async function changeAnonymous(route) {
+    const snapshot = settings;
+    if (snapshot?.mode !== "server" || !snapshot.server || $("server").value !== snapshot.server) return;
+    const mine = begin();
+    try {
+      const result = await fetch(route, {
+        signal: mine.signal, connection: { mode: snapshot.mode, server: snapshot.server },
+      });
+      if (!result.ok) throw new Error("匿名利用の設定を変更できませんでした");
+      await connected(snapshot, await read(snapshot, mine.signal), mine);
+    } catch (error) { await failed(error, mine); }
+  }
+  $("anonymous-start").addEventListener("click", () => { void changeAnonymous("api/anonymous"); });
+  $("anonymous-forget").addEventListener("click", () => { void changeAnonymous("anonymous/forget"); });
   $("login").addEventListener("click", () => { void chrome.tabs.create({ url: `${settings.server}/` }); });
   $("save-prefs").addEventListener("click", async () => {
     settings = await saveSettings({ source: $("source").value, target: $("target").value, form: $("form").value, glossary: $("glossary").value });

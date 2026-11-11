@@ -14,6 +14,7 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   chrome.contextMenus.create({ id: PAGE_MENU_ID, title: "PTranslate でこのページを翻訳", contexts: ["page"] });
   chrome.contextMenus.create({ id: SETTINGS_MENU_ID, title: "設定", contexts: ["action"] });
   await chrome.storage.session.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
+  await chrome.storage.local.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
   if (reason === "install") await chrome.runtime.openOptionsPage();
 });
 
@@ -22,12 +23,15 @@ const apiDeps = {
   server: async () => (await loadSettings()).server,
   hasPermission: (server) => chrome.permissions.contains({ origins: [originPattern(server)] }),
   settings: loadSettings,
+  anonymousStorage: chrome.storage.local,
 };
 
 chrome.runtime.onConnect.addListener((port) => {
   const sender = port.sender;
   // 拡張の画面からの API 呼び出し (transport.mjs)
-  if (port.name === "api" && isExtensionPage(sender, EXTENSION_ROOT)) return relay(port, apiDeps);
+  if (port.name === "api" && isExtensionPage(sender, EXTENSION_ROOT)) {
+    return relay(port, { ...apiDeps, anonymousActions: sender.url === `${EXTENSION_ROOT}options.html` });
+  }
   // ページ全体の翻訳 (page-content.js)。拡張が注入した、タブの一番上の枠の content script だけ受ける
   if (port.name === "page-translate" && sender?.id === chrome.runtime.id && sender.tab && sender.frameId === 0) {
     return runPageTask(port, { ...apiDeps, incognito: sender.tab.incognito || chrome.extension?.inIncognitoContext });

@@ -82,3 +82,8 @@ export async function volunteerFields(settings, config, blocked = "") {
   }
   throw Object.assign(new Error("設定でボランティア枠への送信に同意してください"), { code: "consent_required" });
 }
+
+
+export function anonymousKey(server) {
+  return `anonymous:${normalizeServerUrl(server)}`;
+}
