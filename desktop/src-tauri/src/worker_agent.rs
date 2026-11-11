@@ -222,13 +222,14 @@ impl Agent {
 
     async fn send_result(&self, id: &str, seq: &AtomicU64, mut body: Value) -> RequestResult<bool> {
         body["assignment_id"] = json!(id);
-        body["seq"] = json!(seq.load(Ordering::Relaxed));
+        // 応答待ちが中止されても、受信済みの断片と同じ連番でエラーを送らない。
+        // 送信を始める時点で連番を予約し、失敗した送信の連番は再利用しない。
+        body["seq"] = json!(seq.fetch_add(1, Ordering::Relaxed));
         let response = self.post("/api/worker/result", &body, POST_TIMEOUT).await?;
         if response.status() != StatusCode::OK {
             return Err(RequestError::Failed);
         }
         let reply: ResultReply = json_body(response).await?;
-        seq.fetch_add(1, Ordering::Relaxed);
         Ok(reply.stop)
     }
 
@@ -423,6 +424,13 @@ fn restricted_runtime(ports: Ports) -> Result<tokio::runtime::Runtime> {
 }
 
 fn run_from_parent(ports: Ports) -> Result<&'static str> {
+    run_from_parent_using(ports, Agent::new)
+}
+
+fn run_from_parent_using(
+    ports: Ports,
+    create_agent: impl FnOnce(Bootstrap) -> Result<Agent>,
+) -> Result<&'static str> {
     let rt = restricted_runtime(ports)?;
     {
         let mut output = io::stdout().lock();
@@ -443,7 +451,7 @@ fn run_from_parent(ports: Ports) -> Result<&'static str> {
     if config.relay_port != Some(ports.relay) || config.engine_port != ports.engine {
         return Err(());
     }
-    let agent = Agent::new(config)?;
+    let agent = create_agent(config)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let (allow, permission) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
@@ -464,6 +472,9 @@ fn run_from_parent(ports: Ports) -> Result<&'static str> {
         permission.await.map_err(|_| ())
     }))
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod real_model_probe;
 
 pub(crate) fn entry() {
     let result = Ports::parse(std::env::args_os().skip(2)).and_then(run_from_parent);
@@ -806,6 +817,71 @@ mod tests {
     #[tokio::test]
     async fn worker_stops_when_broker_refuses_further_results() {
         mock_assignment(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn parent_stop_during_result_ack_uses_next_sequence() {
+        let broker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let engine = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut agent = Agent::new(Bootstrap {
+            broker: "https://example.com/".into(),
+            worker_secret: format!("ptw_{}", "a".repeat(64)),
+            model_sha256: "b".repeat(64),
+            agent_version: "0.5.0".into(),
+            engine_port: engine.local_addr().unwrap().port(),
+            engine_secret: "test-engine-secret".into(),
+            relay_port: None,
+            relay_secret: None,
+        })
+        .ok()
+        .unwrap();
+        agent.broker = Url::parse(&format!("http://{}/", broker.local_addr().unwrap())).unwrap();
+        let (parent, closed) = tokio::sync::oneshot::channel();
+        let broker_work = async {
+            let (socket, route, _) = mock_request(&broker).await;
+            assert_eq!(route, "/api/worker/poll");
+            mock_response(
+                socket,
+                &serde_json::to_string(&json!({
+                    "assignment_id": assignment().assignment_id,
+                    "deadline_seconds": 10,
+                    "input": assignment().input,
+                }))
+                .unwrap(),
+            )
+            .await;
+            let (pending_ack, route, body) = mock_request(&broker).await;
+            assert_eq!(route, "/api/worker/result");
+            assert_eq!(body["seq"], 0);
+            assert_eq!(body["text"], "こんにちは");
+            // 仲介は断片を受け取ったが、応答を返す前に親が停止する。
+            parent.send(()).unwrap();
+            let (socket, route, body) = mock_request(&broker).await;
+            assert_eq!(route, "/api/worker/result");
+            assert_eq!(body["seq"], 1);
+            assert_eq!(body["error"], "engine");
+            mock_response(socket, r#"{"stop":false}"#).await;
+            drop(pending_ack);
+        };
+        let engine_work = async {
+            let (socket, route, _) = mock_request(&engine).await;
+            assert_eq!(route, "/v1/completions");
+            mock_response(
+                socket,
+                &format!("data: {}\n\n", json!({"choices":[{"text":"こんにちは"}]})),
+            )
+            .await;
+        };
+        let (result, _, _) = timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                agent.run(closed, std::future::ready(Ok(()))),
+                broker_work,
+                engine_work
+            )
+        })
+        .await
+        .expect("親停止後のエラー結果が時間内に届きませんでした");
+        assert!(result.is_err());
     }
 
     #[test]
