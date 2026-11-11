@@ -22,6 +22,29 @@ pub const CLIENT_ID: &str = "translator-desktop";
 const SCOPE: &str = "openid profile offline_access";
 const LOGIN_REQUIRED: &str = "ログインし直してください";
 
+pub const ANONYMOUS_RENEWED: &str = "匿名の資格を更新しました。もう一度翻訳してください";
+
+fn valid_anonymous(token: &str) -> bool {
+    let mut fields = token.split('.');
+    let Some(id) = fields.next().and_then(|id| id.strip_prefix("pta_")) else {
+        return false;
+    };
+    let (Some(expires), Some(signature)) = (fields.next(), fields.next()) else {
+        return false;
+    };
+    let hex = |value: &str, size| {
+        value.len() == size
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    fields.next().is_none()
+        && hex(id, 32)
+        && hex(signature, 64)
+        && (1..=12).contains(&expires.len())
+        && expires.bytes().all(|b| b.is_ascii_digit())
+}
+
 type Secret = Zeroizing<String>;
 
 pub(crate) trait Vault: Send + Sync {
@@ -85,6 +108,7 @@ struct Access {
 #[derive(Default)]
 struct Credentials {
     access: Option<Access>,
+    anonymous: Option<Secret>,
     session_refresh: Option<Secret>,
     discovery: Option<Discovery>,
     initialized: bool,
@@ -96,6 +120,8 @@ pub struct Auth {
     discovery_url: String,
     client_id: String,
     vault: Arc<dyn Vault>,
+    anonymous_vault: Option<Arc<dyn Vault>>,
+    anonymous: AtomicBool,
     credentials: Mutex<Credentials>,
     cancellation: watch::Sender<u64>,
     authenticated: AtomicBool,
@@ -163,6 +189,13 @@ impl Auth {
             vault: Arc::new(OsVault {
                 account: format!("{prefix}{}", connection.vault_account()),
             }),
+            anonymous_vault: (!mock && prefix.is_empty() && !connection.server_url.is_empty())
+                .then(|| {
+                    Arc::new(OsVault {
+                        account: format!("anonymous-{}", connection.vault_account()),
+                    }) as Arc<dyn Vault>
+                }),
+            anonymous: AtomicBool::new(false),
             credentials: Mutex::new(Credentials::default()),
             cancellation: watch::channel(0).0,
             authenticated: AtomicBool::new(false),
@@ -177,6 +210,9 @@ impl Auth {
     }
     pub fn is_authenticated(&self) -> bool {
         self.authenticated.load(Ordering::SeqCst)
+    }
+    pub fn is_anonymous(&self) -> bool {
+        self.is_authenticated() && self.anonymous.load(Ordering::SeqCst)
     }
     pub fn session_only(&self) -> bool {
         self.is_authenticated() && self.session_only.load(Ordering::SeqCst)
@@ -335,12 +371,159 @@ impl Auth {
         }
     }
 
+    async fn issue_anonymous(&self) -> Result<Secret, String> {
+        let mut response = self
+            .client
+            .post(format!("{}/api/anonymous", self.server))
+            .json(&serde_json::json!({}))
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|_| "匿名の資格を発行できませんでした")?;
+        match response.status().as_u16() {
+            200 => {}
+            404 => return Err("この接続先では匿名利用を使えません".into()),
+            429 | 503 => {
+                return Err("資格を発行できません。しばらく待ってから試してください".into())
+            }
+            _ => return Err("匿名の資格を発行できませんでした".into()),
+        }
+        let mut bytes = Zeroizing::new(Vec::new());
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "匿名の資格を受け取れませんでした")?
+        {
+            if bytes.len() + chunk.len() > 4096 {
+                return Err("匿名の資格を受け取れませんでした".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        #[derive(Deserialize)]
+        struct Issued<'a> {
+            credential: &'a str,
+        }
+        let issued: Issued<'_> =
+            serde_json::from_slice(&bytes).map_err(|_| "匿名の資格を受け取れませんでした")?;
+        if !valid_anonymous(issued.credential) {
+            return Err("匿名の資格を受け取れませんでした".into());
+        }
+        Ok(Zeroizing::new(issued.credential.to_owned()))
+    }
+
+    pub async fn login_anonymous(&self) -> Result<(), String> {
+        let vault = self
+            .anonymous_vault
+            .as_ref()
+            .ok_or("設定で接続先を指定してください")?;
+        let _busy = self.begin_connection_change()?;
+        let epoch = *self.cancellation.borrow();
+        let mut credentials = self.credentials.lock().await;
+        if self.is_authenticated() {
+            return Err("現在の利用を終了してから匿名で始めてください".into());
+        }
+        let token = self.issue_anonymous().await?;
+        let response = self
+            .client
+            .get(format!("{}/api/config", self.server))
+            .bearer_auth(token.as_str())
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|_| "匿名で接続できませんでした")?;
+        let config = crate::read_translation_config(
+            response
+                .error_for_status()
+                .map_err(|_| "匿名で接続できませんでした")?,
+        )
+        .await
+        .map_err(|_| "匿名で接続できませんでした")?;
+        if config["tier"] != "anonymous" || *self.cancellation.borrow() != epoch {
+            return Err("匿名で接続できませんでした".into());
+        }
+        vault.save(token.as_str())?;
+        credentials.initialized = true;
+        credentials.anonymous = Some(token);
+        self.anonymous.store(true, Ordering::SeqCst);
+        self.authenticated.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn send_anonymous(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Response, String> {
+        let token = self
+            .credentials
+            .lock()
+            .await
+            .anonymous
+            .clone()
+            .ok_or(LOGIN_REQUIRED)?;
+        let send = |token: &Secret| {
+            let mut request = self
+                .client
+                .request(method.clone(), format!("{}{path}", self.server))
+                .bearer_auth(token.as_str());
+            if let Some(body) = body {
+                request = request.json(body);
+            }
+            request.send()
+        };
+        let response = send(&token)
+            .await
+            .map_err(|_| "翻訳サーバーに接続できませんでした")?;
+        if response.status() != 401 {
+            return Ok(response);
+        }
+        let mut credentials = self.credentials.lock().await;
+        let current = credentials
+            .anonymous
+            .as_ref()
+            .filter(|_| self.is_anonymous())
+            .ok_or(LOGIN_REQUIRED)?;
+        if current.as_str() == token.as_str() {
+            let epoch = *self.cancellation.borrow();
+            let fresh = self.issue_anonymous().await?;
+            if *self.cancellation.borrow() != epoch || !self.is_anonymous() {
+                return Err(LOGIN_REQUIRED.into());
+            }
+            self.anonymous_vault
+                .as_ref()
+                .ok_or(LOGIN_REQUIRED)?
+                .save(fresh.as_str())?;
+            credentials.anonymous = Some(fresh);
+        }
+        let fresh = credentials.anonymous.clone().ok_or(LOGIN_REQUIRED)?;
+        drop(credentials);
+        if method == Method::GET {
+            drop(response);
+            return send(&fresh)
+                .await
+                .map_err(|_| "翻訳サーバーに接続できませんでした".into());
+        }
+        Err(ANONYMOUS_RENEWED.into())
+    }
+
     pub async fn restore(&self) -> Result<(), String> {
         let mut credentials = self.credentials.lock().await;
         if credentials.initialized {
             return Ok(());
         }
         credentials.initialized = true;
+        if let Some(vault) = &self.anonymous_vault {
+            if let Some(token) = vault.load()? {
+                if !valid_anonymous(token.as_str()) {
+                    return Err("保存されている匿名の資格が不正です".into());
+                }
+                credentials.anonymous = Some(token);
+                self.anonymous.store(true, Ordering::SeqCst);
+                self.authenticated.store(true, Ordering::SeqCst);
+                return Ok(());
+            }
+        }
         if self.mock || !self.is_configured() || self.vault.load()?.is_none() {
             return Ok(());
         }
@@ -372,6 +555,9 @@ impl Auth {
             }
         }
         let _busy = Busy(&self.busy);
+        if self.anonymous.load(Ordering::SeqCst) {
+            return Err("匿名利用を終了してからログインしてください".into());
+        }
         if self.mock {
             self.authenticated.store(true, Ordering::SeqCst);
             return Ok(());
@@ -447,12 +633,26 @@ impl Auth {
     pub async fn logout(&self) -> Result<(), String> {
         self.cancel_login();
         self.authenticated.store(false, Ordering::SeqCst);
-        if self.mock || !self.is_configured() {
+        if self.mock {
             return Ok(());
         }
         let mut credentials = self.credentials.lock().await;
-        // 更新処理が終わってから最新のrefresh tokenを読み、再認証も止める。
+        // 発行・更新を待っている間に認証された場合も、ここで止める。
         self.authenticated.store(false, Ordering::SeqCst);
+        if self.anonymous.load(Ordering::SeqCst) {
+            if let Err(error) = self.anonymous_vault.as_ref().ok_or(LOGIN_REQUIRED)?.clear() {
+                self.authenticated.store(true, Ordering::SeqCst);
+                return Err(error);
+            }
+            self.anonymous.store(false, Ordering::SeqCst);
+            credentials.anonymous = None;
+            credentials.initialized = true;
+            return Ok(());
+        }
+        if !self.is_configured() {
+            return Ok(());
+        }
+        // 更新処理が終わってから最新のrefresh tokenを読む。
         credentials.initialized = true;
         let refresh = match credentials.session_refresh.take() {
             Some(value) => Ok(Some(value)),
@@ -491,7 +691,7 @@ impl Auth {
     }
 
     pub async fn renew_if_needed(&self) -> Result<(), String> {
-        if self.mock || !self.is_authenticated() {
+        if self.mock || self.is_anonymous() || !self.is_authenticated() {
             return Ok(());
         }
         self.access_token(None).await.map(|_| ())
@@ -557,6 +757,9 @@ impl Auth {
     ) -> Result<Response, String> {
         if !self.is_authenticated() {
             return Err(LOGIN_REQUIRED.into());
+        }
+        if self.is_anonymous() {
+            return self.send_anonymous(method, path, body).await;
         }
         let token = if self.mock {
             None

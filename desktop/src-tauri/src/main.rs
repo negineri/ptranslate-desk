@@ -190,6 +190,19 @@ async fn login(app: AppHandle) -> Result<auth::LoginReport, String> {
 }
 
 #[tauri::command]
+async fn login_anonymous(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("匿名利用はメインウィンドウの設定で開始してください".into());
+    }
+    let auth = app.state::<Backend>().auth();
+    let result = auth.login_anonymous().await;
+    if Arc::ptr_eq(&auth, &app.state::<Backend>().auth()) {
+        publish_auth(&app, result.as_ref().err().cloned());
+    }
+    result
+}
+
+#[tauri::command]
 fn cancel_login(app: AppHandle) {
     app.state::<Backend>().auth().cancel_login();
 }
@@ -371,6 +384,9 @@ fn start_request(
             let mut response = match send.await {
                 Ok(Some(response)) => response,
                 Ok(None) => return Ok(()),
+                Err(error) if error == auth::ANONYMOUS_RENEWED => {
+                    return json_response(&stream, 409, &serde_json::json!({ "error": error }));
+                }
                 Err(_) if !auth.is_authenticated() => {
                     let _ = stream.send(Message::LoginRequired { status: 401 });
                     if Arc::ptr_eq(&auth, &app.state::<Backend>().auth()) {
@@ -398,10 +414,22 @@ fn start_request(
                             }),
                         );
                     }
+                    if auth.is_anonymous() {
+                        return json_response(&stream, 403, &error);
+                    }
                     return login_required(&app, &auth, &stream, 403).await;
                 }
             }
             if response.status() == 401 || response.status() == 403 {
+                if auth.is_anonymous() {
+                    return json_response(
+                        &stream,
+                        502,
+                        &serde_json::json!({
+                            "error": "匿名では翻訳サーバーに接続できませんでした"
+                        }),
+                    );
+                }
                 return login_required(&app, &auth, &stream, response.status().as_u16()).await;
             }
             stream
@@ -564,6 +592,7 @@ fn main() {
     #[cfg(not(feature = "smoke-test"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         login,
+        login_anonymous,
         logout,
         restore_session,
         restore_server_session,
@@ -611,6 +640,7 @@ fn main() {
         .manage(smoke::Smoke::default())
         .invoke_handler(tauri::generate_handler![
             login,
+            login_anonymous,
             logout,
             restore_session,
             restore_server_session,
