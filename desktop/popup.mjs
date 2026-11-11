@@ -67,7 +67,7 @@ async function show() {
     $("direction").textContent = `${settings.source ? name(settings.source) : "自動で判定"} → ${name(target)}`;
     if (settings.source === target) throw new Error("原文と訳す先が同じ言語です");
     const common = {
-      target_lang: target, source_lang: settings.source || null,
+      purpose: "interactive", target_lang: target, source_lang: settings.source || null,
       form: target === "ja" ? settings.form || null : null, context: "",
       glossary: parseGlossary(settings.glossary || "", config.max_glossary),
     };

@@ -60,6 +60,21 @@ test("中国語を日本語へ、ASCII のスペイン語を英語へ送る", as
   }
 });
 
+test("ページ内で同じグループを使い、画面内外を区別する", async () => {
+  const blocks = [{ id: 1, text: "Outside" }, { id: 2, text: "Inside" }];
+  const first = fakeServer();
+  const second = fakeServer();
+  for (const server of [first, second]) {
+    await runPage(blocks, server, {}, [2]).finished;
+    const [visible, rest] = server.requests.map(({ body }) => body);
+    assert.equal(visible.purpose, "page_visible");
+    assert.equal(rest.purpose, "page_rest");
+    assert.match(visible.group, /^[A-Za-z0-9_-]{22}$/);
+    assert.equal(rest.group, visible.group);
+  }
+  assert.notEqual(first.requests[0].body.group, second.requests[0].body.group);
+});
+
 test("別の段落を並列に訳して結果をそれぞれ返す", async () => {
   const server = fakeServer();
   const blocks = [

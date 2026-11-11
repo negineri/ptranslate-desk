@@ -78,6 +78,8 @@
   </header>
   <p class="sub">PLaMo 3 Translate で訳します。原文と訳はサーバーに残りません。<span id="who"></span></p>
 
+  <p id="volunteer-destination" class="hint" hidden>送信先はボランティア枠です。</p>
+
   <section>
     <div class="langs">
       <select id="source" aria-label="原文の言語"><option value="">自動で判定</option></select>
@@ -135,6 +137,18 @@
   <form method="dialog"><button>閉じる</button></form>
 </dialog>
 
+<dialog id="volunteer-consent" aria-labelledby="volunteer-consent-title">
+  <h2 id="volunteer-consent-title">ボランティア枠を使う前に</h2>
+  <p>原文、文脈、用語集、直前の区切りの原文と訳を、運営以外の参加者の端末で処理します。参加者は送られた内容を読めます。</p>
+  <p>参加者は記録しない規約に同意していますが、記録を技術的に防ぐことはできません。訳が改ざんされる可能性があり、検出は完全ではありません。</p>
+  <p>運営と CDN の事業者も内容を読めます。検査のため、一部を運営のエンジンで訳し直します。</p>
+  <p>他人の個人情報、業務上の秘密、認証に使う情報は、ローカルモードか運営管理枠で訳してください。</p>
+  <form method="dialog">
+    <button id="volunteer-decline" value="cancel" autofocus>キャンセル</button>
+    <button id="volunteer-accept" value="agree">同意する</button>
+  </form>
+</dialog>
+
 <script type="module">
 import { guessTarget, parseGlossary, splitText, translateChunk } from "./translation.mjs";
 
@@ -145,6 +159,27 @@ const els = { source: $("source"), target: $("target"), form: $("form"), src: $(
               context: $("context"), glossary: $("glossary"), count: $("count"), who: $("who"),
               auto: $("auto"), clear: $("clear") };
 let config = { max_chars: 4000, languages: [] };
+const webClient = true;
+const consentKey = "ptranslate-volunteer-consent";
+const consentDialog = $("volunteer-consent");
+let configReady = false;
+let agreedVersion;
+let offeredVersion;
+
+function setPool(pool) {
+  config.pool = pool;
+  $("volunteer-destination").hidden = pool?.kind !== "volunteer";
+}
+
+if (webClient) {
+  try { agreedVersion = JSON.parse(localStorage.getItem(consentKey)); } catch {}
+  $("volunteer-accept").addEventListener("click", () => {
+    if (config.pool?.kind !== "volunteer" || offeredVersion !== config.pool.consent_version) return;
+    agreedVersion = offeredVersion;
+    try { localStorage.setItem(consentKey, JSON.stringify(agreedVersion)); } catch {}
+    setStatus("同意しました。「翻訳する」で送信できます。");
+  });
+}
 let controller = null;   // 走っている翻訳 (新しい翻訳を始めると止める)
 let timer = null;        // 自動で翻訳するまでの待ち
 let lastKey = null;      // 最後に訳し終えた原文と設定 (同じなら自動では訳し直さない)
@@ -185,6 +220,10 @@ async function requestTranslation(body, onText, signal) {
   if (res.status === 401) { location.reload(); throw new Error("ログインし直してください"); }
   if (!res.ok) {
     const e = await res.json().catch(() => ({}));
+    if (webClient && e.code === "consent_required") {
+      const next = await fetch("api/config", { signal });
+      if (next.ok) setPool((await next.json()).pool);
+    }
     throw new Error(e.error || `エラー (${res.status})`);
   }
   return translateChunk(res, onText);
@@ -192,7 +231,7 @@ async function requestTranslation(body, onText, signal) {
 
 function settings(text) {
   const target = resolvedTarget(text);
-  return { target_lang: target, source_lang: els.source.value || null,
+  return { purpose: "interactive", target_lang: target, source_lang: els.source.value || null,
            form: target === "ja" ? (els.form.value || null) : null,
            context: els.context.value.trim(), glossary: parseGlossary(els.glossary.value, config.max_glossary || 200) };
 }
@@ -212,7 +251,24 @@ async function run({ auto = false } = {}) {
     if (!auto) els.src.focus();
     return;
   }
+  if (webClient && !configReady) return;
   const common = settings(text);
+  if (webClient && config.pool?.kind === "volunteer") {
+    const version = config.pool.consent_version;
+    if (!Number.isSafeInteger(version) || version < 1) {
+      setStatus("ボランティア枠の同意の版を確認できませんでした", "err");
+      return;
+    }
+    if (agreedVersion !== version) {
+      setStatus("ボランティア枠の利用には同意が必要です");
+      if (!auto && !consentDialog.open) {
+        offeredVersion = version;
+        consentDialog.showModal();
+      }
+      return;
+    }
+    common.consent = version;
+  }
   if (common.source_lang && common.source_lang === common.target_lang) {
     setStatus("原文と訳す先が同じ言語です", "err"); return;
   }
@@ -288,7 +344,9 @@ function scheduleAuto() {
 async function init() {
   const res = await fetch("api/config");
   if (res.status === 401) { location.reload(); return; }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   config = await res.json();
+  if (webClient) setPool(config.pool);
   const connection = config.desktop_connection || {};
   $("client-server-url").value = connection.server_url || location.origin;
   $("client-discovery-url").value = connection.discovery_url || "";
@@ -304,6 +362,7 @@ async function init() {
   }
   restore();
   updateForm();
+  configReady = true;
 }
 
 els.go.addEventListener("click", () => run());

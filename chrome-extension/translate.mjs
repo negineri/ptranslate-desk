@@ -34,7 +34,7 @@ export async function translateInto(el, text, common, { signal, fetch = extensio
       el.append(node);
       const res = await ensureOk(
         await fetch("api/translate", {
-          body: JSON.stringify({ ...common, text: source, history: previous ? [previous] : [] }),
+          body: JSON.stringify({ ...common, purpose: "interactive", text: source, history: previous ? [previous] : [] }),
           signal,
         }),
       );

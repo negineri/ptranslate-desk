@@ -120,6 +120,13 @@ export function runPageTask(port, deps) {
     const settings = await deps.settings();
     requestDeps = await pinConnection(deps, settings);
     const config = await (await call("api/config")).json();
+    // ページのURLや本文を使わず、翻訳を開始するたびに新しい値を作る。
+    const groupId = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))))
+      .replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+    const pageFields = (id) => ({
+      group: groupId,
+      purpose: priority.has(id) ? "page_visible" : "page_rest",
+    });
     // 訳す先の自動はページ全体の文で決める
     const sample = blocks.map((b) => b.text).join("\n");
     const common = requestSettings(sample, settings, config);
@@ -207,7 +214,7 @@ export function runPageTask(port, deps) {
     async function translateGroup(group, previous) {
       if (group.length > 1) {
         const text = group.map((block, i) => `${i + 1}. ${block.text}`).join("\n");
-        const res = await call("api/translate", JSON.stringify({ ...common, text, history: [] }), group[0].id);
+        const res = await call("api/translate", JSON.stringify({ ...common, ...pageFields(group[0].id), text, history: [] }), group[0].id);
         let output = "";
         const finish = await translateChunk(res, (part) => { output += part; });
         const translations = finish === "stop" && numberedTranslations(output, group.length);
@@ -233,7 +240,7 @@ export function runPageTask(port, deps) {
           const source = chunk.text.trim();
           const lead = out + chunk.text.match(/^\s*/)[0];
           const res = await call("api/translate", JSON.stringify({
-            ...common, text: source, history: previous ? [previous] : [],
+            ...common, ...pageFields(block.id), text: source, history: previous ? [previous] : [],
           }), block.id);
           let buf = "";
           const finish = await translateChunk(res, (part) => {

@@ -18,7 +18,8 @@ await writeFile(new URL("./src-tauri/gen/local-languages.json", import.meta.url)
 await Promise.all([
   writeFile(new URL("index.html", dist), html.replace(
     script, script + '\nimport { desktopFetch as fetch, settingsStorage as localStorage, copyText, translationMode } from "./transport.mjs";',
-  ).replaceAll("--accent-text: #ffffff;", "--accent-text: #ffffff; --accent-soft: #e9f0fd;")
+  ).replace("const webClient = true;", "const webClient = false;")
+    .replaceAll("--accent-text: #ffffff;", "--accent-text: #ffffff; --accent-soft: #e9f0fd;")
     .replaceAll("--accent-text: #0d1117;", "--accent-text: #0d1117; --accent-soft: #2c3e63;")
     .replace("このブラウザに", "この端末に")
     .replace("els.who.textContent = ` (${config.user} でログイン中)`;", "")
