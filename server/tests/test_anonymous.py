@@ -66,6 +66,16 @@ class AnonymousTest(unittest.TestCase):
         self.assertEqual(response.status, 200, data)
         return json.loads(data)["credential"]
 
+    def test_web_anonymous_entry_is_advertised_only_when_configured(self):
+        response, data = self.call("GET", "/")
+        self.assertEqual(response.status, 200)
+        self.assertIn(b'data-web-anonymous="enabled"', data)
+        for settings in ({"ANON_ENABLED": False}, {"PUBLIC_SERVER_URL": ""}):
+            with patch.multiple(tr, **settings):
+                response, data = self.call("GET", "/")
+                self.assertEqual(response.status, 200)
+                self.assertIn(b'data-web-anonymous="disabled"', data)
+
     def test_bearer_translation_and_private_logs(self):
         token = self.issue()
         headers = {"Authorization": f"Bearer {token}"}

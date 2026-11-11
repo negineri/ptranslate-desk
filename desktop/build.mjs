@@ -25,13 +25,13 @@ await Promise.all([
     .replaceAll("--accent-text: #ffffff;", "--accent-text: #ffffff; --accent-soft: #e9f0fd;")
     .replaceAll("--accent-text: #0d1117;", "--accent-text: #0d1117; --accent-soft: #2c3e63;")
     .replace("このブラウザに", "この端末に")
-    .replace("els.who.textContent = ` (${config.user} でログイン中)`;", "")
+    .replace('els.who.textContent = config.tier === "anonymous" ? " (匿名で利用中)" : ` (${config.user} でログイン中)`;', "")
     .replace("<title>PTranslate</title>", `<title>${productName}</title>`)
     .replace(">PTranslate</h1>", `>${productName}</h1>`)
     .replace("await navigator.clipboard.writeText(els.out.textContent);",
       "if (!await copyText(els.out.textContent)) return;")
     .replace("async function requestTranslation(body, onText, signal)", "async function requestTranslation(body, onText, signal, localOverride)")
-    .replace("body: JSON.stringify(body), signal });", "body: JSON.stringify(body), signal, localOverride });")
+    .replace('body: JSON.stringify(body), redirect: webAnonymous ? "manual" : "follow", signal });', "body: JSON.stringify(body), signal, localOverride });")
     .replace(/<dialog id="volunteer-consent"[\s\S]*?<\/dialog>/, consentDialog)
     .replace("const runKey = JSON.stringify([text, common]);\n  if (auto && runKey === lastKey && !controller) return;", "const localOverride = translationMode();\n  const wasRunning = controller !== null;")
     .replace('  try {\n    els.out.textContent = "";', `  try {
@@ -45,7 +45,7 @@ await Promise.all([
     .replace("JSON.stringify([common, source, prev ? prev.source : null])", "JSON.stringify([localOverride, common, source, prev ? prev.source : null])")
     .replace("}, mine.signal);", "}, mine.signal, localOverride);")
     .replace('  if (res.status === 401) { location.reload(); throw', '  if (res.status === 409) invalidateDesktopConfig();\n  if (res.status === 401) { location.reload(); throw')
-    .replace('  const res = await fetch("api/config");\n  if (res.status === 401) { location.reload(); return; }\n  if (!res.ok) throw new Error(`HTTP ${res.status}`);\n  config = await res.json();',
+    .replace(/  const res = await fetch\("api\/config", webAnonymous[\s\S]*?  config = await res\.json\(\);/,
       '  config = await loadDesktopConfig(translationMode());')
     .replace('els.go.addEventListener("click", () => run());', `let desktopConfig = null;
 let configGeneration = 0;

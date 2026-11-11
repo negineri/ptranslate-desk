@@ -1120,6 +1120,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_static(self, filename: str, content_type: str) -> None:
         body = (STATIC_DIR / filename).read_bytes()
+        if filename == "index.html" and ANON_ENABLED and PUBLIC_SERVER_URL:
+            body = body.replace(
+                b'data-web-anonymous="disabled"', b'data-web-anonymous="enabled"', 1
+            )
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))

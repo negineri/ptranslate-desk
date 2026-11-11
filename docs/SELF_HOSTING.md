@@ -483,6 +483,11 @@ nginxの `proxy_set_header` は同じ階層で指定すると上位からの継�
 `DELETE /api/worker/<id>` はOIDCを通します。認証済みの要求だけに、前段が検証した `X-Forwarded-User` を付けます。
 匿名用APIの設定と、ワーカー管理APIの認証除外を混同しないでください。
 
+Webで匿名利用を有効にする場合は、`TR_ANON_ENABLED=1` と公開HTTPSの `TR_PUBLIC_SERVER_URL` を設定し、
+未ログインでも翻訳画面と静的ファイルを開けるよう前段を設定します。
+`/api/anonymous` と匿名資格付きの `/api/config`・`/api/translate` を仲介へ渡し、
+画面の「アカウントでログイン」が使う `/oauth2/start?rd=%2F` を認証プロキシへ渡します。
+
 ### 確認用の文の更新と運営用CLI
 
 確認用の文は定期的に入れ替えます。`TR_CANARY_FILE` と同じディレクトリに、仲介の実行ユーザーだけが読める

@@ -46,6 +46,7 @@
   #out { min-height: 320px; border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px;
          white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
   #out:empty::before { content: "ここに訳が出ます"; color: var(--muted); }
+  #anonymous-access[hidden] { display: none; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
   .hint { color: var(--muted); font-size: .85rem; }
   .spacer { flex: 1; }
@@ -70,7 +71,7 @@
   .connection-value button { flex-shrink: 0; }
 </style>
 </head>
-<body>
+<body data-web-anonymous="disabled">
 <main>
   <header class="web-heading">
     <h1><img class="brand-mark" src="./logo.png" width="32" height="32" alt="">PTranslate</h1>
@@ -78,6 +79,10 @@
   </header>
   <p class="sub">PLaMo 3 Translate で訳します。原文と訳はサーバーに残りません。<span id="who"></span></p>
 
+  <div id="anonymous-access" class="row" hidden>
+    <button id="anonymous-start" type="button">匿名で始める</button>
+    <a href="/oauth2/start?rd=%2F">アカウントでログイン</a>
+  </div>
   <p id="volunteer-destination" class="hint" hidden>送信先はボランティア枠です。</p>
 
   <section>
@@ -160,11 +165,52 @@ const els = { source: $("source"), target: $("target"), form: $("form"), src: $(
               auto: $("auto"), clear: $("clear") };
 let config = { max_chars: 4000, languages: [] };
 const webClient = true;
+const webAnonymous = webClient && document.body.dataset.webAnonymous === "enabled";
 const consentKey = "ptranslate-volunteer-consent";
 const consentDialog = $("volunteer-consent");
 let configReady = false;
 let agreedVersion;
 let offeredVersion;
+
+function requireLogin() {
+  configReady = false;
+  els.who.textContent = "";
+  $("anonymous-access").hidden = false;
+  setStatus("翻訳を始めるには、匿名で開始するかログインしてください");
+}
+
+async function issueWebCredential(signal) {
+  const response = await fetch("api/anonymous", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: "{}", credentials: "same-origin", redirect: "error", signal,
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error || "匿名の利用を開始できませんでした");
+  }
+}
+
+async function refreshAnonymous(signal) {
+  const button = $("anonymous-start");
+  button.disabled = true;
+  try {
+    await issueWebCredential(signal);
+    await init(signal);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+if (webAnonymous) {
+  $("anonymous-start").addEventListener("click", async () => {
+    try {
+      await refreshAnonymous();
+      if (configReady) setStatus("匿名で翻訳できます");
+    } catch (error) {
+      setStatus(error.message, "err");
+    }
+  });
+}
 
 function setPool(pool) {
   config.pool = pool;
@@ -216,7 +262,16 @@ function resolvedTarget(text) { return els.target.value === "auto" ? guessTarget
 
 async function requestTranslation(body, onText, signal) {
   const res = await fetch("api/translate", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), redirect: webAnonymous ? "manual" : "follow", signal });
+  if (webAnonymous && (res.status === 401 || res.type === "opaqueredirect")) {
+    const wasAnonymous = config.tier === "anonymous";
+    requireLogin();
+    if (wasAnonymous) {
+      await refreshAnonymous(signal);
+      if (configReady) throw new Error("匿名の資格を更新しました。もう一度翻訳してください");
+    }
+    throw new Error("翻訳を始めるには、匿名で開始するかログインしてください");
+  }
   if (res.status === 401) { location.reload(); throw new Error("ログインし直してください"); }
   if (!res.ok) {
     const e = await res.json().catch(() => ({}));
@@ -341,11 +396,18 @@ function scheduleAuto() {
   timer = setTimeout(() => run({ auto: true }), AUTO_DELAY);
 }
 
-async function init() {
-  const res = await fetch("api/config");
+async function init(signal) {
+  const res = await fetch("api/config", webAnonymous ? { redirect: "manual", signal } : undefined);
+  signal?.throwIfAborted();
+  if (webAnonymous && (res.status === 401 || res.type === "opaqueredirect")) {
+    requireLogin();
+    return;
+  }
   if (res.status === 401) { location.reload(); return; }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   config = await res.json();
+  signal?.throwIfAborted();
+  $("anonymous-access").hidden = true;
   if (webClient) setPool(config.pool);
   const connection = config.desktop_connection || {};
   $("client-server-url").value = connection.server_url || location.origin;
@@ -355,7 +417,8 @@ async function init() {
     button.disabled = !$(button.dataset.copyConnection).value;
   }
   $("show-client-connection").disabled = false;
-  els.who.textContent = ` (${config.user} でログイン中)`;
+  els.who.textContent = config.tier === "anonymous" ? " (匿名で利用中)" : ` (${config.user} でログイン中)`;
+  for (const select of [els.source, els.target]) select.options.length = 1;
   for (const l of config.languages) {
     els.source.append(new Option(l.name, l.code));
     els.target.append(new Option(l.name, l.code));
