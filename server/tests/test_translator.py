@@ -25,6 +25,7 @@ import mock_plamo  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("translator", ROOT / "server" / "translator.py")
 tr = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = tr
 spec.loader.exec_module(tr)
 
 

@@ -2,12 +2,14 @@
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("local_prompt_server", ROOT / "server/translator.py")
 tr = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = tr
 spec.loader.exec_module(tr)
 
 
