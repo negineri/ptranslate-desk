@@ -51,7 +51,7 @@ pub(crate) async fn run(
     mut config: Bootstrap,
     mut stop: oneshot::Receiver<()>,
     update: impl FnMut(Status),
-) -> Result<Status, ()> {
+) -> Result<Status, String> {
     let local = app.state::<crate::local::Local>();
     let can_wait = || {
         crate::worker_power::external_power() == Some(true)
@@ -66,20 +66,22 @@ pub(crate) async fn run(
     if !can_wait() {
         return Ok(Status::Paused);
     }
-    let engine = tokio::select! {
+    let (engine, _standby) = tokio::select! {
         biased;
         _ = &mut stop => return Ok(Status::Paused),
-        engine = local.prepare_worker_engine(app) => engine.map_err(|_| ())?,
+        engine = local.prepare_worker_engine(app) => engine?,
     };
     if !can_wait() {
         return Ok(Status::Paused);
     }
     engine.configure(&mut config);
-    let mut input = Zeroizing::new(serde_json::to_vec(&config).map_err(|_| ())?);
+    let mut input = Zeroizing::new(
+        serde_json::to_vec(&config).map_err(|_| "ワーカーの起動情報を作れませんでした")?,
+    );
     drop(config);
     input.push(b'\n');
     if input.len() > 16 * 1024 {
-        return Err(());
+        return Err("ワーカーの起動情報が大きすぎます".into());
     }
     supervise(
         command
@@ -95,6 +97,7 @@ pub(crate) async fn run(
         || local.try_worker_slot(&engine),
     )
     .await
+    .map_err(|_| "ワーカーの起動または処理の終了を確認できませんでした".into())
 }
 
 async fn read_line(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Result<Vec<u8>, ()> {

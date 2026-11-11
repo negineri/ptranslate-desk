@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -154,6 +154,7 @@ pub struct Local {
     activity: Mutex<(usize, Instant)>,
     measuring: tokio::sync::Mutex<()>,
     worker_slot: tokio::sync::Mutex<()>,
+    worker_standby: AtomicUsize,
     measurement_cancel: Operation,
     downloads: resources::Downloads,
     slots: parallel::Slots,
@@ -181,6 +182,16 @@ impl Operation {
         }
     }
 }
+pub(crate) struct WorkerStandby<'a>(&'a Local);
+
+impl Drop for WorkerStandby<'_> {
+    fn drop(&mut self) {
+        let mut activity = self.0.activity.lock().unwrap();
+        activity.1 = Instant::now();
+        self.0.worker_standby.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub(crate) struct WorkerSlot<'a> {
     local: &'a Local,
     _permit: parallel::Permit<'a>,
@@ -341,6 +352,7 @@ impl Local {
             activity: Mutex::new((0, Instant::now())),
             measuring: tokio::sync::Mutex::new(()),
             worker_slot: tokio::sync::Mutex::new(()),
+            worker_standby: AtomicUsize::new(0),
             measurement_cancel: Operation::default(),
             downloads: resources::Downloads::default(),
         })
@@ -428,6 +440,11 @@ impl Local {
         self.ready.store(false, Ordering::SeqCst);
         self.process.lock().unwrap().take();
     }
+    fn worker_standby(&self) -> WorkerStandby<'_> {
+        self.worker_standby.fetch_add(1, Ordering::SeqCst);
+        WorkerStandby(self)
+    }
+
     fn release_if_idle(&self, now: Instant) -> bool {
         if !self.ready.load(Ordering::SeqCst)
             || (self.enabled() && !self.settings.lock().unwrap().auto_release)
@@ -447,6 +464,18 @@ impl Local {
                 now,
                 self.settings.lock().unwrap().idle_minutes,
             )
+        {
+            return false;
+        }
+        if self.worker_standby.load(Ordering::SeqCst) != 0
+            && self
+                .process
+                .lock()
+                .unwrap()
+                .as_mut()
+                .is_some_and(|process| {
+                    process.worker_verified && matches!(process.child.try_wait(), Ok(None))
+                })
         {
             return false;
         }
@@ -488,32 +517,42 @@ impl Local {
         self.load_engine(installation(app)?, false).await
     }
 
+    fn reusable_worker_engine(&self) -> Result<Option<WorkerEngine>, String> {
+        let activity = self.activity.lock().unwrap();
+        if activity.0 != 0 || self.slots.in_use() {
+            return Err("翻訳が終わってから提供を開始してください".into());
+        }
+        let mut process = self.process.lock().unwrap();
+        Ok(process.as_mut().and_then(|process| {
+            (self.ready.load(Ordering::SeqCst)
+                && process.worker_verified
+                && matches!(process.child.try_wait(), Ok(None)))
+            .then(|| WorkerEngine(process.endpoint.clone()))
+        }))
+    }
+
     pub(crate) async fn prepare_worker_engine(
         &self,
         app: &AppHandle,
-    ) -> Result<WorkerEngine, String> {
+    ) -> Result<(WorkerEngine, WorkerStandby<'_>), String> {
         if !worker_platform_supported() {
             return Err("この端末は翻訳ワーカーに対応していません".into());
         }
-        let _starting = self.starting.lock().await;
-        let _worker = self.lock_engine_change()?;
         {
-            let mut activity = self.activity.lock().unwrap();
-            if activity.0 != 0 || self.slots.in_use() {
-                return Err("翻訳が終わってから提供を開始してください".into());
-            }
-            if let Some(process) = self.process.lock().unwrap().as_mut() {
-                if self.ready.load(Ordering::SeqCst)
-                    && process.worker_verified
-                    && matches!(process.child.try_wait(), Ok(None))
-                {
-                    activity.1 = Instant::now();
-                    return Ok(WorkerEngine(process.endpoint.clone()));
-                }
+            let _starting = self.starting.lock().await;
+            let _worker = self.lock_engine_change()?;
+            if let Some(engine) = self.reusable_worker_engine()? {
+                return Ok((engine, self.worker_standby()));
             }
         }
         let install = installation(app)?;
+        // 大きなモデルを読む間は、自分の翻訳や設定変更を止めない。
         resources::verify_worker_model(install.model.clone()).await?;
+        let _starting = self.starting.lock().await;
+        let _worker = self.lock_engine_change()?;
+        if let Some(engine) = self.reusable_worker_engine()? {
+            return Ok((engine, self.worker_standby()));
+        }
         {
             let activity = self.activity.lock().unwrap();
             if activity.0 != 0 || self.slots.in_use() {
@@ -522,8 +561,7 @@ impl Local {
             self.stop();
         }
         let endpoint = self.load_engine(install, true).await?;
-        self.activity.lock().unwrap().1 = Instant::now();
-        Ok(WorkerEngine(endpoint))
+        Ok((WorkerEngine(endpoint), self.worker_standby()))
     }
 
     async fn load_engine(
@@ -1339,6 +1377,37 @@ mod tests {
         let stale = WorkerEngine(Endpoint::new(12345, "mock-old".into()));
         assert!(local.try_worker_slot(&stale).is_none());
         assert!(local.try_worker_slot(&current).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standby_preserves_verified_engine_and_restarts_idle_clock_on_drop() {
+        let local = Local::new(
+            Settings {
+                idle_minutes: 1,
+                ..Settings::default()
+            },
+            true,
+        )
+        .unwrap();
+        *local.process.lock().unwrap() = Some(Process {
+            child: Command::new("/bin/sh")
+                .args(["-c", "exec sleep 10"])
+                .spawn()
+                .unwrap(),
+            endpoint: Endpoint::new(12345, "mock-current".into()),
+            worker_verified: true,
+        });
+        local.ready.store(true, Ordering::SeqCst);
+        let now = Instant::now();
+        local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
+        let standby = local.worker_standby();
+        assert!(!local.release_if_idle(now));
+        drop(standby);
+        let last = local.activity.lock().unwrap().1;
+        assert!(last >= now);
+        assert!(!local.release_if_idle(last + Duration::from_secs(59)));
+        assert!(local.release_if_idle(last + Duration::from_secs(60)));
     }
 
     #[test]
