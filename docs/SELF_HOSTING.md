@@ -178,7 +178,7 @@ Pythonサービスとコンテナはどちらか一方を使います。
 
 | 環境変数                            | 既定                                          | 意味                                             |
 | ----------------------------------- | --------------------------------------------- | ------------------------------------------------ |
-| `TR_UPSTREAM_URL`                   | (必須)                                        | 翻訳エンジン (llama-server) の `/v1/completions` |
+| `TR_UPSTREAM_URL`                   | (`TR_UPSTREAMS` が空なら必須)                                        | 翻訳エンジン (llama-server) の `/v1/completions` |
 | `TR_API_KEY`                        | 空                                            | 翻訳エンジンに付ける `Authorization: Bearer`     |
 | `TR_MODEL` | `plamo-3-translate` | 翻訳エンジンに渡すモデル名 |
 | `TR_LISTEN_HOST` / `TR_LISTEN_PORT` | `127.0.0.1` / `8002` (コンテナでは `0.0.0.0`) | 待ち受け                                         |
@@ -186,6 +186,8 @@ Pythonサービスとコンテナはどちらか一方を使います。
 | `TR_MAX_PROMPT_CHARS`               | 12000                                         | 文脈・前の訳・用語集を合わせた上限 (文字)        |
 | `TR_MAX_GLOSSARY` | 200 | 用語集の組数の上限 |
 | `TR_MAX_ACTIVE_PER_USER`            | 2                                             | 1 人が同時に流せる翻訳の数                       |
+| `TR_UPSTREAMS` | 空 | 複数エンジンのJSON配列。例: `[{"url":"http://127.0.0.1:8080/v1/completions","slots":2}]`。各 `slots` は1〜1000 |
+| `TR_UPSTREAM_SLOTS` | 4 | `TR_UPSTREAMS` が空のときの実行枠。1〜1000の整数。エンジンの並列数より多い分はエンジン側で待つ。`TR_UPSTREAMS` 指定時は使用・検証しない |
 | `TR_UPSTREAM_TIMEOUT` | 600 | 翻訳エンジンとの通信タイムアウト（秒） |
 | `TR_HEARTBEAT_SECONDS` | 15 | SSEのハートビート間隔（秒） |
 | `TR_USERINFO_URL` | 空 | IdPのuserinfo。`X-Forwarded-User` が無く前段が検証したBearerだけがあるとき、ここから `preferred_username` を引く（access tokenにユーザー名が入らないIdP向け。[かんたん構築ガイド](SELF_HOSTING_COMPOSE.md)） |
