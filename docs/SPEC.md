@@ -225,6 +225,39 @@ IPは `TR_CLIENT_IP_HEADER` の値だけから取り、IPv4 /24・IPv6 /48にま
 `TR_COUNTRY_HEADER` と `TR_ALLOWED_COUNTRIES`（カンマ区切り、例 `JP`）で受ける国を制限する。
 一覧が空なら無効。一覧がある場合は国ヘッダーも必須で、欠落・対象外の要求は全パスで403、`code: "region"`。
 
+### 5.1.2 ワーカーの登録と通信（準備段階）
+
+`TR_STATE_FILE` と `TR_WORKER_MODEL_SHA256` を指定した場合、次のAPIを有効にする。
+未設定なら404。直結プールの翻訳をワーカーへ渡す経路はなく、ボランティア枠の起動も引き続き断る。
+試用・検疫の判定、利用者ジョブとの接続と分散、クライアント画面は未実装。
+現時点のポーリングは割り当てなしで204を返す。通信の試験では内部経路から合成の確認用ジョブを流す。
+
+| API | 認証・動き |
+| --- | --- |
+| `POST /api/worker/register` | 前段のOIDCヘッダー必須。`{"terms_version":1}` を送り、`worker_id`・`secret`・`expires_in:604800` を返す。秘密は一度だけ返す |
+| `POST /api/worker/renew` | 所有者のOIDC必須。`{"worker_id":"..."}` を送り、有効期限を現在から7日後へ延長。秘密は変えず再送しない |
+| `GET /api/worker/mine` | 所有者のOIDC必須。`{"workers":[{"worker_id":"...","state":"probation","expires_at":1234567890}]}` を返す |
+| `DELETE /api/worker/<worker_id>` | 所有者のOIDC必須。登録を削除し `{"deleted":true}`。最後の端末の削除時は同意の記録も削除する |
+| `POST /api/worker/poll` | ワーカーのBearer資格必須。`agent_version` と `model`（モデルのSHA-256）を確認し、最大25秒待つ。空なら204。同時ポーリングと実行中の再ポーリングは409 |
+| `POST /api/worker/result` | ワーカーのBearer資格必須。割り当てID・連番・断片・終了を受ける。通信の詳細はボランティア仕様9章 |
+| `POST /api/worker/ping` | ワーカーのBearer資格必須。`{"active":["割り当てID"]}`（最大1件）に `{"stop":["停止するID"]}` を返す |
+
+管理APIでは `X-Forwarded-User` だけを受け、匿名資格やワーカー資格だけでは登録・更新・解除できない。
+ワーカー資格は `ptw_` と256bitの乱数（小文字16進数）。利用者のAPIには使えず、userinfoにも送らない。
+1所有者2台（`TR_WORKERS_PER_OWNER`）、規約の版は1。新規登録は `probation`（試用）から始める。
+状態は試用・検疫 (`quarantine`)・失効 (`revoked`)。合格数はまだ扱わず、利用者ジョブを受ける状態へは移行しない。
+
+資格のSHA-256・所有者・期限・状態、所有者の規約の版と同意日（UTCの日）だけをSQLiteに保存する。
+POSIXでは親ディレクトリは0700、ファイルは所有者本人の0600とし、シンボリックリンクと通常ファイル以外を断る。
+資格そのもの、割り当てID、入力・訳、IPは保存・記録しない。失効・検疫は再起動後も維持する。
+運営向けの内部処理で端末の状態変更と所有者の失効ができる。所有者の失効では端末を削除し、所有者名と失効状態だけ残す。
+運営用のHTTP APIは追加しない。
+
+`TR_WORKER_MODEL_SHA256` は承認するモデルの小文字16進数64桁。`TR_MIN_AGENT_VERSION` は数値3つの版で、
+空なら `0.0.0`。SHA-256と版の申告は信用の根拠にせず、検査の実装を省略しない。
+ワーカー向けPOSTはJSON・本文64KiBまで。割り当てを持つワーカーの不正な本文は、その割り当ても失敗にする。
+全APIに国の制限を適用する。CORSやOPTIONSへの対応は追加しない。
+
 ### 5.2 `POST /api/translate`
 
 要求 (`Content-Type: application/json` が必須。ほかは 415):

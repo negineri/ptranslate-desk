@@ -35,6 +35,8 @@ import select
 import signal
 import socket
 import socketserver
+import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -70,6 +72,10 @@ QUEUE_TIMEOUT = env_int("TR_QUEUE_TIMEOUT", 120)
 AGING_SECONDS = env_int("TR_AGING_SECONDS", 30)
 MAX_QUEUE = env_int("TR_MAX_QUEUE", 256)
 MAX_OPEN_REQUESTS = env_int("TR_MAX_OPEN_REQUESTS", 1000)
+STATE_FILE = os.environ.get("TR_STATE_FILE", "")
+WORKERS_PER_OWNER = env_int("TR_WORKERS_PER_OWNER", 2)
+WORKER_MODEL_SHA256 = os.environ.get("TR_WORKER_MODEL_SHA256", "")
+MIN_AGENT_VERSION = os.environ.get("TR_MIN_AGENT_VERSION", "")
 API_KEY = os.environ.get("TR_API_KEY", "")
 MODEL = os.environ.get("TR_MODEL", "plamo-3-translate")
 # 1 回 (1 区切り) の原文の上限 (文字)。PLaMo のコンテキスト (16K トークン) は原文と訳の
@@ -685,6 +691,25 @@ def upstream_stream(
 
 
 class TranslationHTTPServer(ThreadingHTTPServer):
+    def get_workers(self):
+        with self.worker_lock:
+            if self.workers is None:
+                if not STATE_FILE:
+                    raise HttpError(404, "ワーカーの登録は無効です")
+                registry = WorkerRegistry(STATE_FILE, WORKERS_PER_OWNER)
+                try:
+                    self.workers = WorkerHub(registry, WORKER_MODEL_SHA256, MIN_AGENT_VERSION)
+                except Exception:
+                    registry.close()
+                    raise
+            return self.workers
+
+    def server_close(self):
+        super().server_close()
+        if self.workers is not None:
+            self.workers.close()
+            self.workers = None
+
     def process_request(self, request, client_address):
         if not self.open_requests.acquire(blocking=False):
             try:
@@ -747,6 +772,8 @@ class TranslationHTTPServer(ThreadingHTTPServer):
             return self.pool
 
     def server_bind(self):
+        self.worker_lock = threading.Lock()
+        self.workers = None
         if MAX_OPEN_REQUESTS <= 0:
             raise ValueError("TR_MAX_OPEN_REQUESTS は正の整数にしてください")
         self.open_requests = threading.BoundedSemaphore(MAX_OPEN_REQUESTS)
@@ -773,6 +800,8 @@ class Handler(BaseHTTPRequestHandler):
         self.tier = "registered"
         scheme, _, token = self.headers.get("Authorization", "").partition(" ")
         token = token.strip()
+        if scheme.lower() == "bearer" and token.startswith("ptw_"):
+            raise HttpError(401, "ワーカーの資格では利用できません")
         if not user and scheme.lower() == "bearer" and token.startswith("pta_"):
             self.tier = "anonymous"
             return verify_anonymous(token)
@@ -865,7 +894,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def read_json_body(self) -> dict:
+    def read_json_body(self, max_bytes=None) -> dict:
         if (
             self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
             != "application/json"
@@ -879,7 +908,7 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0 or self.headers.get("Transfer-Encoding"):
             raise HttpError(400, "要求の長さが不正です")
         limit = (MAX_PROMPT_CHARS + MAX_CHARS * 4) * 4 + 64 * 1024
-        if length > limit:
+        if length > (limit if max_bytes is None else max_bytes):
             raise HttpError(413, "リクエストが大きすぎます")
         try:
             data = json.loads(self.rfile.read(length) or b"{}")
@@ -904,6 +933,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_static("favicon.ico", "image/vnd.microsoft.icon")
             if not path.startswith("/api/"):
                 raise HttpError(404, "Not found")
+            if path.startswith("/api/worker/"):
+                return self.worker_api(method, path)
             if method == "POST" and path == "/api/anonymous":
                 return self.issue_anonymous()
             user = self.user()
@@ -949,6 +980,12 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/anonymous",
                     "/api/config",
                     "/api/translate",
+                    "/api/worker/register",
+                    "/api/worker/renew",
+                    "/api/worker/mine",
+                    "/api/worker/poll",
+                    "/api/worker/result",
+                    "/api/worker/ping",
                 )
                 else "<unknown>"
             )
@@ -963,6 +1000,61 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.dispatch("POST")
+
+    def do_DELETE(self):
+        self.dispatch("DELETE")
+
+    def worker_api(self, method, path):
+        hub = self.server.get_workers()
+        if method == "POST" and path in (
+            "/api/worker/poll",
+            "/api/worker/result",
+            "/api/worker/ping",
+        ):
+            scheme, _, secret = self.headers.get("Authorization", "").partition(" ")
+            if scheme.lower() != "bearer":
+                raise HttpError(401, "ワーカーの資格が必要です")
+            worker = hub.valid(secret)
+            try:
+                body = self.read_json_body(max_bytes=65536)
+            except HttpError:
+                with hub.condition:
+                    for aid, assignment in list(hub.assignments.items()):
+                        if assignment["worker"] == worker["id"]:
+                            hub._fail(aid)
+                raise
+            if path == "/api/worker/poll":
+                result = hub.poll(secret, body, self.client_network(), self.client_disconnected)
+                if result is None:
+                    self.send_response(204)
+                    self.send_header("Cache-Control", "private, no-store")
+                    self.end_headers()
+                    return
+            elif path == "/api/worker/result":
+                result = hub.result(secret, body)
+            else:
+                result = hub.ping(secret, body)
+            return self.send_json(200, result)
+        # 管理APIは前段が検証したOIDCのヘッダーだけを受ける。
+        owner = self.headers.get("X-Forwarded-User", "")
+        if not USER_RE.fullmatch(owner):
+            raise HttpError(401, "アカウントへのログインが必要です")
+        if method == "POST" and path == "/api/worker/register":
+            body = self.read_json_body(max_bytes=65536)
+            if set(body) != {"terms_version"}:
+                raise HttpError(400, "参加の規約の版を指定してください")
+            return self.send_json(200, hub.registry.register(owner, body["terms_version"]))
+        if method == "POST" and path == "/api/worker/renew":
+            body = self.read_json_body(max_bytes=65536)
+            if set(body) != {"worker_id"} or not isinstance(body["worker_id"], str):
+                raise HttpError(400, "ワーカーを指定してください")
+            return self.send_json(200, hub.registry.renew(owner, body["worker_id"]))
+        if method == "GET" and path == "/api/worker/mine":
+            return self.send_json(200, {"workers": hub.registry.mine(owner)})
+        if method == "DELETE" and re.fullmatch(r"/api/worker/[0-9a-f]{32}", path):
+            hub.registry.delete(owner, path.rsplit("/", 1)[1])
+            return self.send_json(200, {"deleted": True})
+        raise HttpError(404, "Not found")
 
     def serve_static(self, filename: str, content_type: str) -> None:
         body = (STATIC_DIR / filename).read_bytes()
@@ -1097,6 +1189,417 @@ class Handler(BaseHTTPRequestHandler):
             )
 
 
+WORKER_TTL = 7 * 86400
+WORKER_TERMS_VERSION = 1
+
+
+class WorkerRegistry:
+    """ワーカーの資格のハッシュと参加同意だけを保存する。"""
+
+    def __init__(self, path, per_owner=2):
+        if per_owner <= 0:
+            raise ValueError("TR_WORKERS_PER_OWNER は正の整数にしてください")
+        path = Path(path)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.name != "nt" and (path.parent.stat().st_mode & 0o077):
+            raise ValueError("状態ファイルの親ディレクトリを0700にしてください")
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("状態ファイルは通常ファイルにしてください")
+            if os.name != "nt" and os.fstat(fd).st_uid != os.getuid():
+                raise ValueError("状態ファイルの所有者が違います")
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.lock = threading.RLock()
+        self.per_owner = per_owner
+        with self.db:
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS owners (name TEXT PRIMARY KEY, terms INTEGER, agreed TEXT, revoked INTEGER NOT NULL DEFAULT 0)"
+            )
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, owner TEXT NOT NULL, digest TEXT UNIQUE NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL)"
+            )
+
+    def register(self, owner, terms):
+        if type(terms) is not int or terms != WORKER_TERMS_VERSION:
+            raise HttpError(400, "参加の規約への同意が必要です")
+        with self.lock, self.db:
+            self.check_owner(owner)
+            if (
+                self.db.execute("SELECT count(*) FROM workers WHERE owner=?", (owner,)).fetchone()[
+                    0
+                ]
+                >= self.per_owner
+            ):
+                raise HttpError(429, "登録できる端末の数を超えています")
+            worker_id, secret = secrets.token_hex(16), "ptw_" + secrets.token_hex(32)
+            self.db.execute(
+                "INSERT INTO owners(name, terms, agreed) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET terms=excluded.terms, agreed=excluded.agreed",
+                (owner, terms, time.strftime("%Y-%m-%d", time.gmtime())),
+            )
+            self.db.execute(
+                "INSERT INTO workers VALUES(?,?,?,?,?)",
+                (
+                    worker_id,
+                    owner,
+                    hashlib.sha256(secret.encode()).hexdigest(),
+                    int(time.time()) + WORKER_TTL,
+                    "probation",
+                ),
+            )
+            return {"worker_id": worker_id, "secret": secret, "expires_in": WORKER_TTL}
+
+    def check_owner(self, owner):
+        row = self.db.execute("SELECT revoked FROM owners WHERE name=?", (owner,)).fetchone()
+        if row and row[0]:
+            raise HttpError(403, "この所有者は失効しています")
+
+    def authenticate(self, secret):
+        if not re.fullmatch(r"ptw_[0-9a-f]{64}", secret):
+            raise HttpError(401, "ワーカーの資格が無効です")
+        with self.lock:
+            row = self.db.execute(
+                "SELECT id,owner,expires,state FROM workers WHERE digest=?",
+                (hashlib.sha256(secret.encode()).hexdigest(),),
+            ).fetchone()
+            if not row or row[2] <= time.time() or row[3] == "revoked":
+                raise HttpError(401, "ワーカーの資格が無効です")
+            self.check_owner(row[1])
+            return {"id": row[0], "owner": row[1], "expires": row[2], "state": row[3]}
+
+    def owned(self, owner, worker_id):
+        self.check_owner(owner)
+        row = self.db.execute(
+            "SELECT state FROM workers WHERE id=? AND owner=?", (worker_id, owner)
+        ).fetchone()
+        if not row:
+            raise HttpError(404, "ワーカーが見つかりません")
+        return row[0]
+
+    def renew(self, owner, worker_id):
+        with self.lock, self.db:
+            if self.owned(owner, worker_id) == "revoked":
+                raise HttpError(403, "このワーカーは失効しています")
+            self.db.execute(
+                "UPDATE workers SET expires=? WHERE id=?",
+                (int(time.time()) + WORKER_TTL, worker_id),
+            )
+        return {"expires_in": WORKER_TTL}
+
+    def mine(self, owner):
+        with self.lock:
+            self.check_owner(owner)
+            return [
+                {"worker_id": row[0], "state": row[1], "expires_at": row[2]}
+                for row in self.db.execute(
+                    "SELECT id,state,expires FROM workers WHERE owner=? ORDER BY id", (owner,)
+                )
+            ]
+
+    def delete(self, owner, worker_id):
+        with self.lock, self.db:
+            self.owned(owner, worker_id)
+            self.db.execute("DELETE FROM workers WHERE id=?", (worker_id,))
+            if not self.db.execute("SELECT 1 FROM workers WHERE owner=?", (owner,)).fetchone():
+                self.db.execute("DELETE FROM owners WHERE name=? AND revoked=0", (owner,))
+
+    def set_state(self, worker_id, state):
+        if state not in ("probation", "quarantine", "revoked"):
+            raise ValueError("ワーカーの状態が不正です")
+        with self.lock, self.db:
+            self.db.execute("UPDATE workers SET state=? WHERE id=?", (state, worker_id))
+
+    def revoke_owner(self, owner):
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO owners(name,revoked) VALUES(?,1) ON CONFLICT(name) DO UPDATE SET terms=NULL,agreed=NULL,revoked=1",
+                (owner,),
+            )
+            self.db.execute("DELETE FROM workers WHERE owner=?", (owner,))
+
+    def close(self):
+        with self.lock:
+            self.db.close()
+
+
+def worker_input(req):
+    return {
+        "text": req["text"],
+        "target_lang": req["target"],
+        "source_lang": req["source"],
+        "form": req["form"],
+        "context": req["context"],
+        "glossary": [{"source": source, "target": target} for source, target in req["glossary"]],
+        "history": [{"source": source, "target": target} for source, target in req["history"]],
+    }
+
+
+class WorkerHub:
+    """通信プロトコルの土台。利用者のジョブとの接続は検査の実装後に行う。"""
+
+    def __init__(self, registry, model, minimum_version="0.0.0"):
+        if not re.fullmatch(r"[0-9a-f]{64}", model):
+            raise ValueError("TR_WORKER_MODEL_SHA256 にモデルのSHA-256を指定してください")
+        try:
+            self.minimum_version = self.version(minimum_version or "0.0.0")
+        except HttpError:
+            raise ValueError("TR_MIN_AGENT_VERSION は数値3つの版にしてください")
+        self.registry, self.model = registry, model
+        self.condition = threading.Condition()
+        self.polling = set()
+        self.ready = {}
+        self.deliveries = {}
+        self.assignments = {}
+        self.poll_seconds, self.first_seconds, self.deadline_seconds = 25, 20, 120
+        self.closed = False
+
+    @staticmethod
+    def version(value):
+        if not isinstance(value, str) or not re.fullmatch(
+            r"[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}", value
+        ):
+            raise HttpError(400, "エージェントの版が不正です")
+        return tuple(map(int, value.split(".")))
+
+    def valid(self, secret):
+        return self.registry.authenticate(secret)
+
+    def poll(self, secret, body, network, disconnected):
+        if set(body) != {"agent_version", "model"}:
+            raise HttpError(400, "ポーリングの項目が不正です")
+        if (
+            self.version(body["agent_version"]) < self.minimum_version
+            or body["model"] != self.model
+        ):
+            raise HttpError(403, "エージェントの版かモデルが対応していません")
+        worker = self.valid(secret)
+        wid = worker["id"]
+        with self.condition:
+            if wid in self.polling or any(a["worker"] == wid for a in self.assignments.values()):
+                raise HttpError(409, "このワーカーは既に処理中です")
+            self.polling.add(wid)
+            self.ready[wid] = (worker, network)
+            self.condition.notify_all()
+            deadline = time.monotonic() + self.poll_seconds
+            try:
+                while not self.closed and time.monotonic() < deadline:
+                    self.valid(secret)
+                    if disconnected():
+                        return None
+                    if wid in self.deliveries:
+                        return self.deliveries.pop(wid)
+                    self.condition.wait(0.1)
+                return None
+            finally:
+                self.polling.discard(wid)
+                self.ready.pop(wid, None)
+                delivery = self.deliveries.pop(wid, None)
+                if delivery:
+                    self._fail(delivery["assignment_id"])
+                self.condition.notify_all()
+
+    def _live(self, assignment):
+        now = time.monotonic()
+        return (
+            not self.closed
+            and now < assignment["deadline"]
+            and now - assignment["last"] < self.first_seconds
+        )
+
+    def _fail(self, assignment_id):
+        assignment = self.assignments.pop(assignment_id, None)
+        if assignment:
+            assignment["events"].put(("error", "worker_failed"))
+            self.condition.notify_all()
+
+    def execute_probe(self, req, events, cancel, timeout=120):
+        """モックと、後続の確認用ジョブのための経路。利用者APIからは呼ばない。"""
+        req = parse_request(worker_input(req))
+        excluded = set()
+        excluded_networks = set()
+        for attempt in range(2):
+            started = time.monotonic()
+            assignment_id = None
+            with self.condition:
+                while (
+                    not cancel.is_set() and not self.closed and time.monotonic() - started < timeout
+                ):
+                    candidates = [
+                        (wid, worker, network)
+                        for wid, (worker, network) in self.ready.items()
+                        if worker["owner"] not in excluded
+                        and (not network or network not in excluded_networks)
+                    ]
+                    if candidates:
+                        wid, worker, network = secrets.choice(candidates)
+                        excluded.add(worker["owner"])
+                        # 同じネットワークの別所有者も再割り当て先から除く。
+                        if network:
+                            excluded_networks.add(network)
+                        self.ready.pop(wid)
+                        assignment_id = secrets.token_hex(16)
+                        now = time.monotonic()
+                        self.assignments[assignment_id] = {
+                            "worker": wid,
+                            "deadline": now + self.deadline_seconds,
+                            "last": now,
+                            "seq": 0,
+                            "chars": 0,
+                            "tail": "",
+                            "limit": max_tokens(req["text"]) * 6,
+                            "events": queue.Queue(),
+                            "owner": worker["owner"],
+                        }
+                        self.deliveries[wid] = {
+                            "assignment_id": assignment_id,
+                            "deadline_seconds": self.deadline_seconds,
+                            "input": worker_input(req),
+                        }
+                        self.condition.notify_all()
+                        break
+                    self.condition.wait(0.1)
+            if not assignment_id:
+                if not cancel.is_set():
+                    events.put(("worker_failed", "翻訳ワーカーに接続できません"))
+                return
+            sent = False
+            try:
+                while not cancel.is_set():
+                    with self.condition:
+                        assignment = self.assignments.get(assignment_id)
+                        if not assignment:
+                            break
+                        if not self._live(assignment):
+                            self._fail(assignment_id)
+                            break
+                        result_queue = assignment["events"]
+                    try:
+                        kind, value = result_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+                    if cancel.is_set():
+                        return
+                    if kind == "error":
+                        break
+                    if kind == "text":
+                        sent = True
+                    events.put((kind, value))
+                    if kind == "done":
+                        return
+            finally:
+                with self.condition:
+                    self.assignments.pop(assignment_id, None)
+                    self.deliveries.pop(wid, None)
+                    self.condition.notify_all()
+            if cancel.is_set():
+                return
+            if sent or attempt:
+                events.put(("worker_failed", "翻訳ワーカーとの接続が途中で切れました"))
+                return
+
+    def result(self, secret, body):
+        worker = self.valid(secret)
+        aid = body.get("assignment_id")
+        if not isinstance(aid, str):
+            raise HttpError(400, "割り当てが不正です")
+        with self.condition:
+            assignment = self.assignments.get(aid)
+            if not assignment or assignment["worker"] != worker["id"]:
+                return {"stop": True}
+            if assignment.get("finished"):
+                return {"stop": True}
+            if not self._live(assignment):
+                self._fail(aid)
+                return {"stop": True}
+            seq = body.get("seq")
+            if type(seq) is not int or seq < 0:
+                self._fail(aid)
+                raise HttpError(400, "連番が不正です")
+            if seq < assignment["seq"]:
+                return {"stop": False}
+            if seq != assignment["seq"] or set(body) - {
+                "assignment_id",
+                "seq",
+                "text",
+                "done",
+                "finish",
+                "error",
+            }:
+                self._fail(aid)
+                raise HttpError(400, "結果の項目か連番が不正です")
+            text = body.get("text", "")
+            done = body.get("done", False)
+            if (
+                not isinstance(text, str)
+                or type(done) is not bool
+                or RESERVED in assignment["tail"] + text
+                or any(0xD800 <= ord(c) <= 0xDFFF for c in text)
+                or assignment["chars"] + len(text) > assignment["limit"]
+                or (done and body.get("finish") not in ("stop", "length"))
+                or ("error" in body and (body["error"] != "engine" or done or text))
+            ):
+                self._fail(aid)
+                raise HttpError(400, "結果の形式が不正です")
+            assignment["seq"] += 1
+            assignment["last"] = time.monotonic()
+            assignment["chars"] += len(text)
+            text = "".join(
+                c
+                for c in text
+                if (c in "\n\t" or ord(c) >= 32)
+                and not 127 <= ord(c) <= 159
+                and not 0x202A <= ord(c) <= 0x202E
+                and not 0x2066 <= ord(c) <= 0x2069
+            )
+            if RESERVED in assignment["tail"] + text:
+                self._fail(aid)
+                raise HttpError(400, "結果の形式が不正です")
+            assignment["tail"] = (assignment["tail"] + text)[-len(RESERVED) :]
+            if text:
+                assignment["events"].put(("text", text))
+            if done:
+                assignment["finished"] = True
+                assignment["events"].put(("done", body["finish"]))
+            elif "error" in body:
+                self._fail(aid)
+            return {"stop": False}
+
+    def ping(self, secret, body):
+        worker = self.valid(secret)
+        if (
+            set(body) != {"active"}
+            or not isinstance(body["active"], list)
+            or len(body["active"]) > 1
+            or any(not isinstance(a, str) or len(a) != 32 for a in body["active"])
+        ):
+            raise HttpError(400, "実行中の割り当てが不正です")
+        with self.condition:
+            stop = []
+            for aid in body["active"]:
+                assignment = self.assignments.get(aid)
+                if (
+                    not assignment
+                    or assignment["worker"] != worker["id"]
+                    or not self._live(assignment)
+                ):
+                    stop.append(aid)
+                    if assignment and assignment["worker"] == worker["id"]:
+                        self._fail(aid)
+            return {"stop": stop}
+
+    def close(self):
+        with self.condition:
+            self.closed = True
+            for aid in list(self.assignments):
+                self._fail(aid)
+            self.condition.notify_all()
+        self.registry.close()
+
+
 class JournalFormatter(logging.Formatter):
     """journald が優先度として読む <N> を行頭に付ける (SyslogLevelPrefix)。"""
 
@@ -1119,7 +1622,9 @@ def main() -> None:
     server = TranslationHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     try:
         pool = server.get_pool()
-    except (ValueError, TypeError) as error:
+        if STATE_FILE:
+            server.get_workers()
+    except (ValueError, TypeError, OSError, sqlite3.Error) as error:
         log.error("プールの設定が不正です: %s", error)
         server.server_close()
         sys.exit(2)
