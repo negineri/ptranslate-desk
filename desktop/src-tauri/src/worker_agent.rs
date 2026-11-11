@@ -39,6 +39,23 @@ struct Assignment {
     input: Value,
 }
 
+enum Poll {
+    Assigned(Assignment),
+    Idle(&'static str),
+}
+
+fn idle_status(response: &Response) -> &'static str {
+    if response
+        .headers()
+        .get("X-PTranslate-Worker-State")
+        .is_some_and(|value| value == "quarantine")
+    {
+        "quarantined"
+    } else {
+        "waiting"
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResultReply {
@@ -304,13 +321,13 @@ impl Agent {
             result = async {
                 let response = self.post("/api/worker/poll", &poll, Duration::from_secs(35)).await?;
                 match response.status() {
-                    StatusCode::NO_CONTENT => Ok(None),
-                    StatusCode::OK => json_body(response).await.map(Some),
+                    StatusCode::NO_CONTENT => Ok(Poll::Idle(idle_status(&response))),
+                    StatusCode::OK => json_body(response).await.map(Poll::Assigned),
                     _ => Err(()),
                 }
             } => match result? {
-                Some(assignment) => assignment,
-                None => return Ok("waiting"),
+                Poll::Assigned(assignment) => assignment,
+                Poll::Idle(status) => return Ok(status),
             }
         };
         let seq = AtomicU64::new(0);
@@ -486,6 +503,35 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_poll_reports_quarantine_header() {
+        use tokio::io::AsyncWriteExt;
+        let broker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut agent = Agent::new(Bootstrap {
+            broker: "https://example.com/".into(),
+            worker_secret: format!("ptw_{}", "a".repeat(64)),
+            model_sha256: "b".repeat(64),
+            agent_version: "0.5.0".into(),
+            engine_port: 1,
+            engine_secret: "mock".into(),
+        })
+        .ok()
+        .unwrap();
+        agent.broker = Url::parse(&format!("http://{}/", broker.local_addr().unwrap())).unwrap();
+        let (_parent, closed) = tokio::sync::oneshot::channel();
+        let serve = async {
+            let (mut socket, route, _) = mock_request(&broker).await;
+            assert_eq!(route, "/api/worker/poll");
+            socket.write_all(b"HTTP/1.1 204 No Content\r\nX-PTranslate-Worker-State: quarantine\r\nConnection: close\r\n\r\n").await.unwrap();
+        };
+        let (result, ()) = timeout(Duration::from_secs(5), async {
+            tokio::join!(agent.run(closed, std::future::ready(Err(()))), serve)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap(), "quarantined");
     }
 
     async fn mock_assignment(stop: bool, allowed: bool) {

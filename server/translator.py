@@ -1079,9 +1079,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise
             if path == "/api/worker/poll":
                 result = hub.poll(secret, body, self.client_network(), self.client_disconnected)
-                if result is None:
+                if result is None or isinstance(result, IdlePoll):
                     self.send_response(204)
                     self.send_header("Cache-Control", "private, no-store")
+                    if isinstance(result, IdlePoll) and result.quarantined:
+                        self.send_header("X-PTranslate-Worker-State", "quarantine")
                     self.end_headers()
                     return
             elif path == "/api/worker/result":
@@ -1510,6 +1512,11 @@ def worker_input(req):
     }
 
 
+@dataclass(frozen=True)
+class IdlePoll:
+    quarantined: bool
+
+
 class WorkerHub:
     """通信プロトコルの土台。利用者のジョブとの接続は検査の実装後に行う。"""
 
@@ -1588,8 +1595,12 @@ class WorkerHub:
                     if wid in self.revoked_workers or worker["owner"] in self.revoked_owners:
                         raise HttpError(401, "ワーカーの資格が無効です")
                     now = time.monotonic()
-                    if self.closed or now >= deadline or disconnected():
+                    if self.closed or disconnected():
                         return None
+                    if now >= deadline:
+                        return IdlePoll(
+                            worker["state"] == "quarantine" or worker["owner_quarantined"]
+                        )
                     if now < next_validation and time.time() < worker["expires"]:
                         delivery = self.deliveries.get(wid)
                         if delivery is None:

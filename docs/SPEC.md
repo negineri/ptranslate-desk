@@ -239,7 +239,7 @@ IPは `TR_CLIENT_IP_HEADER` の値だけから取り、IPv4 /24・IPv6 /48にま
 | `POST /api/worker/renew` | 所有者のOIDC必須。`{"worker_id":"..."}` を送り、有効期限を現在から7日後へ延長。秘密は変えず再送しない |
 | `GET /api/worker/mine` | 所有者のOIDC必須。`{"workers":[{"worker_id":"...","state":"probation","expires_at":1234567890}]}` を返す |
 | `DELETE /api/worker/<worker_id>` | 所有者のOIDC必須。登録を削除し `{"deleted":true}`。最後の端末の削除時は同意の記録も削除する |
-| `POST /api/worker/poll` | ワーカーのBearer資格必須。`agent_version` と `model`（モデルのSHA-256）を確認し、最大25秒待つ。空なら204。同時ポーリングと実行中の再ポーリングは409 |
+| `POST /api/worker/poll` | ワーカーのBearer資格必須。`agent_version` と `model`（モデルのSHA-256）を確認し、最大25秒待つ。空なら204。検疫中の空応答には `X-PTranslate-Worker-State: quarantine` を付ける。同時ポーリングと実行中の再ポーリングは409 |
 | `POST /api/worker/result` | ワーカーのBearer資格必須。割り当てID・連番・断片・終了を受ける。通信の詳細はボランティア仕様9章 |
 | `POST /api/worker/ping` | ワーカーのBearer資格必須。`{"active":["割り当てID"]}`（最大1件）に `{"stop":["停止するID"]}` を返す |
 

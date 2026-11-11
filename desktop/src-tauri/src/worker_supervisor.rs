@@ -25,6 +25,7 @@ pub(crate) enum Status {
     Completed,
     Waiting,
     Paused,
+    Quarantined,
     Error,
 }
 
@@ -53,6 +54,7 @@ enum Phase {
     Waiting,
     Working,
     Paused,
+    Quarantined,
     Error,
 }
 
@@ -71,6 +73,7 @@ impl Activity {
             }
             Ok(Status::Waiting) => Phase::Idle,
             Ok(Status::Paused) => Phase::Paused,
+            Ok(Status::Quarantined) => Phase::Quarantined,
             _ => Phase::Error,
         };
     }
@@ -354,7 +357,7 @@ async fn supervise<Permit>(
             let event: Update = serde_json::from_slice(&line).map_err(|_| ())?;
             match (last, event.status) {
                 (None, Status::Working) if permit.is_some() => update(Status::Working),
-                (None, Status::Waiting | Status::Paused | Status::Error)
+                (None, Status::Waiting | Status::Paused | Status::Quarantined | Status::Error)
                 | (Some(Status::Working), Status::Completed | Status::Paused | Status::Error) => {}
                 _ => return Err(()),
             }

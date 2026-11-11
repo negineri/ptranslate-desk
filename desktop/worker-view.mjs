@@ -50,7 +50,7 @@ const fields = [...form.querySelectorAll("input[name]")];
 const activityLine = panel.querySelector("#worker-activity");
 const phaseLabels = {
   idle: "停止中", starting: "準備中", waiting: "待機中",
-  working: "処理中", paused: "一時停止中", error: "処理を続けられませんでした",
+  working: "処理中", paused: "一時停止中", quarantined: "検疫中", error: "処理を続けられませんでした",
 };
 let activity;
 

@@ -1,5 +1,6 @@
 """ワーカーの登録と通信。実エンジンと本番にはつながない。"""
 
+import http.client
 import json
 import os
 import queue
@@ -55,6 +56,35 @@ class WorkerApiTest(unittest.TestCase):
         self.assertEqual(status, 200, data)
         self.workers.append(mock)
         return mock, data
+
+    def test_empty_poll_reports_quarantine_without_changing_204(self):
+        mock, worker = self.worker()
+        self.hub.poll_seconds = 0
+        for quarantined in (False, True):
+            if quarantined:
+                self.hub.registry.set_state(worker["worker_id"], "quarantine")
+            conn = http.client.HTTPConnection(mock.host, mock.port, timeout=5)
+            try:
+                conn.request(
+                    "POST",
+                    "/api/worker/poll",
+                    json.dumps({"model": MODEL, "agent_version": "0.5.0"}),
+                    {
+                        "Authorization": f"Bearer {mock.secret}",
+                        "Content-Type": "application/json",
+                        "X-Test-Country": "JP",
+                        "X-Test-IP": mock.network,
+                    },
+                )
+                response = conn.getresponse()
+                self.assertEqual(response.status, 204)
+                self.assertEqual(response.read(), b"")
+                self.assertEqual(
+                    response.getheader("X-PTranslate-Worker-State"),
+                    "quarantine" if quarantined else None,
+                )
+            finally:
+                conn.close()
 
     def run_thread(self, fn):
         result = queue.Queue()
