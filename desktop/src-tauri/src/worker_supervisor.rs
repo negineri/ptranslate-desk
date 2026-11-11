@@ -52,11 +52,10 @@ pub(crate) async fn run(
     stop: oneshot::Receiver<()>,
     update: impl FnMut(Status),
 ) -> Result<Status, ()> {
+    let local = app.state::<crate::local::Local>();
     let can_wait = || {
         crate::worker_power::external_power() == Some(true)
-            && !app
-                .state::<crate::local::Local>()
-                .has_translation_activity()
+            && !local.has_translation_activity()
             && !app
                 .state::<crate::Backend>()
                 .session
@@ -83,6 +82,7 @@ pub(crate) async fn run(
         LIFETIME,
         STOP_GRACE,
         can_wait,
+        || local.try_worker_slot(),
     )
     .await
 }
@@ -100,7 +100,7 @@ async fn read_line(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Result<Vec<u8
     Ok(line)
 }
 
-async fn supervise(
+async fn supervise<Permit>(
     command: &mut Command,
     input: Zeroizing<Vec<u8>>,
     mut stop: oneshot::Receiver<()>,
@@ -108,10 +108,13 @@ async fn supervise(
     lifetime: Duration,
     grace: Duration,
     mut can_wait: impl FnMut() -> bool,
+    reserve: impl FnOnce() -> Option<Permit>,
 ) -> Result<Status, ()> {
     let mut child = command.kill_on_drop(true).spawn().map_err(|_| ())?;
     let mut stdin = child.stdin.take().ok_or(())?;
     let stdout = child.stdout.take().ok_or(())?;
+    // 子の停止・回収まで保持する。停止要求で work が中断されても先に枠を返さない。
+    let mut permit = None;
     let work = async {
         let mut reader = BufReader::new(stdout);
         if timeout(STARTUP_TIMEOUT, read_line(&mut reader))
@@ -128,14 +131,14 @@ async fn supervise(
         stdin.flush().await.map_err(|_| ())?;
         drop(input);
         let mut last = None;
-        let mut granted = false;
+        let mut reserve = Some(reserve);
         let mut admission_check = tokio::time::interval_at(
             tokio::time::Instant::now() + ADMISSION_CHECK_INTERVAL,
             ADMISSION_CHECK_INTERVAL,
         );
         admission_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let line = if !granted && last.is_none() {
+            let line = if permit.is_none() && last.is_none() {
                 // 同じ読み取りを保持し、受付条件の確認のたびに途中の通知を捨てない。
                 let pending = read_line(&mut reader);
                 tokio::pin!(pending);
@@ -160,20 +163,23 @@ async fn supervise(
                 };
             }
             if line == ASSIGNED_LINE {
-                if granted || last.is_some() {
+                if permit.is_some() || last.is_some() {
                     return Err(());
                 }
                 if !can_wait() {
                     return Ok(Status::Paused);
                 }
+                permit = reserve.take().ok_or(())?();
+                if permit.is_none() {
+                    return Ok(Status::Paused);
+                }
                 stdin.write_all(START_COMMAND).await.map_err(|_| ())?;
                 stdin.flush().await.map_err(|_| ())?;
-                granted = true;
                 continue;
             }
             let event: Update = serde_json::from_slice(&line).map_err(|_| ())?;
             match (last, event.status) {
-                (None, Status::Working) if granted => update(Status::Working),
+                (None, Status::Working) if permit.is_some() => update(Status::Working),
                 (None, Status::Waiting | Status::Paused | Status::Error)
                 | (Some(Status::Working), Status::Completed | Status::Paused | Status::Error) => {}
                 _ => return Err(()),
@@ -237,6 +243,7 @@ mod tests {
             Duration::from_secs(2),
             Duration::from_millis(200),
             can_wait,
+            || Some(()),
         )
         .await
     }
@@ -289,6 +296,7 @@ mod tests {
                     Duration::from_secs(2),
                     Duration::from_millis(200),
                     || powered,
+                    || Some(()),
                 )
                 .await,
                 expected

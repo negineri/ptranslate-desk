@@ -24,6 +24,9 @@ impl Slots {
     pub fn limit(&self) -> usize {
         self.state.lock().unwrap().limit
     }
+    pub fn in_use(&self) -> bool {
+        self.state.lock().unwrap().active != 0
+    }
     pub fn resize(&self, limit: usize) {
         assert!((1..=MAX_PARALLEL).contains(&limit));
         self.state.lock().unwrap().limit = limit;
@@ -44,7 +47,7 @@ impl Slots {
             changed.await;
         }
     }
-    #[cfg(test)]
+    // 待機中のローカル翻訳があれば、ワーカーは順番を追い越さない。
     pub fn try_acquire(&self) -> Result<Permit<'_>, ()> {
         let _turn = self.turn.try_lock().map_err(|_| ())?;
         let mut state = self.state.lock().unwrap();

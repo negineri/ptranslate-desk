@@ -151,6 +151,17 @@ impl Operation {
         }
     }
 }
+pub(crate) struct WorkerSlot<'a> {
+    local: &'a Local,
+    _permit: parallel::Permit<'a>,
+}
+
+impl Drop for WorkerSlot<'_> {
+    fn drop(&mut self) {
+        self.local.activity.lock().unwrap().1 = Instant::now();
+    }
+}
+
 struct Lease<'a>(&'a Local);
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
@@ -312,6 +323,16 @@ impl Local {
     pub(crate) fn has_translation_activity(&self) -> bool {
         self.activity.lock().unwrap().0 != 0
     }
+    pub(crate) fn try_worker_slot(&self) -> Option<WorkerSlot<'_>> {
+        let activity = self.activity.lock().unwrap();
+        if activity.0 != 0 || !self.ready.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(WorkerSlot {
+            local: self,
+            _permit: self.slots.try_acquire().ok()?,
+        })
+    }
     fn lease(&self) -> Lease<'_> {
         let mut activity = self.activity.lock().unwrap();
         activity.0 += 1;
@@ -334,12 +355,14 @@ impl Local {
         // 判定から停止まで同じロックを保持し、新しい要求のlease取得との隙間をなくす。
         // leaseは実行枠の待機前に取得するため、拡張を含む待機中の要求も保護する。
         let activity = self.activity.lock().unwrap();
-        if !should_release(
-            activity.0,
-            activity.1,
-            now,
-            self.settings.lock().unwrap().idle_minutes,
-        ) {
+        if self.slots.in_use()
+            || !should_release(
+                activity.0,
+                activity.1,
+                now,
+                self.settings.lock().unwrap().idle_minutes,
+            )
+        {
             return false;
         }
         self.stop();
@@ -1132,6 +1155,33 @@ mod tests {
         assert!(local.ready.load(Ordering::SeqCst));
         assert!(local.release_if_idle(last + Duration::from_secs(60)));
         assert!(!local.ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn worker_slot_protects_the_engine_without_counting_as_own_translation() {
+        let local = Local::new(
+            Settings {
+                enabled: true,
+                auto_release: true,
+                idle_minutes: 1,
+                ..Settings::default()
+            },
+            true,
+        )
+        .unwrap();
+        local.ready.store(true, Ordering::SeqCst);
+        let now = Instant::now();
+        local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
+        let own = local.lease();
+        assert!(local.try_worker_slot().is_none());
+        drop(own);
+        local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
+        let worker = local.try_worker_slot().unwrap();
+        assert!(!local.has_translation_activity());
+        assert!(!local.release_if_idle(now));
+        drop(worker);
+        assert_eq!(local.slots.available_permits(), local.slots.limit());
+        assert!(!local.release_if_idle(Instant::now()));
     }
 
     #[test]
