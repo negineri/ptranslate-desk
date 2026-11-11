@@ -27,6 +27,8 @@ import ipaddress
 import secrets
 import http.client
 import json
+import itertools
+import math
 import logging
 import os
 import queue
@@ -45,7 +47,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import dataclass
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 from http.cookies import SimpleCookie
 
@@ -70,6 +72,9 @@ CLIENT_IP_HEADER = os.environ.get("TR_CLIENT_IP_HEADER", "")
 COUNTRY_HEADER = os.environ.get("TR_COUNTRY_HEADER", "")
 ALLOWED_COUNTRIES = frozenset(os.environ.get("TR_ALLOWED_COUNTRIES", "").split(",")) - {""}
 POOL_KIND = os.environ.get("TR_POOL_KIND", "direct")
+CONSENT_VERSION = 1
+SPREAD_WINDOW = os.environ.get("TR_SPREAD_WINDOW", "8")
+OWNER_SHARE_MAX = os.environ.get("TR_OWNER_SHARE_MAX", "0.2")
 QUEUE_TIMEOUT = env_int("TR_QUEUE_TIMEOUT", 120)
 AGING_SECONDS = env_int("TR_AGING_SECONDS", 30)
 MAX_QUEUE = env_int("TR_MAX_QUEUE", 256)
@@ -432,6 +437,7 @@ class Job:
     created: float
     tier: str = "registered"
     network: str = ""
+    group: str | None = None
 
 
 class DirectPool:
@@ -519,25 +525,26 @@ class DirectPool:
                     )
                     self.free[index] -= 1
                     self.cursor = (index + 1) % len(self.free)
-                    rank = max(
-                        0,
-                        PURPOSES.index(job.purpose) - int(now - job.created > self.aging),
-                    )
-                    self.tier_turn[rank] = (self.tier_turn.get(rank, 0) + 1) % 5
-                    turns = self.turns[(rank, job.tier)]
-                    if job.tier == "anonymous":
-                        self.anonymous_running += 1
-                        if job.network:
-                            self.network_running[job.network] = (
-                                self.network_running.get(job.network, 0) + 1
-                            )
-                    turns.remove(job.user)
-                    turns.append(job.user)
-                    if job.purpose != "interactive":
-                        self.pages.add(job.user)
-                    self._remove(job)
+                    self._begin(job, now)
                     return index
                 self.condition.wait(0.1)
+
+    def _begin(self, job, now):
+        rank = max(
+            0,
+            PURPOSES.index(job.purpose) - int(now - job.created > self.aging),
+        )
+        self.tier_turn[rank] = (self.tier_turn.get(rank, 0) + 1) % 5
+        turns = self.turns[(rank, job.tier)]
+        if job.tier == "anonymous":
+            self.anonymous_running += 1
+            if job.network:
+                self.network_running[job.network] = self.network_running.get(job.network, 0) + 1
+        turns.remove(job.user)
+        turns.append(job.user)
+        if job.purpose != "interactive":
+            self.pages.add(job.user)
+        self._remove(job)
 
     def _remove(self, job):
         self.waiting.remove(job)
@@ -546,15 +553,18 @@ class DirectPool:
     def release(self, job, index):
         with self.condition:
             self.free[index] += 1
-            if job.tier == "anonymous":
-                self.anonymous_running -= 1
-                if job.network:
-                    self.network_running[job.network] -= 1
-                    if not self.network_running[job.network]:
-                        del self.network_running[job.network]
-            if job.purpose != "interactive":
-                self.pages.discard(job.user)
-            self.condition.notify_all()
+            self._end(job)
+
+    def _end(self, job):
+        if job.tier == "anonymous":
+            self.anonymous_running -= 1
+            if job.network:
+                self.network_running[job.network] -= 1
+                if not self.network_running[job.network]:
+                    del self.network_running[job.network]
+        if job.purpose != "interactive":
+            self.pages.discard(job.user)
+        self.condition.notify_all()
 
 
 class UpstreamCancellation:
@@ -729,6 +739,8 @@ class TranslationHTTPServer(ThreadingHTTPServer):
 
     def server_close(self):
         super().server_close()
+        if isinstance(getattr(self, "pool", None), VolunteerPool):
+            self.pool.close()
         if self.workers is not None:
             self.workers.close()
             self.workers = None
@@ -782,16 +794,32 @@ class TranslationHTTPServer(ThreadingHTTPServer):
                     raise ValueError("TR_ANON_SHARE は0より大きく1以下にしてください")
                 if ALLOWED_COUNTRIES and not COUNTRY_HEADER:
                     raise ValueError("国の制限には TR_COUNTRY_HEADER が必要です")
-                if POOL_KIND != "direct":
-                    raise ValueError("ボランティア枠はまだ実装していません")
                 if min(QUEUE_TIMEOUT, AGING_SECONDS, MAX_QUEUE) <= 0:
                     raise ValueError("待ち行列の設定は正の整数にしてください")
-                self.pool = DirectPool(
-                    parse_upstreams(UPSTREAMS, UPSTREAM_URL, UPSTREAM_SLOTS),
-                    QUEUE_TIMEOUT,
-                    AGING_SECONDS,
-                    MAX_QUEUE,
-                )
+                if POOL_KIND == "volunteer":
+                    if not (
+                        STATE_FILE
+                        and CANARY_FILE
+                        and AUDIT_UPSTREAMS
+                        and CLIENT_IP_HEADER
+                        and COUNTRY_HEADER
+                        and ALLOWED_COUNTRIES == {"JP"}
+                    ):
+                        raise ValueError(
+                            "ボランティア枠には検証・登録・日本限定の前段設定が必要です"
+                        )
+                    self.pool = VolunteerPool(
+                        self.get_workers(), QUEUE_TIMEOUT, AGING_SECONDS, MAX_QUEUE
+                    )
+                elif POOL_KIND == "direct":
+                    self.pool = DirectPool(
+                        parse_upstreams(UPSTREAMS, UPSTREAM_URL, UPSTREAM_SLOTS),
+                        QUEUE_TIMEOUT,
+                        AGING_SECONDS,
+                        MAX_QUEUE,
+                    )
+                else:
+                    raise ValueError("TR_POOL_KIND が不正です")
             return self.pool
 
     def server_bind(self):
@@ -966,7 +994,11 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     {
                         "user": "" if self.tier == "anonymous" else user,
-                        "pool": {"kind": "direct"},
+                        "pool": (
+                            {"kind": "volunteer", "consent_version": CONSENT_VERSION}
+                            if POOL_KIND == "volunteer"
+                            else {"kind": "direct"}
+                        ),
                         "tier": self.tier,
                         "languages": [{"code": c, "name": n} for c, n in LANGUAGES],
                         "max_chars": MAX_CHARS,
@@ -1112,6 +1144,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def translate(self, user: str) -> None:
         body = self.read_json_body()
+        if POOL_KIND == "volunteer" and (
+            type(body.get("consent")) is not int or body["consent"] != CONSENT_VERSION
+        ):
+            raise HttpError(403, "ボランティア枠の利用には同意が必要です", "consent_required")
         purpose = body.get("purpose", "interactive")
         if purpose not in PURPOSES:
             raise HttpError(400, "purpose が不正です")
@@ -1122,6 +1158,7 @@ class Handler(BaseHTTPRequestHandler):
             raise HttpError(400, "group が不正です")
         req = parse_request(body)
         pool = self.server.get_pool()
+        volunteer = isinstance(pool, VolunteerPool)
         tier = getattr(self, "tier", "registered")
         network = self.client_network() if tier == "anonymous" else ""
         user_limit = 1 if tier == "anonymous" else MAX_ACTIVE_PER_USER
@@ -1136,6 +1173,7 @@ class Handler(BaseHTTPRequestHandler):
             job = pool.submit(user, purpose, tier, network)
             if job is None:
                 raise HttpError(503, "翻訳の待ち行列が一杯です", "busy")
+            job.group = group
             try:
                 counter = (
                     self.server.character_limits_anonymous
@@ -1153,11 +1191,18 @@ class Handler(BaseHTTPRequestHandler):
         started = time.monotonic()
         events: queue.Queue = queue.Queue()
         cancel = UpstreamCancellation()
-        worker = threading.Thread(
-            target=run_upstream_for_user,
-            args=(user, build_prompt(req), max_tokens(req["text"]), events, cancel, pool, job),
-            daemon=True,
-        )
+        assigned = []
+        translated = []
+        if volunteer:
+            worker = threading.Thread(
+                target=pool.translate, args=(job, req, events, cancel, assigned), daemon=True
+            )
+        else:
+            worker = threading.Thread(
+                target=run_upstream_for_user,
+                args=(user, build_prompt(req), max_tokens(req["text"]), events, cancel, pool, job),
+                daemon=True,
+            )
         try:
             worker.start()
         except Exception:
@@ -1191,33 +1236,45 @@ class Handler(BaseHTTPRequestHandler):
                 if kind == "text":
                     out_chars += len(value)
                     self.sse({"t": value})
+                    if volunteer:
+                        translated.append(value)
                     next_ping = time.monotonic() + HEARTBEAT_SECONDS
                 elif kind == "done":
                     finish = value
                     self.sse({"done": True, "finish": value})
+                    if volunteer and assigned and value == "stop":
+                        pool.after_delivery(assigned[-1], req, "".join(translated))
                     break
                 else:
                     self.sse(
-                        {"error": value, **({"code": kind} if kind == "queue_timeout" else {})}
+                        {
+                            "error": value,
+                            **(
+                                {"code": kind} if kind in ("queue_timeout", "worker_failed") else {}
+                            ),
+                        }
                     )
                     break
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             finish = "canceled"
         finally:
             cancel.set()
-            # 原文と訳は残さない (長さと言語だけ)
-            log.info(
-                "user=%s %s->%s chars=%d out=%d glossary=%d history=%d finish=%s seconds=%.1f",
-                "anonymous" if tier == "anonymous" else user,
-                req["source"] or "auto",
-                req["target"],
-                len(req["text"]),
-                out_chars,
-                len(req["glossary"]),
-                len(req["history"]),
-                finish,
-                time.monotonic() - started,
-            )
+            if volunteer:
+                pool.record_finish(job, finish)
+            else:
+                # 原文と訳は残さない (長さと言語だけ)
+                log.info(
+                    "user=%s %s->%s chars=%d out=%d glossary=%d history=%d finish=%s seconds=%.1f",
+                    "anonymous" if tier == "anonymous" else user,
+                    req["source"] or "auto",
+                    req["target"],
+                    len(req["text"]),
+                    out_chars,
+                    len(req["glossary"]),
+                    len(req["history"]),
+                    finish,
+                    time.monotonic() - started,
+                )
 
 
 WORKER_TTL = 7 * 86400
@@ -1521,6 +1578,7 @@ class WorkerHub:
             self.condition.notify_all()
         deadline = time.monotonic() + self.poll_seconds
         next_validation = time.monotonic() + 5
+        validated_delivery = None
         try:
             while True:
                 with self.condition:
@@ -1530,10 +1588,22 @@ class WorkerHub:
                     if self.closed or now >= deadline or disconnected():
                         return None
                     if now < next_validation and time.time() < worker["expires"]:
-                        if wid in self.deliveries:
+                        delivery = self.deliveries.get(wid)
+                        if delivery is None:
+                            self.condition.wait(min(0.1, next_validation - now, deadline - now))
+                            continue
+                        aid = delivery["assignment_id"]
+                        assignment = self.assignments.get(aid)
+                        if assignment is None:
+                            return None
+                        if not assignment["user_job"]:
                             return self.deliveries.pop(wid)
-                        self.condition.wait(min(0.1, next_validation - now, deadline - now))
-                        continue
+                        if validated_delivery == aid:
+                            if self.checks.health.eligible(worker):
+                                return self.deliveries.pop(wid)
+                            self._fail(aid)
+                            return None
+                        validated_delivery = aid
                 # SQLiteへはHubのロックを持たずに問い合わせる。
                 # 期限前の更新も取り込むため、資格の期限に達した場合も再確認する。
                 worker = self.valid(secret)
@@ -1565,13 +1635,26 @@ class WorkerHub:
             assignment["events"].put(("error", "worker_failed"))
             self.condition.notify_all()
 
-    def execute_probe(self, req, events, cancel, timeout=120, target_worker=None, attempts=2):
-        """モックと、後続の確認用ジョブのための経路。利用者APIからは呼ばない。"""
+    def execute_probe(
+        self,
+        req,
+        events,
+        cancel,
+        timeout=120,
+        target_worker=None,
+        attempts=2,
+        select_worker=None,
+        wait_started=None,
+        on_failure=None,
+    ):
+        """確認用ジョブと利用者ジョブで同じ割り当て形式を使う。"""
         req = parse_request(worker_input(req))
         excluded = set()
         excluded_networks = set()
         for attempt in range(attempts):
-            started = time.monotonic()
+            started = (
+                wait_started if attempt == 0 and wait_started is not None else time.monotonic()
+            )
             assignment_id = None
             with self.condition:
                 while (
@@ -1586,8 +1669,13 @@ class WorkerHub:
                         and (target_worker is None or wid == target_worker)
                         and (not network or network not in excluded_networks)
                     ]
-                    if candidates:
-                        wid, worker, network = secrets.choice(candidates)
+                    selected = (
+                        select_worker(candidates)
+                        if select_worker
+                        else (secrets.choice(candidates) if candidates else None)
+                    )
+                    if selected:
+                        wid, worker, network = selected
                         excluded.add(worker["owner"])
                         # 同じネットワークの別所有者も再割り当て先から除く。
                         if network:
@@ -1597,6 +1685,7 @@ class WorkerHub:
                         now = time.monotonic()
                         self.assignments[assignment_id] = {
                             "worker": wid,
+                            "user_job": select_worker is not None,
                             "deadline": now + self.deadline_seconds,
                             "last": now,
                             "seq": 0,
@@ -1605,6 +1694,7 @@ class WorkerHub:
                             "limit": max_tokens(req["text"]) * 6,
                             "events": queue.Queue(),
                             "owner": worker["owner"],
+                            "network": network,
                         }
                         assigned = self.assignments[assignment_id]
                         self.deliveries[wid] = {
@@ -1617,7 +1707,8 @@ class WorkerHub:
                     self.condition.wait(0.1)
             if not assignment_id:
                 if not cancel.is_set():
-                    events.put(("worker_failed", "翻訳ワーカーに接続できません"))
+                    kind = "queue_timeout" if select_worker and attempt == 0 else "worker_failed"
+                    events.put((kind, "翻訳ワーカーに接続できません"))
                 return "cancelled" if cancel.is_set() else "unavailable"
             sent = False
             try:
@@ -1650,6 +1741,8 @@ class WorkerHub:
                     self.condition.notify_all()
             if cancel.is_set():
                 return "cancelled"
+            if on_failure is not None:
+                on_failure(worker, assigned.get("failure", "worker_failed"))
             if sent or attempt == attempts - 1:
                 events.put(("worker_failed", "翻訳ワーカーとの接続が途中で切れました"))
                 return assigned.get("failure", "worker_failed")
@@ -2054,7 +2147,7 @@ class CanaryChecks:
     def sampled(rate):
         return secrets.randbits(53) / (1 << 53) < rate
 
-    def after_delivery(self, worker, req, translated):
+    def after_delivery(self, worker, req, translated, inspect_unsampled=False):
         """配信完了後に呼ぶ。検査の完了や待ち行列の空きを待たない。"""
         if self.cancel.is_set() or not self.health.eligible(worker):
             return False
@@ -2065,13 +2158,25 @@ class CanaryChecks:
                 return False
             if self.sampled(self.canary_rate):
                 self.due_canaries[wid] = generation
-            if not self.sampled(self.audit_rate):
-                return False
-            try:
-                self.audit_queue.put_nowait((wid, generation, req, translated))
-            except queue.Full:
-                return False
-            return True
+            if self.sampled(self.audit_rate):
+                try:
+                    self.audit_queue.put_nowait((wid, generation, req, translated))
+                    return True
+                except queue.Full:
+                    pass
+        if inspect_unsampled:
+            allowed = "\n".join(
+                [req["text"], *(value for pair in req["glossary"] for value in pair)]
+            )
+            passed = (
+                len(translated) <= max_tokens(req["text"]) * 6
+                and translation_links(translated) <= translation_links(allowed)
+                and matches_target_script(translated, req["target"])
+            )
+            current = self.hub.registry.info(wid)
+            if current["owner_generation"] == generation:
+                self.health.record(current, passed=passed, canary=False)
+        return False
 
     def run_audits(self):
         while not self.cancel.is_set():
@@ -2311,6 +2416,211 @@ class CanaryChecks:
             self.reserved.clear()
 
 
+class VolunteerPool(DirectPool):
+    """待ち行列を共用し、参加端末への割り当てだけを仲介する。"""
+
+    def __init__(self, hub, timeout, aging, max_queue):
+        super().__init__([], timeout, aging, max_queue)
+        self.hub = hub
+        self.condition = hub.condition
+        self.window = int(SPREAD_WINDOW)
+        self.owner_share = float(OWNER_SHARE_MAX)
+        if not (1 <= self.window <= 100 and 0 < self.owner_share <= 1):
+            raise ValueError("分散の設定が不正です")
+        self.history = deque()
+        self.running = set()
+        self.held = {}
+        self.stats = {}
+        self.degraded = False
+        self.closed = threading.Event()
+        self.reporter = threading.Thread(target=self.report_loop, daemon=True)
+        self.reporter.start()
+
+    def available(self, worker):
+        checks = self.hub.checks
+        with checks.lock:
+            return (
+                worker["expires"] > time.time()
+                and worker["id"] not in checks.busy_workers
+                and worker["id"] not in self.held
+                and not checks.needs_canary(worker)
+            )
+
+    def spread(self, job, candidates, online, now, previous_workers=()):
+        while self.history and self.history[0][0] <= now - 600:
+            self.history.popleft()
+        # 履歴を捨てて比率の上限を回避させない。
+        if len(self.history) >= 100000:
+            return None
+        parents = {}
+
+        def root(key):
+            while key in parents:
+                parent = parents[key]
+                if parent in parents:
+                    parents[key] = parents[parent]
+                key = parents.get(key, parent)
+            return key
+
+        def connect(owner, network):
+            if network:
+                left = root(("owner", owner))
+                right = root(("network", network))
+                if left != right:
+                    parents[right] = left
+
+        for _, _, _, owner, network in self.history:
+            connect(owner, network)
+        for owner, network in online:
+            connect(owner, network)
+
+        def owner_group(owner):
+            return root(("owner", owner))
+
+        owners = {owner_group(owner) for owner, _ in online}
+        count = len(owners)
+        limit = self.owner_share if count >= 5 else min(1, 1.5 / max(1, count))
+        maximum = math.ceil((len(self.history) + 1) * limit)
+        counts = Counter(owner_group(owner) for _, _, _, owner, _ in self.history)
+        excluded = {owner_group(worker["owner"]) for worker in previous_workers}
+        candidates = [
+            item
+            for item in candidates
+            if owner_group(item[1]["owner"]) not in excluded
+            and counts[owner_group(item[1]["owner"])] < maximum
+        ]
+        if not candidates:
+            return None
+
+        avoid = set()
+        previous = next((row for row in reversed(self.history) if row[1] == job.user), None)
+        if previous:
+            avoid.add(owner_group(previous[3]))
+        if job.group is not None:
+            recent = (
+                row for row in reversed(self.history) if row[1] == job.user and row[2] == job.group
+            )
+            for _, _, _, owner, _ in itertools.islice(recent, self.window):
+                avoid.add(owner_group(owner))
+        preferred = [item for item in candidates if owner_group(item[1]["owner"]) not in avoid]
+        selected = secrets.choice(preferred or candidates)
+        _, worker, network = selected
+        self.history.append((now, job.user, job.group, worker["owner"], network))
+        self.degraded |= count < 5
+        return selected
+
+    def choose(self, job, candidates, assigned):
+        # WorkerHub が condition を保持し、この選択と端末の確保を一緒に行う。
+        candidates = [item for item in candidates if self.available(item[1])]
+        if not candidates:
+            return None
+        now = time.monotonic()
+        ready = [
+            (worker["owner"], network)
+            for worker, network in self.hub.ready.values()
+            if self.available(worker)
+        ]
+        self.total_slots = len(ready) + len(self.running)
+        first = job not in self.running
+        if first and self._next(now) is not job:
+            return None
+        online = ready + [
+            (assignment["owner"], assignment["network"])
+            for assignment in self.hub.assignments.values()
+            if assignment["user_job"]
+        ]
+        selected = self.spread(job, candidates, online, now, assigned)
+        if selected is None:
+            return None
+        wid, worker, network = selected
+        if first:
+            self._begin(job, now)
+            self.running.add(job)
+            stats = self.stats.setdefault((job.tier, job.purpose), Counter())
+            stats["assigned"] += 1
+            stats["wait_ms"] += int((now - job.created) * 1000)
+        self.held[wid] = job
+        assigned.append(worker)
+        return selected
+
+    def translate(self, job, req, events, cancel, assigned):
+        try:
+            self.hub.execute_probe(
+                req,
+                events,
+                cancel,
+                timeout=self.timeout,
+                wait_started=job.created,
+                select_worker=lambda candidates: self.choose(job, candidates, assigned),
+                on_failure=self.note_worker_failure,
+            )
+        except Exception as error:
+            log.error("volunteer worker failed: %s", type(error).__name__)
+            events.put(("worker_failed", "翻訳ワーカーに接続できません"))
+        finally:
+            with self.condition:
+                if job in self.running:
+                    self.running.remove(job)
+                    self._end(job)
+                elif job in self.waiting:
+                    self._remove(job)
+            release_active(job.user, job.purpose)
+
+    def note_worker_failure(self, worker, reason):
+        try:
+            current = self.hub.registry.info(worker["id"])
+            if current["owner_generation"] == worker["owner_generation"]:
+                self.hub.checks.health.record(current, timed_out=reason == "timeout", canary=False)
+        except (HttpError, sqlite3.Error):
+            pass
+
+    def after_delivery(self, worker, req, translated):
+        try:
+            self.hub.checks.after_delivery(worker, req, translated, inspect_unsampled=True)
+        except Exception as error:
+            log.error("volunteer delivery check failed: %s", type(error).__name__)
+
+    def record_finish(self, job, finish):
+        with self.condition:
+            self.held = {wid: entry for wid, entry in self.held.items() if entry is not job}
+            stats = self.stats.setdefault((job.tier, job.purpose), Counter())
+            stats["count"] += 1
+            stats["errors"] += int(finish not in ("stop", "length", "canceled"))
+            stats["canceled"] += int(finish == "canceled")
+            self.condition.notify_all()
+
+    def report_loop(self):
+        while not self.closed.wait(60):
+            self.report()
+
+    def report(self):
+        with self.condition:
+            cutoff = time.monotonic() - 600
+            while self.history and self.history[0][0] <= cutoff:
+                self.history.popleft()
+            stats, self.stats = self.stats, {}
+            degraded, self.degraded = self.degraded, False
+        for (tier, purpose), counts in sorted(stats.items()):
+            log.info(
+                "volunteer tier=%s purpose=%s count=%d assigned=%d wait_ms_sum=%d errors=%d canceled=%d spread=%s",
+                tier,
+                purpose,
+                counts["count"],
+                counts["assigned"],
+                counts["wait_ms"],
+                counts["errors"],
+                counts["canceled"],
+                "degraded" if degraded else "normal",
+            )
+
+    def close(self):
+        self.closed.set()
+        self.reporter.join()
+        self.report()
+        with self.condition:
+            self.history.clear()
+
+
 class JournalFormatter(logging.Formatter):
     """journald が優先度として読む <N> を行頭に付ける (SyslogLevelPrefix)。"""
 
@@ -2325,7 +2635,7 @@ def main() -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JournalFormatter("%(message)s"))
     logging.basicConfig(level=logging.INFO, handlers=[handler])
-    if not UPSTREAM_URL and not UPSTREAMS:
+    if POOL_KIND == "direct" and not UPSTREAM_URL and not UPSTREAMS:
         log.error("TR_UPSTREAM_URL is not set")
         sys.exit(2)
     if not API_KEY:
@@ -2344,15 +2654,21 @@ def main() -> None:
         signal.SIGTERM,
         lambda *_: threading.Thread(target=server.shutdown, daemon=True).start(),
     )
-    log.info(
-        "listening on %s:%d engines=%d slots=%d startup_seconds=%.3f",
-        LISTEN_HOST,
-        server.server_port,
-        len(pool.urls),
-        sum(pool.free),
-        time.monotonic() - started,
-    )
-    server.serve_forever()
+    if POOL_KIND == "volunteer":
+        log.info("volunteer listening port=%d", server.server_port)
+    else:
+        log.info(
+            "listening on %s:%d engines=%d slots=%d startup_seconds=%.3f",
+            LISTEN_HOST,
+            server.server_port,
+            len(pool.urls),
+            sum(pool.free),
+            time.monotonic() - started,
+        )
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
