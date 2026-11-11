@@ -63,15 +63,27 @@ fn macos_available_mib(output: &str) -> Result<u64, String> {
             .next()?
             .parse()
             .ok()?;
-        // すぐに使える空きページだけを数え、スワップや非アクティブ領域を見込まない。
-        let free: u64 = output
-            .lines()
-            .find_map(|line| line.strip_prefix("Pages free:"))?
-            .trim()
-            .trim_end_matches('.')
-            .parse()
-            .ok()?;
-        Some(free.checked_mul(page_size)? / MIB)
+        // 空きページに、すぐ解放できる非アクティブ・先読み・破棄可能な領域を加える。
+        // スワップや圧縮された領域は見込まない。
+        let pages = |name: &str| -> Option<u64> {
+            output
+                .lines()
+                .find_map(|line| line.strip_prefix(name))?
+                .trim()
+                .trim_end_matches('.')
+                .parse()
+                .ok()
+        };
+        let mut available = pages("Pages free:")?;
+        for name in ["Pages inactive:", "Pages speculative:", "Pages purgeable:"] {
+            let count = if output.lines().any(|line| line.starts_with(name)) {
+                pages(name)?
+            } else {
+                0
+            };
+            available = available.checked_add(count)?;
+        }
+        Some(available.checked_mul(page_size)? / MIB)
     };
     parse().ok_or_else(|| "空きシステムメモリを確認できませんでした".into())
 }
@@ -182,6 +194,39 @@ mod tests {
             gpu_free_mib("Apple M5 Pro (38338 MiB, 38337 MiB free)"),
             Some(38337)
         );
-        assert_eq!(macos_available_mib("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 65536.\nPages inactive: 999999.").unwrap(), 1024);
+    }
+
+    #[test]
+    fn macos_counts_reclaimable_pages_when_free_is_small() {
+        let report = "Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               1024.
+Pages active:                           400000.
+Pages inactive:                         262144.
+Pages speculative:                        2048.
+Pages wired down:                       100000.
+Pages purgeable:                          4096.
+Pages occupied by compressor:           200000.
+";
+        assert_eq!(macos_available_mib(report).unwrap(), 4208);
+    }
+
+    #[test]
+    fn macos_accepts_missing_optional_counts_but_requires_free() {
+        let header = "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n";
+        assert_eq!(
+            macos_available_mib(&format!("{header}Pages free: 256.\n")).unwrap(),
+            1
+        );
+        assert_eq!(
+            macos_available_mib(&format!("{header}Pages free: 256.\nPages inactive: 512.\n"))
+                .unwrap(),
+            3
+        );
+        assert!(macos_available_mib(&format!("{header}Pages inactive: 512.\n")).is_err());
+        assert!(macos_available_mib(&format!("{header}Pages free: invalid.\n")).is_err());
+        assert!(macos_available_mib(&format!(
+            "{header}Pages free: 256.\nPages purgeable: invalid.\n"
+        ))
+        .is_err());
     }
 }

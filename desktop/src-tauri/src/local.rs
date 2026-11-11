@@ -1007,8 +1007,10 @@ fn probe_output(cmd: &mut Command) -> Result<String, String> {
         }
     };
     let started = Instant::now();
+    // macOSでは初回のMetal初期化を待つ。Windowsの待ち時間は維持する。
+    let timeout = Duration::from_secs(if cfg!(target_os = "macos") { 60 } else { 10 });
     while matches!(child.try_wait(), Ok(None)) {
-        if started.elapsed() >= Duration::from_secs(10) {
+        if started.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
             return Err("確認用の処理がタイムアウトしました".into());
