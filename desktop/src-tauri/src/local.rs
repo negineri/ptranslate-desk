@@ -308,6 +308,10 @@ impl Local {
     pub fn active(&self) -> bool {
         self.active.load(Ordering::SeqCst)
     }
+    // 実行枠を待っているローカル翻訳と Chrome 連携も含む。
+    pub(crate) fn has_translation_activity(&self) -> bool {
+        self.activity.lock().unwrap().0 != 0
+    }
     fn lease(&self) -> Lease<'_> {
         let mut activity = self.activity.lock().unwrap();
         activity.0 += 1;
@@ -1103,6 +1107,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
         received.await.unwrap();
+        assert!(local.has_translation_activity());
         let now = Instant::now();
         local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
         assert_eq!(local.activity.lock().unwrap().0, 2);
@@ -1115,6 +1120,7 @@ mod tests {
         // Port切断によるタスクの中止でもleaseと実行枠を返し、ここから未使用時間を数える。
         bridge.abort();
         assert!(bridge.await.unwrap_err().is_cancelled());
+        assert!(!local.has_translation_activity());
         let last = {
             let activity = local.activity.lock().unwrap();
             assert_eq!(activity.0, 0);

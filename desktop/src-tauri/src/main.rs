@@ -68,6 +68,12 @@ impl Request {
 }
 
 impl Session {
+    fn has_pending_translation(&self) -> bool {
+        self.requests
+            .values()
+            .any(|request| request.translation && !request.task.inner().is_finished())
+    }
+
     fn cancel_matching(&mut self, matches: impl Fn(&Request) -> bool) {
         let ids: Vec<_> = self
             .requests
@@ -740,9 +746,46 @@ fn main() {
 }
 
 #[cfg(test)]
-mod consent_tests {
+mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn only_pending_translation_requests_pause_worker_admission() {
+        let mut session = Session::default();
+        let request = |translation, task| Request {
+            owner: "main".into(),
+            translation,
+            local: false,
+            task,
+            stream: Channel::new(|_| Ok(())),
+        };
+        session.requests.insert(
+            "config".into(),
+            request(false, tauri::async_runtime::spawn(std::future::pending())),
+        );
+        assert!(!session.has_pending_translation());
+        let (finish, done) = tokio::sync::oneshot::channel();
+        session.requests.insert(
+            "translation".into(),
+            request(
+                true,
+                tauri::async_runtime::spawn(async move {
+                    let _ = done.await;
+                }),
+            ),
+        );
+        assert!(session.has_pending_translation());
+        finish.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while session.has_pending_translation() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        session.cancel_matching(|_| true);
+    }
 
     #[test]
     fn volunteer_translation_requires_the_current_origin_and_version() {

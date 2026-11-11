@@ -3,6 +3,7 @@
 use crate::worker_agent::{Bootstrap, ASSIGNED_LINE, READY_LINE, START_COMMAND};
 use serde::Deserialize;
 use std::{process::Stdio, time::Duration};
+use tauri::{AppHandle, Manager};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -12,7 +13,7 @@ use tokio::{
 use zeroize::Zeroizing;
 
 const LIFETIME: Duration = Duration::from_secs(170);
-const POWER_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+const ADMISSION_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_GRACE: Duration = Duration::from_secs(6);
 const MAX_LINE: usize = 64;
@@ -45,12 +46,25 @@ pub(crate) fn can_accept(
 
 /// commandのOS権限制限は呼び出し側で設定する。資格を引数や環境変数に入れない。
 pub(crate) async fn run(
+    app: &AppHandle,
     mut command: Command,
     config: &Bootstrap,
     stop: oneshot::Receiver<()>,
     update: impl FnMut(Status),
 ) -> Result<Status, ()> {
-    if crate::worker_power::external_power() != Some(true) {
+    let can_wait = || {
+        crate::worker_power::external_power() == Some(true)
+            && !app
+                .state::<crate::local::Local>()
+                .has_translation_activity()
+            && !app
+                .state::<crate::Backend>()
+                .session
+                .lock()
+                .unwrap()
+                .has_pending_translation()
+    };
+    if !can_wait() {
         return Ok(Status::Paused);
     }
     let mut input = Zeroizing::new(serde_json::to_vec(config).map_err(|_| ())?);
@@ -68,7 +82,7 @@ pub(crate) async fn run(
         update,
         LIFETIME,
         STOP_GRACE,
-        || crate::worker_power::external_power() == Some(true),
+        can_wait,
     )
     .await
 }
@@ -115,21 +129,21 @@ async fn supervise(
         drop(input);
         let mut last = None;
         let mut granted = false;
-        let mut power_check = tokio::time::interval_at(
-            tokio::time::Instant::now() + POWER_CHECK_INTERVAL,
-            POWER_CHECK_INTERVAL,
+        let mut admission_check = tokio::time::interval_at(
+            tokio::time::Instant::now() + ADMISSION_CHECK_INTERVAL,
+            ADMISSION_CHECK_INTERVAL,
         );
-        power_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        admission_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let line = if !granted && last.is_none() {
-                // 同じ読み取りを保持し、電源確認のたびに途中の通知を捨てない。
+                // 同じ読み取りを保持し、受付条件の確認のたびに途中の通知を捨てない。
                 let pending = read_line(&mut reader);
                 tokio::pin!(pending);
                 loop {
                     tokio::select! {
                         biased;
                         line = &mut pending => break line?,
-                        _ = power_check.tick() => {
+                        _ = admission_check.tick() => {
                             if !can_wait() {
                                 return Ok(Status::Paused);
                             }
@@ -314,7 +328,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn assignment_is_not_started_when_the_final_power_check_fails() {
+    async fn assignment_is_not_started_when_own_translation_arrives_before_permission() {
         let (_tx, rx) = oneshot::channel();
         let script = "printf '%s\\n' '{\"status\":\"ready\"}'; read config; printf '%s\\n' '{\"status\":\"assigned\"}'; if read permission; then exit 1; fi";
         let mut checks = 0;
@@ -325,7 +339,7 @@ mod tests {
                 |_| panic!("unexpected working status"),
                 || {
                     checks += 1;
-                    checks == 1
+                    can_accept(true, Some(true), usize::from(checks > 1), false)
                 }
             )
             .await,
