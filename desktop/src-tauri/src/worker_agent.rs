@@ -22,12 +22,15 @@ pub(crate) struct Bootstrap {
     pub(crate) agent_version: String,
     pub(crate) engine_port: u16,
     pub(crate) engine_secret: String,
+    pub(crate) relay_port: Option<u16>,
+    pub(crate) relay_secret: Option<String>,
 }
 
 impl Drop for Bootstrap {
     fn drop(&mut self) {
         self.worker_secret.zeroize();
         self.engine_secret.zeroize();
+        self.relay_secret.zeroize();
     }
 }
 
@@ -89,7 +92,7 @@ fn valid_version(value: &str) -> bool {
         })
 }
 
-fn broker_origin(value: &str) -> Result<Url> {
+pub(crate) fn broker_origin(value: &str) -> Result<Url> {
     let url = Url::parse(value).map_err(|_| ())?;
     if url.scheme() != "https"
         || url.host_str().is_none()
@@ -165,13 +168,22 @@ impl Agent {
         {
             return Err(());
         }
-        let client = Client::builder()
+        let mut client = Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(POST_TIMEOUT)
-            .read_timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|_| ())?;
+            .read_timeout(Duration::from_secs(30));
+        match (config.relay_port, config.relay_secret.as_deref()) {
+            (Some(port), Some(secret)) if port != 0 && !secret.is_empty() => {
+                let proxy = reqwest::Proxy::https(format!("http://127.0.0.1:{port}"))
+                    .map_err(|_| ())?
+                    .basic_auth(crate::worker_relay::PROXY_USER, secret);
+                client = client.proxy(proxy);
+            }
+            (None, None) if cfg!(test) => {}
+            _ => return Err(()),
+        }
+        let client = client.build().map_err(|_| ())?;
         Ok(Self {
             client,
             broker,
@@ -516,6 +528,8 @@ mod tests {
             agent_version: "0.5.0".into(),
             engine_port: 1,
             engine_secret: "mock".into(),
+            relay_port: None,
+            relay_secret: None,
         })
         .ok()
         .unwrap();
@@ -544,6 +558,8 @@ mod tests {
             agent_version: "0.5.0".into(),
             engine_port: engine.local_addr().unwrap().port(),
             engine_secret: "test-engine-secret".into(),
+            relay_port: None,
+            relay_secret: None,
         })
         .ok()
         .unwrap();

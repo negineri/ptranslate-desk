@@ -237,6 +237,11 @@ async fn run_one(
     if !can_wait() {
         return Ok(Status::Paused);
     }
+    let broker =
+        crate::worker_agent::broker_origin(&config.broker).map_err(|_| "提供先のURLが不正です")?;
+    let relay = crate::worker_relay::BrokerRelay::start(&broker).await?;
+    config.relay_port = Some(relay.port);
+    config.relay_secret = Some(relay.secret.as_str().to_owned());
     engine.configure(&mut config);
     let mut input = Zeroizing::new(
         serde_json::to_vec(&config).map_err(|_| "ワーカーの起動情報を作れませんでした")?,
