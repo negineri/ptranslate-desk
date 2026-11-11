@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""空き枠がある場合の最初の翻訳断片を、ローカルのモックだけで比較する。"""
+"""最初の翻訳断片を、ローカルのモックで直結とボランティア枠で比較する。"""
 
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import http.client
@@ -37,7 +38,7 @@ def serving(server):
         server.server_close()
 
 
-def first_fragment(server):
+def first_fragment(server, index=0):
     conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=8)
     try:
         started = time.perf_counter()
@@ -47,7 +48,7 @@ def first_fragment(server):
             json.dumps({**INPUT, "consent": tr.CONSENT_VERSION}),
             {
                 "Content-Type": "application/json",
-                "X-Forwarded-User": "bench-reader",
+                "X-Forwarded-User": f"bench-reader-{index}",
                 "X-Test-Country": "JP",
                 "X-Test-IP": "198.51.100.1",
             },
@@ -69,8 +70,10 @@ def first_fragment(server):
         conn.close()
 
 
-def deliver(worker, engine):
+def deliver(worker, engine, *, background=False):
     status, assignment = worker.poll(MODEL)
+    if background and status in (204, 409):
+        return
     if status != 200:
         raise RuntimeError(f"割り当てに失敗しました (HTTP {status})")
     request = tr.parse_request(assignment["input"])
@@ -106,14 +109,93 @@ def deliver(worker, engine):
         future.result()
 
 
-def samples(count, engine, state_dir):
+def concurrent_samples(server, count, concurrency):
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        return list(executor.map(lambda index: first_fragment(server, index), range(count)))
+
+
+def register_worker(server, hub, index):
+    worker = MockWorker(f"http://127.0.0.1:{server.server_port}", network=f"192.0.2.{index + 1}")
+    worker.timeout = 6
+    status, registered = worker.register(f"bench-owner-{index}")
+    if status != 200:
+        raise RuntimeError(f"模擬ワーカーを登録できませんでした (HTTP {status})")
+    info = hub.registry.info(registered["worker_id"])
+    for _ in range(hub.checks.health.probation_jobs):
+        hub.checks.health.record(info, passed=True)
+    return worker
+
+
+def samples_with_checks(server, hub, count, concurrency, engine):
+    # 検査中のワーカーがいても、同時送信に必要な枠を確保する。
+    workers = [register_worker(server, hub, index) for index in range(max(5, concurrency * 2))]
+    stop = threading.Event()
+    completed = threading.Condition()
+    checks = Counter()
+    record = hub.checks.health.record
+
+    def record_check(worker, passed=None, timed_out=False, canary=True):
+        record(worker, passed=passed, timed_out=timed_out, canary=canary)
+        with completed:
+            checks[("canary" if canary else "audit") if passed else "failed"] += 1
+            completed.notify_all()
+
+    def serve_worker(worker):
+        while not stop.is_set():
+            deliver(worker, engine, background=True)
+            # 終了通知を受けた割り当てを仲介が回収する時間を取る。
+            stop.wait(0.01)
+
+    with (
+        patch.object(hub.checks.health, "record", record_check),
+        ThreadPoolExecutor(max_workers=len(workers)) as executor,
+    ):
+        tasks = [executor.submit(serve_worker, worker) for worker in workers]
+        try:
+            with hub.condition:
+                if not hub.condition.wait_for(lambda: len(hub.ready) == len(workers), timeout=5):
+                    raise RuntimeError("模擬ワーカーの待機を確認できませんでした")
+            times = concurrent_samples(server, count, concurrency)
+            with completed:
+                during_delivery = {
+                    "canaries_passed_during_delivery": checks["canary"],
+                    "audits_passed_during_delivery": checks["audit"],
+                }
+                if not completed.wait_for(
+                    lambda: checks["failed"] or (checks["audit"] == count and checks["canary"]),
+                    timeout=10,
+                ):
+                    raise RuntimeError("確認用ジョブと抜き取りの完了を確認できませんでした")
+                if checks["failed"]:
+                    raise RuntimeError("模擬ワーカーの検査に失敗しました")
+                totals = {
+                    **during_delivery,
+                    "canaries_passed": checks["canary"],
+                    "audits_passed": checks["audit"],
+                }
+        finally:
+            stop.set()
+            with hub.condition:
+                hub.closed = True
+                hub.condition.notify_all()
+        for task in tasks:
+            task.result()
+    return times, totals
+
+
+def samples(count, engine, state_dir, concurrency=1, with_checks=False):
     canary = state_dir / "canary.json"
-    canary.write_text(json.dumps([INPUT]), encoding="utf-8")
+    canary.write_text(
+        json.dumps(
+            [{"text": f"Synthetic canary {index}.", "target_lang": "en"} for index in range(count)]
+        ),
+        encoding="utf-8",
+    )
     canary.chmod(0o600)
     settings = {
         "UPSTREAM_URL": engine,
         "UPSTREAMS": "",
-        "UPSTREAM_SLOTS": 1,
+        "UPSTREAM_SLOTS": concurrency,
         "STATE_FILE": str(state_dir / "worker.sqlite"),
         "WORKER_MODEL_SHA256": MODEL,
         "MIN_AGENT_VERSION": "0.5.0",
@@ -123,7 +205,10 @@ def samples(count, engine, state_dir):
         "ANON_ENABLED": False,
         "API_KEY": "",
         "CANARY_FILE": str(canary),
-        "AUDIT_UPSTREAMS": json.dumps([{"url": engine, "slots": 1}]),
+        "AUDIT_UPSTREAMS": json.dumps([{"url": engine, "slots": concurrency}]),
+        "CANARY_RATE": "1",
+        "AUDIT_RATE": "1",
+        "AUDIT_BACKLOG": str(count),
         "QUEUE_TIMEOUT": 4,
     }
     with (
@@ -131,7 +216,10 @@ def samples(count, engine, state_dir):
         serving(tr.TranslationHTTPServer(("127.0.0.1", 0), tr.Handler)) as direct,
     ):
         direct.get_pool()
-        direct_times = [first_fragment(direct) for _ in range(count)]
+        if with_checks:
+            direct_times = concurrent_samples(direct, count, concurrency)
+        else:
+            direct_times = [first_fragment(direct) for _ in range(count)]
     with (
         patch.multiple(tr, POOL_KIND="volunteer", **settings),
         serving(tr.TranslationHTTPServer(("127.0.0.1", 0), tr.Handler)) as server,
@@ -139,26 +227,22 @@ def samples(count, engine, state_dir):
     ):
         server.get_pool()
         hub = server.get_workers()
-        worker = MockWorker(f"http://127.0.0.1:{server.server_port}")
-        worker.timeout = 6
-        status, registered = worker.register("bench-owner")
-        if status != 200:
-            raise RuntimeError(f"模擬ワーカーを登録できませんでした (HTTP {status})")
-        info = hub.registry.info(registered["worker_id"])
-        for _ in range(hub.checks.health.probation_jobs):
-            hub.checks.health.record(info, passed=True)
         hub.poll_seconds = 5
+        if with_checks:
+            volunteer_times, totals = samples_with_checks(server, hub, count, concurrency, engine)
+            return direct_times, volunteer_times, totals
+        worker = register_worker(server, hub, 0)
         # 空き枠の配信経路を測るため、測定中は確認用ジョブと抜き取りを動かさない。
         with patch.object(hub.checks, "after_delivery", return_value=False):
             volunteer_times = []
             for _ in range(count):
                 task = executor.submit(deliver, worker, engine)
                 with hub.condition:
-                    if not hub.condition.wait_for(lambda: info["id"] in hub.ready, timeout=5):
+                    if not hub.condition.wait_for(lambda: bool(hub.ready), timeout=5):
                         raise RuntimeError("模擬ワーカーの待機を確認できませんでした")
                 volunteer_times.append(first_fragment(server))
                 task.result(timeout=8)
-    return direct_times, volunteer_times
+    return direct_times, volunteer_times, {}
 
 
 def p95(values):
@@ -168,20 +252,32 @@ def p95(values):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples", type=int, default=30)
+    parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--with-checks", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.samples <= 100:
         parser.error("--samples は 1〜100 を指定してください")
+    if not 1 <= args.concurrency <= min(8, args.samples):
+        parser.error("--concurrency は 1〜8 かつ --samples 以下を指定してください")
     engine, _ = make_server(delay=0.01)
     with serving(engine), tempfile.TemporaryDirectory() as directory:
         url = f"http://127.0.0.1:{engine.server_port}/v1/completions"
-        direct, volunteer = samples(args.samples, url, Path(directory))
+        direct, volunteer, totals = samples(
+            args.samples,
+            url,
+            Path(directory),
+            args.concurrency,
+            args.with_checks or args.concurrency > 1,
+        )
     print(
         json.dumps(
             {
                 "samples_per_pool": args.samples,
+                "concurrency": args.concurrency,
                 "direct_p95_ms": round(p95(direct), 2),
                 "volunteer_p95_ms": round(p95(volunteer), 2),
                 "p95_delta_ms": round(p95(volunteer) - p95(direct), 2),
+                **totals,
             },
             indent=2,
         )
