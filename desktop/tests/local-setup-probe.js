@@ -22,7 +22,7 @@
     const start = performance.now();
     $("local-measure").click();
     await wait(() => $("local-candidates").children.length === expected && $("local-cancel-measure").hidden);
-    if ($("local-candidates").textContent.split("おすすめ").length !== 2) throw new Error("おすすめの候補");
+    if ($("local-candidates").textContent.split("おすすめ").length !== 2) throw new Error(`おすすめの候補: ${$("local-candidates").textContent}`);
     const recommended = $("local-device").value;
     step = "手動選択の保持";
     $("local-device").value = "none";

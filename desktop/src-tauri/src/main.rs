@@ -559,7 +559,14 @@ fn main() {
             });
             // IPCを受け付ける画面は、状態と常駐機能の初期化が終わってから作る。
             for config in &app.config().app.windows {
-                tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+                let builder = tauri::WebviewWindowBuilder::from_config(app, config)?;
+                #[cfg(feature = "smoke-test")]
+                let builder = if std::env::var_os("PTRANSLATE_SMOKE_CONFIG").is_some() {
+                    builder.incognito(true)
+                } else {
+                    builder
+                };
+                builder.build()?;
             }
             if app.config().identifier.ends_with(".local-prototype") {
                 if let Some(window) = app.get_webview_window("main") {

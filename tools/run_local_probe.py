@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -13,11 +14,14 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", choices=["Vulkan0", "Vulkan1", "none"], required=True)
+    devices = ["MTL0", "none"] if sys.platform == "darwin" else ["Vulkan0", "Vulkan1", "none"]
+    parser.add_argument("--device", choices=devices, required=True)
     parser.add_argument("--auto-release", action="store_true")
     parser.add_argument("--measure", action="store_true")
     args = parser.parse_args()
-    binary = ROOT / "desktop/src-tauri/target/debug/ptranslate-desk.exe"
+    binary = ROOT / "desktop/src-tauri/target/debug/ptranslate-desk"
+    if sys.platform == "win32":
+        binary = binary.with_suffix(".exe")
     with tempfile.TemporaryDirectory(prefix="ptranslate-local-probe-") as config:
         (Path(config) / "local-translation.json").write_text(
             json.dumps(

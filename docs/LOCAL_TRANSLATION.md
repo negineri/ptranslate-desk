@@ -138,6 +138,15 @@ python tools/run_local_probe.py --device Vulkan0 --measure
 python tools/run_local_probe.py --device Vulkan0 --auto-release
 ```
 
+macOSでは同じビルド手順の後、Metalは`MTL0`、CPUは`none`を指定します。
+
+```sh
+python3 tools/run_local_probe.py --device MTL0
+python3 tools/run_local_probe.py --device none
+python3 tools/run_local_probe.py --device MTL0 --auto-release
+python3 tools/run_local_probe.py --device MTL0 --measure
+```
+
 `bench.py`の全原文（日→英の短文・長文、英→日の長文）を同時要求数1・2・4本で測るには、
 次を実行します。アプリとは別の認証付き推論プロセスを一時的に起動し、終了時に停止します。
 Flash Attention有効、コンテキスト32768、`np=1 / 4`、各条件3回で、`bench.py`の中央値を保存します。
@@ -172,6 +181,24 @@ RTX 4090・CPU・内蔵GPUの結果は[計測記録](LOCAL_BENCHMARK.md)に掲�
 その後、RTX 4090でFlash Attentionを有効にし、同じ短文で最初の応答まで15〜23ms、
 翻訳完了まで53〜107msを確認しました。区切り間の待ち時間や長文については別途測定が必要です。
 短文ではGPUの処理準備の影響も大きいため、モデルや文章の長さを変えた比較は今後の課題です。
+
+### macOSでの実モデル確認（2026-11-12）
+
+macOS 15.7.7、Apple M2、PLaMo 3 Translate 2B Q4_K_M、llama.cpp b11804で、
+実WebViewから短い英文を日本語42文字に翻訳しました。設定とWebViewの保存領域は試験用に分離しました。
+
+| 使用デバイス | 翻訳1回目 | 翻訳2回目 |
+| --- | ---: | ---: |
+| Metal（MTL0） | 0.62秒 | 0.36秒 |
+| CPU（none） | 0.56秒 | 0.41秒 |
+
+両方で画面表示と翻訳の中止、Metalで1分の無操作によるモデルの自動解放を確認しました。
+時間は単一の短文による動作確認の値で、性能の比較を目的とした計測ではありません。
+初回はデバイス一覧取得が10秒でタイムアウトしましたが、エンジン単体での一覧取得後の再試行は成功しました。
+画面からのデバイス自動計測は、空きシステムメモリ約862〜890 MiBに対し、
+必要見込みがCPUで1496 MiB、Metalで2902 MiBだったため両方とも省略されました。
+この条件ではおすすめの候補を取得できず、自動計測の通し試験は失敗しました。
+Intel Macでの動作確認は、検証機がないため実施しません。
 
 ## 今後の拡張
 
