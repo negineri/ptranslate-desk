@@ -1,6 +1,7 @@
 //! 1件だけ動くエージェントの親側。権限制限を整えるまで画面からは起動しない。
 #![allow(dead_code)]
 use crate::worker_agent::{Bootstrap, ASSIGNED_LINE, READY_LINE, START_COMMAND};
+use crate::worker_sandbox::Ports;
 use serde::{Deserialize, Serialize};
 use std::{process::Stdio, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
@@ -173,11 +174,7 @@ impl Lifecycle {
 }
 
 /// 呼び出し側が待機を中止しても、監督タスクは子の停止と回収まで続ける。
-pub(crate) async fn run(
-    app: AppHandle,
-    command: Command,
-    config: Bootstrap,
-) -> Result<Status, String> {
+pub(crate) async fn run(app: AppHandle, config: Bootstrap) -> Result<Status, String> {
     tauri::async_runtime::spawn(async move {
         let lifecycle = app.state::<Lifecycle>();
         let (_running, stop) = lifecycle.begin().await?;
@@ -190,7 +187,7 @@ pub(crate) async fn run(
             let _ = app.emit_to("main", "worker-activity", snapshot);
         };
         publish(&|state| state.phase = Phase::Starting);
-        let result = run_one(&app, command, config, stop, |status| {
+        let result = run_one(&app, config, stop, |status| {
             publish(&|state| {
                 state.phase = match status {
                     Status::Waiting => Phase::Waiting,
@@ -207,10 +204,8 @@ pub(crate) async fn run(
     .map_err(|_| "ワーカーの監督処理を完了できませんでした".to_owned())?
 }
 
-/// commandのOS権限制限は呼び出し側で設定する。資格を引数や環境変数に入れない。
 async fn run_one(
     app: &AppHandle,
-    mut command: Command,
     mut config: Bootstrap,
     mut stop: oneshot::Receiver<()>,
     update: impl FnMut(Status),
@@ -243,6 +238,17 @@ async fn run_one(
     config.relay_port = Some(relay.port);
     config.relay_secret = Some(relay.secret.as_str().to_owned());
     engine.configure(&mut config);
+    let ports =
+        Ports::new(relay.port, config.engine_port).map_err(|_| "ワーカーの接続ポートが不正です")?;
+    let executable =
+        std::env::current_exe().map_err(|_| "ワーカーの実行ファイルを確認できませんでした")?;
+    let mut command = Command::new(executable);
+    // 資格は準備完了の通知を待ってから標準入力で渡す。
+    command
+        .arg("--worker-agent")
+        .arg(ports.relay.to_string())
+        .arg(ports.engine.to_string())
+        .env_clear();
     let mut input = Zeroizing::new(
         serde_json::to_vec(&config).map_err(|_| "ワーカーの起動情報を作れませんでした")?,
     );

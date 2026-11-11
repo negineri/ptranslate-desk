@@ -1,5 +1,6 @@
 //! 親プロセスから1件分の接続情報を受け取り、最大1件を処理する。
 use crate::translation::{prompt, Decoder};
+use crate::worker_sandbox::{self, Ports};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -385,13 +386,12 @@ pub(crate) const READY_LINE: &[u8] = b"{\"status\":\"ready\"}\n";
 pub(crate) const ASSIGNED_LINE: &[u8] = b"{\"status\":\"assigned\"}\n";
 pub(crate) const START_COMMAND: &[u8] = b"go\n";
 
-fn apply_restrictions() -> Result<()> {
-    // OS別の権限制限を適用できるまで、資格を受け取る経路を閉じる。
-    Err(())
-}
-
-fn run_from_parent() -> Result<&'static str> {
-    apply_restrictions()?;
+fn run_from_parent(ports: Ports) -> Result<&'static str> {
+    worker_sandbox::apply(ports)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| ())?;
     {
         let mut output = io::stdout().lock();
         output.write_all(READY_LINE).map_err(|_| ())?;
@@ -406,8 +406,12 @@ fn run_from_parent() -> Result<&'static str> {
     if input.len() > 16 * 1024 || !input.ends_with(b"\n") {
         return Err(());
     }
-    let agent = Agent::new(serde_json::from_slice(&input).map_err(|_| ())?)?;
+    let config: Bootstrap = serde_json::from_slice(&input).map_err(|_| ())?;
     drop(input);
+    if config.relay_port != Some(ports.relay) || config.engine_port != ports.engine {
+        return Err(());
+    }
+    let agent = Agent::new(config)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let (allow, permission) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
@@ -419,7 +423,6 @@ fn run_from_parent() -> Result<&'static str> {
         }
         let _ = tx.send(());
     });
-    let rt = tokio::runtime::Runtime::new().map_err(|_| ())?;
     rt.block_on(agent.run(rx, async {
         {
             let mut output = io::stdout().lock();
@@ -431,7 +434,8 @@ fn run_from_parent() -> Result<&'static str> {
 }
 
 pub(crate) fn entry() {
-    status(run_from_parent().unwrap_or("error"));
+    let result = Ports::parse(std::env::args_os().skip(2)).and_then(run_from_parent);
+    status(result.unwrap_or("error"));
 }
 
 #[cfg(test)]
