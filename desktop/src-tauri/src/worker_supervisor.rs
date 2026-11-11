@@ -49,6 +49,9 @@ pub(crate) async fn run(
     stop: oneshot::Receiver<()>,
     update: impl FnMut(Status),
 ) -> Result<Status, ()> {
+    if crate::worker_power::external_power() != Some(true) {
+        return Ok(Status::Paused);
+    }
     let mut input = Zeroizing::new(serde_json::to_vec(config).map_err(|_| ())?);
     input.push(b'\n');
     if input.len() > 16 * 1024 {
@@ -64,6 +67,7 @@ pub(crate) async fn run(
         update,
         LIFETIME,
         STOP_GRACE,
+        || crate::worker_power::external_power() == Some(true),
     )
     .await
 }
@@ -88,6 +92,7 @@ async fn supervise(
     mut update: impl FnMut(Status),
     lifetime: Duration,
     grace: Duration,
+    allow_bootstrap: impl FnOnce() -> bool,
 ) -> Result<Status, ()> {
     let mut child = command.kill_on_drop(true).spawn().map_err(|_| ())?;
     let mut stdin = child.stdin.take().ok_or(())?;
@@ -100,6 +105,9 @@ async fn supervise(
             != READY_LINE
         {
             return Err(());
+        }
+        if !allow_bootstrap() {
+            return Ok(Status::Paused);
         }
         stdin.write_all(&input).await.map_err(|_| ())?;
         stdin.flush().await.map_err(|_| ())?;
@@ -177,6 +185,7 @@ mod tests {
             update,
             Duration::from_secs(2),
             Duration::from_millis(200),
+            || true,
         )
         .await
     }
@@ -200,34 +209,41 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn startup_error_does_not_receive_bootstrap() {
+    async fn startup_error_or_power_loss_does_not_receive_bootstrap() {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("received");
-        let (_tx, rx) = oneshot::channel();
-        let mut command = Command::new("/bin/sh");
-        command
-            .args([
-                "-c",
-                "printf '%s\\n' '{\"status\":\"error\"}'; if read config; then : > \"$1\"; fi",
-                "worker",
-            ])
-            .arg(&marker)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        assert_eq!(
-            supervise(
-                &mut command,
-                Zeroizing::new(b"{}\n".to_vec()),
-                rx,
-                |_| {},
-                Duration::from_secs(2),
-                Duration::from_millis(200)
-            )
-            .await,
-            Err(())
-        );
-        assert!(!marker.exists());
+        for (status, powered, expected) in [
+            ("error", true, Err(())),
+            ("ready", false, Ok(Status::Paused)),
+        ] {
+            let (_tx, rx) = oneshot::channel();
+            let mut command = Command::new("/bin/sh");
+            command
+                .args([
+                    "-c",
+                    "printf '{\"status\":\"%s\"}\\n' \"$1\"; if read config; then : > \"$2\"; fi",
+                    "worker",
+                    status,
+                ])
+                .arg(&marker)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            assert_eq!(
+                supervise(
+                    &mut command,
+                    Zeroizing::new(b"{}\n".to_vec()),
+                    rx,
+                    |_| {},
+                    Duration::from_secs(2),
+                    Duration::from_millis(200),
+                    || powered,
+                )
+                .await,
+                expected
+            );
+            assert!(!marker.exists());
+        }
     }
 
     #[cfg(unix)]

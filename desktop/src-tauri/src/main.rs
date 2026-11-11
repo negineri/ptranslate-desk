@@ -18,6 +18,7 @@ mod updates;
 #[cfg(target_os = "windows")]
 mod windows;
 mod worker_agent;
+mod worker_power;
 mod worker_registration;
 mod worker_supervisor;
 
