@@ -4,6 +4,7 @@
 import http.client
 import json
 import urllib.parse
+from contextlib import contextmanager
 
 
 class MockWorker:
@@ -17,6 +18,23 @@ class MockWorker:
         self.country, self.network = country, network
         self.secret = ""
         self.timeout = 5
+        self.connection = None
+
+    def open_connection(self):
+        if self.tls_context is None:
+            return http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+        return http.client.HTTPSConnection(
+            self.host, self.port, timeout=self.timeout, context=self.tls_context
+        )
+
+    @contextmanager
+    def reuse_connection(self):
+        self.connection = self.open_connection()
+        try:
+            yield
+        finally:
+            self.connection.close()
+            self.connection = None
 
     def call(self, path, body=None, owner=None, method="POST", secret=None):
         headers = {
@@ -28,19 +46,15 @@ class MockWorker:
             headers["X-Forwarded-User"] = owner
         if secret is not None or self.secret:
             headers["Authorization"] = "Bearer " + (self.secret if secret is None else secret)
-        if self.tls_context is None:
-            conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
-        else:
-            conn = http.client.HTTPSConnection(
-                self.host, self.port, timeout=self.timeout, context=self.tls_context
-            )
+        conn = self.connection or self.open_connection()
         try:
             conn.request(method, path, json.dumps(body) if body is not None else None, headers)
             response = conn.getresponse()
             data = response.read()
             return response.status, json.loads(data) if data else None
         finally:
-            conn.close()
+            if self.connection is None:
+                conn.close()
 
     def register(self, owner):
         status, data = self.call("/api/worker/register", {"terms_version": 1}, owner)
