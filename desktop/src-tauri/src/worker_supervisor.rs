@@ -1,6 +1,6 @@
 //! 1件だけ動くエージェントの親側。権限制限を整えるまで画面からは起動しない。
 #![allow(dead_code)]
-use crate::worker_agent::Bootstrap;
+use crate::worker_agent::{Bootstrap, READY_LINE};
 use serde::Deserialize;
 use std::{process::Stdio, time::Duration};
 use tokio::{
@@ -12,6 +12,7 @@ use tokio::{
 use zeroize::Zeroizing;
 
 const LIFETIME: Duration = Duration::from_secs(170);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_GRACE: Duration = Duration::from_secs(6);
 const MAX_LINE: usize = 64;
 
@@ -67,6 +68,19 @@ pub(crate) async fn run(
     .await
 }
 
+async fn read_line(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Result<Vec<u8>, ()> {
+    let mut line = Vec::new();
+    reader
+        .take((MAX_LINE + 1) as u64)
+        .read_until(b'\n', &mut line)
+        .await
+        .map_err(|_| ())?;
+    if !line.is_empty() && (line.len() > MAX_LINE || !line.ends_with(b"\n")) {
+        return Err(());
+    }
+    Ok(line)
+}
+
 async fn supervise(
     command: &mut Command,
     input: Zeroizing<Vec<u8>>,
@@ -79,27 +93,25 @@ async fn supervise(
     let mut stdin = child.stdin.take().ok_or(())?;
     let stdout = child.stdout.take().ok_or(())?;
     let work = async {
+        let mut reader = BufReader::new(stdout);
+        if timeout(STARTUP_TIMEOUT, read_line(&mut reader))
+            .await
+            .map_err(|_| ())??
+            != READY_LINE
+        {
+            return Err(());
+        }
         stdin.write_all(&input).await.map_err(|_| ())?;
         stdin.flush().await.map_err(|_| ())?;
         drop(input);
-        let mut reader = BufReader::new(stdout);
         let mut last = None;
         loop {
-            // 改行のない出力でも、1行の上限を超えて読み込まない。
-            let mut line = Vec::new();
-            let count = (&mut reader)
-                .take((MAX_LINE + 1) as u64)
-                .read_until(b'\n', &mut line)
-                .await
-                .map_err(|_| ())?;
-            if count == 0 {
+            let line = read_line(&mut reader).await?;
+            if line.is_empty() {
                 return match last {
                     Some(Status::Working) | None => Err(()),
                     Some(status) => Ok(status),
                 };
-            }
-            if count > MAX_LINE || !line.ends_with(b"\n") {
-                return Err(());
             }
             let event: Update = serde_json::from_slice(&line).map_err(|_| ())?;
             match (last, event.status) {
@@ -172,6 +184,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn accepts_only_bounded_status_and_successful_exit() {
+        let ready = "printf '%s\\n' '{\"status\":\"ready\"}'; ";
         for (script, expected) in [
             ("read config; printf '%s\\n' '{\"status\":\"working\"}' '{\"status\":\"completed\"}'", Ok(Status::Completed)),
             ("read config; printf '%s\\n' '{\"status\":\"waiting\"}'", Ok(Status::Waiting)),
@@ -181,14 +194,46 @@ mod tests {
             ("read config; printf '%080d' 0", Err(())),
         ] {
             let (_tx, rx) = oneshot::channel();
-            assert_eq!(mock(script, rx, |_| {}).await, expected);
+            assert_eq!(mock(&format!("{ready}{script}"), rx, |_| {}).await, expected);
         }
     }
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn startup_error_does_not_receive_bootstrap() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("received");
+        let (_tx, rx) = oneshot::channel();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "printf '%s\\n' '{\"status\":\"error\"}'; if read config; then : > \"$1\"; fi",
+                "worker",
+            ])
+            .arg(&marker)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        assert_eq!(
+            supervise(
+                &mut command,
+                Zeroizing::new(b"{}\n".to_vec()),
+                rx,
+                |_| {},
+                Duration::from_secs(2),
+                Duration::from_millis(200)
+            )
+            .await,
+            Err(())
+        );
+        assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn stop_closes_input_and_unresponsive_child_is_reaped() {
-        let working = "read config; printf '%s\\n' '{\"status\":\"working\"}'; ";
+        let working = "printf '%s\\n' '{\"status\":\"ready\"}'; read config; printf '%s\\n' '{\"status\":\"working\"}'; ";
         for (after_work, expected) in [
             ("if read extra; then exit 1; fi", Ok(Status::Paused)),
             ("while :; do :; done", Err(())),

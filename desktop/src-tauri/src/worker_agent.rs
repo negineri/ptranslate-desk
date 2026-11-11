@@ -347,7 +347,20 @@ fn status(value: &'static str) {
     let _ = writeln!(io::stdout(), "{{\"status\":\"{value}\"}}");
 }
 
+pub(crate) const READY_LINE: &[u8] = b"{\"status\":\"ready\"}\n";
+
+fn apply_restrictions() -> Result<()> {
+    // OS別の権限制限を適用できるまで、資格を受け取る経路を閉じる。
+    Err(())
+}
+
 fn run_from_parent() -> Result<&'static str> {
+    apply_restrictions()?;
+    {
+        let mut output = io::stdout().lock();
+        output.write_all(READY_LINE).map_err(|_| ())?;
+        output.flush().map_err(|_| ())?;
+    }
     let mut input = Zeroizing::new(Vec::new());
     io::stdin()
         .lock()
