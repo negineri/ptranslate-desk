@@ -124,6 +124,7 @@ pub struct Local {
     error: Mutex<Option<String>>,
     activity: Mutex<(usize, Instant)>,
     measuring: tokio::sync::Mutex<()>,
+    worker_slot: tokio::sync::Mutex<()>,
     measurement_cancel: Operation,
     downloads: resources::Downloads,
     slots: parallel::Slots,
@@ -154,6 +155,7 @@ impl Operation {
 pub(crate) struct WorkerSlot<'a> {
     local: &'a Local,
     _permit: parallel::Permit<'a>,
+    _worker: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl Drop for WorkerSlot<'_> {
@@ -309,6 +311,7 @@ impl Local {
             error: Mutex::new(None),
             activity: Mutex::new((0, Instant::now())),
             measuring: tokio::sync::Mutex::new(()),
+            worker_slot: tokio::sync::Mutex::new(()),
             measurement_cancel: Operation::default(),
             downloads: resources::Downloads::default(),
         })
@@ -324,6 +327,7 @@ impl Local {
         self.activity.lock().unwrap().0 != 0
     }
     pub(crate) fn try_worker_slot(&self) -> Option<WorkerSlot<'_>> {
+        let worker = self.worker_slot.try_lock().ok()?;
         let activity = self.activity.lock().unwrap();
         if activity.0 != 0 || !self.ready.load(Ordering::SeqCst) {
             return None;
@@ -331,8 +335,43 @@ impl Local {
         Some(WorkerSlot {
             local: self,
             _permit: self.slots.try_acquire().ok()?,
+            _worker: worker,
         })
     }
+    fn lock_engine_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        self.worker_slot
+            .try_lock()
+            .map_err(|_| "ボランティアの処理が終わってから変更してください".into())
+    }
+
+    fn apply_settings(
+        &self,
+        settings: Settings,
+        before_stop: impl FnOnce(&Settings) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let _worker = self.lock_engine_change()?;
+        before_stop(&settings)?;
+        self.stop();
+        self.slots.resize(settings.parallel);
+        *self.settings.lock().unwrap() = settings;
+        self.configured.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn stop_for_measurement(
+        &self,
+        pending_translation: bool,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        const BUSY: &str = "翻訳が終わってから計測してください";
+        let worker = self.worker_slot.try_lock().map_err(|_| BUSY)?;
+        let activity = self.activity.lock().unwrap();
+        if pending_translation || activity.0 != 0 || self.slots.in_use() {
+            return Err(BUSY.into());
+        }
+        self.stop();
+        Ok(worker)
+    }
+
     fn lease(&self) -> Lease<'_> {
         let mut activity = self.activity.lock().unwrap();
         activity.0 += 1;
@@ -673,19 +712,13 @@ pub async fn measure_local_devices(
         _ = local.measurement_cancel.canceled() => return Err("計測を中止しました".into()),
         guard = local.starting.lock() => guard,
     };
-    if local.activity.lock().unwrap().0 > 0
-        || app
-            .state::<crate::Backend>()
-            .session
-            .lock()
-            .unwrap()
-            .requests
-            .values()
-            .any(|r| r.translation && !r.task.inner().is_finished())
-    {
-        return Err("翻訳が終わってから計測してください".into());
-    }
-    local.stop();
+    let pending_translation = app
+        .state::<crate::Backend>()
+        .session
+        .lock()
+        .unwrap()
+        .has_pending_translation();
+    let _worker = local.stop_for_measurement(pending_translation)?;
     let _resume = ResumeAfterMeasurement(app.clone());
     let mut devices = tokio::select! {
         _ = local.measurement_cancel.canceled() => return Err("計測を中止しました。デバイスは手動でも選べます".into()),
@@ -864,13 +897,11 @@ pub async fn save_local_settings(
     }
     let local = app.state::<Local>();
     let _starting = local.starting.lock().await;
-    persist_settings(&app, &settings)?;
-    crate::cancel_matching(&app, |request| request.local);
-    local.stop();
-    local.slots.resize(settings.parallel);
-    *local.settings.lock().unwrap() = settings;
-    local.configured.store(true, Ordering::SeqCst);
-    Ok(())
+    local.apply_settings(settings, |settings| {
+        persist_settings(&app, settings)?;
+        crate::cancel_matching(&app, |request| request.local);
+        Ok(())
+    })
 }
 #[tauri::command]
 pub async fn set_local_active(
@@ -889,6 +920,7 @@ pub async fn set_local_active(
             return Err(error);
         }
     } else {
+        let _worker = local.lock_engine_change()?;
         local.active.store(false, Ordering::SeqCst);
         crate::cancel_matching(&app, |request| request.local);
         let _starting = local.starting.lock().await;
@@ -1182,6 +1214,33 @@ mod tests {
         drop(worker);
         assert_eq!(local.slots.available_permits(), local.slots.limit());
         assert!(!local.release_if_idle(Instant::now()));
+    }
+
+    #[test]
+    fn worker_slot_blocks_measurement_and_engine_changes_until_released() {
+        let local = Local::new(Settings::default(), true).unwrap();
+        local.ready.store(true, Ordering::SeqCst);
+        let worker = local.try_worker_slot().unwrap();
+        assert_eq!(
+            local.stop_for_measurement(false).unwrap_err(),
+            "翻訳が終わってから計測してください"
+        );
+        assert_eq!(
+            local
+                .apply_settings(Settings::default(), |_| panic!("設定を保存してはいけない"))
+                .unwrap_err(),
+            "ボランティアの処理が終わってから変更してください"
+        );
+        assert!(local.ready.load(Ordering::SeqCst));
+
+        drop(worker);
+        {
+            let _change = local.lock_engine_change().unwrap();
+            assert!(local.try_worker_slot().is_none());
+            assert!(local.ready.load(Ordering::SeqCst));
+        }
+        let _measurement = local.stop_for_measurement(false).unwrap();
+        assert!(!local.ready.load(Ordering::SeqCst));
     }
 
     #[test]
