@@ -1,4 +1,4 @@
-//! 1件だけ動くエージェントの親側。権限制限を整えるまで画面からは起動しない。
+//! 参加中に、1件ずつ処理するエージェントを起動・回収する。
 #![allow(dead_code)]
 use crate::worker_agent::{Bootstrap, ASSIGNED_LINE, READY_LINE, START_COMMAND};
 use crate::worker_sandbox::Ports;
@@ -46,7 +46,7 @@ pub(crate) fn can_accept(
     enabled && external_power == Some(true) && own_requests == 0 && !running
 }
 
-#[derive(Clone, Copy, Default, Serialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
     #[default]
@@ -63,6 +63,7 @@ enum Phase {
 pub(crate) struct Activity {
     phase: Phase,
     completed: u64,
+    enabled: bool,
 }
 
 impl Activity {
@@ -97,6 +98,7 @@ pub(crate) struct Lifecycle {
 #[derive(Default)]
 struct LifecycleState {
     current: Option<Running>,
+    participation: Option<Running>,
     shutting_down: bool,
     activity: Activity,
 }
@@ -104,6 +106,15 @@ struct LifecycleState {
 struct Running {
     stop: Option<oneshot::Sender<()>>,
     finished: watch::Receiver<()>,
+}
+
+impl Running {
+    fn stop(&mut self) -> watch::Receiver<()> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        self.finished.clone()
+    }
 }
 
 pub(crate) struct RunLease<'a> {
@@ -151,19 +162,26 @@ impl Lifecycle {
     }
 
     fn request_stop(state: &mut LifecycleState) -> Option<watch::Receiver<()>> {
-        state.current.as_mut().map(|run| {
-            if let Some(stop) = run.stop.take() {
-                let _ = stop.send(());
-            }
-            run.finished.clone()
-        })
+        state.current.as_mut().map(Running::stop)
+    }
+
+    pub(crate) async fn stop_participation(&self) {
+        let finished = {
+            let mut state = self.state.lock().unwrap();
+            let finished = state.participation.as_mut().map(Running::stop);
+            Self::request_stop(&mut state);
+            finished
+        };
+        Self::wait_for_exit(finished).await;
     }
 
     // 終了イベントから同期的に呼び、新しい子の登録と終了開始の競合を防ぐ。
     pub(crate) fn begin_shutdown(&self) -> (bool, Option<watch::Receiver<()>>) {
         let mut state = self.state.lock().unwrap();
         let first = !std::mem::replace(&mut state.shutting_down, true);
-        (first, Self::request_stop(&mut state))
+        let current = Self::request_stop(&mut state);
+        let participation = state.participation.as_mut().map(Running::stop);
+        (first, participation.or(current))
     }
 
     pub(crate) async fn wait_for_exit(finished: Option<watch::Receiver<()>>) {
@@ -173,42 +191,87 @@ impl Lifecycle {
     }
 }
 
-/// 呼び出し側が待機を中止しても、監督タスクは子の停止と回収まで続ける。
-pub(crate) async fn run(app: AppHandle, config: Bootstrap) -> Result<Status, String> {
+fn publish(app: &AppHandle, activity: &Activity) {
+    let _ = app.emit_to("main", "worker-activity", activity);
+}
+
+pub(crate) fn start_participation(app: AppHandle, config: Bootstrap) -> Result<(), String> {
+    let (stop, mut stopped) = oneshot::channel();
+    let (done, finished) = watch::channel(());
+    let lifecycle = app.state::<Lifecycle>();
+    {
+        let mut state = lifecycle.state.lock().unwrap();
+        if state.shutting_down {
+            return Err("アプリを終了しています".into());
+        }
+        if state.participation.is_some() {
+            return Ok(());
+        }
+        state.participation = Some(Running {
+            stop: Some(stop),
+            finished,
+        });
+        state.activity.enabled = true;
+        state.activity.phase = Phase::Starting;
+        publish(&app, &state.activity);
+    }
     tauri::async_runtime::spawn(async move {
         let lifecycle = app.state::<Lifecycle>();
-        let (_running, stop) = lifecycle.begin().await?;
-        let publish = |change: &dyn Fn(&mut Activity)| {
-            let snapshot = {
-                let mut state = lifecycle.state.lock().unwrap();
-                change(&mut state.activity);
-                state.activity
-            };
-            let _ = app.emit_to("main", "worker-activity", snapshot);
+        let update = |change: &dyn Fn(&mut Activity)| {
+            let mut state = lifecycle.state.lock().unwrap();
+            change(&mut state.activity);
+            publish(&app, &state.activity);
         };
-        publish(&|state| state.phase = Phase::Starting);
-        let result = run_one(&app, config, stop, |status| {
-            publish(&|state| {
-                state.phase = match status {
-                    Status::Waiting => Phase::Waiting,
-                    Status::Working => Phase::Working,
-                    _ => state.phase,
-                }
-            });
-        })
-        .await;
-        publish(&|state| state.finish(&result));
-        result
-    })
-    .await
-    .map_err(|_| "ワーカーの監督処理を完了できませんでした".to_owned())?
+        let failed = loop {
+            let (running, stop) = tokio::select! {
+                biased;
+                _ = &mut stopped => break false,
+                run = lifecycle.begin() => match run {
+                    Ok(run) => run,
+                    Err(_) => break false,
+                },
+            };
+            // begin が停止の要求と競合しても、次の子へ資格を渡さない。
+            if !matches!(stopped.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+                break false;
+            }
+            let result = run_one(&app, config.clone(), stop, |phase| {
+                update(&|state| {
+                    if state.phase != Phase::Quarantined || phase == Phase::Working {
+                        state.phase = phase;
+                    }
+                });
+            })
+            .await;
+            drop(running);
+            update(&|state| state.finish(&result));
+            let delay = match result {
+                Ok(Status::Completed | Status::Waiting) => Duration::from_millis(250),
+                Ok(Status::Paused | Status::Quarantined) => Duration::from_secs(2),
+                _ => break true,
+            };
+            tokio::select! {
+                biased;
+                _ = &mut stopped => break false,
+                _ = tokio::time::sleep(delay) => {}
+            }
+        };
+        drop(config);
+        let mut state = lifecycle.state.lock().unwrap();
+        state.activity.enabled = false;
+        state.activity.phase = if failed { Phase::Error } else { Phase::Idle };
+        state.participation.take();
+        publish(&app, &state.activity);
+        drop(done);
+    });
+    Ok(())
 }
 
 async fn run_one(
     app: &AppHandle,
     mut config: Bootstrap,
     mut stop: oneshot::Receiver<()>,
-    update: impl FnMut(Status),
+    mut update: impl FnMut(Phase),
 ) -> Result<Status, String> {
     let local = app.state::<crate::local::Local>();
     let can_wait = || {
@@ -224,10 +287,14 @@ async fn run_one(
     if !can_wait() {
         return Ok(Status::Paused);
     }
+    update(Phase::Starting);
     let (engine, _standby) = tokio::select! {
         biased;
         _ = &mut stop => return Ok(Status::Paused),
-        engine = local.prepare_worker_engine(app) => engine?,
+        engine = local.prepare_worker_engine(app) => match engine {
+            Err(_) if !can_wait() => return Ok(Status::Paused),
+            result => result?,
+        },
     };
     if !can_wait() {
         return Ok(Status::Paused);
@@ -264,7 +331,11 @@ async fn run_one(
             .stderr(Stdio::null()),
         input,
         stop,
-        update,
+        |status| match status {
+            Status::Waiting => update(Phase::Waiting),
+            Status::Working => update(Phase::Working),
+            _ => {}
+        },
         LIFETIME,
         STOP_GRACE,
         can_wait,
@@ -297,6 +368,9 @@ async fn supervise<Permit>(
     mut can_wait: impl FnMut() -> bool,
     reserve: impl FnOnce() -> Option<Permit>,
 ) -> Result<Status, ()> {
+    if !matches!(stop.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+        return Ok(Status::Paused);
+    }
     let mut child = command.kill_on_drop(true).spawn().map_err(|_| ())?;
     let mut stdin = child.stdin.take().ok_or(())?;
     let stdout = child.stdout.take().ok_or(())?;
@@ -401,6 +475,33 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn disabling_participation_stops_the_child_and_waits_for_the_driver() {
+        let lifecycle = Lifecycle::default();
+        let (stop, stopped) = oneshot::channel();
+        let (done, finished) = watch::channel(());
+        lifecycle.state.lock().unwrap().participation = Some(Running {
+            stop: Some(stop),
+            finished,
+        });
+        let (child, child_stopped) = lifecycle.begin().await.unwrap();
+        let disable = lifecycle.stop_participation();
+        tokio::pin!(disable);
+        tokio::select! {
+            _ = &mut disable => panic!("子の回収前に提供を停止した"),
+            result = child_stopped => result.unwrap(),
+        }
+        stopped.await.unwrap();
+        drop(child);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut disable)
+                .await
+                .is_err()
+        );
+        drop(done);
+        disable.await;
+    }
+
+    #[tokio::test]
     async fn engine_changes_wait_for_cleanup_and_block_the_next_run() {
         let lifecycle = Lifecycle::default();
         let (running, stopped) = lifecycle.begin().await.unwrap();
@@ -445,13 +546,13 @@ mod tests {
         activity.finish(&Ok(Status::Paused));
         assert_eq!(
             serde_json::to_value(activity).unwrap(),
-            serde_json::json!({"phase":"paused","completed":0})
+            serde_json::json!({"phase":"paused","completed":0,"enabled":false})
         );
         activity.finish(&Ok(Status::Completed));
         activity.finish(&Err("private detail".into()));
         assert_eq!(
             serde_json::to_value(activity).unwrap(),
-            serde_json::json!({"phase":"error","completed":1})
+            serde_json::json!({"phase":"error","completed":1,"enabled":false})
         );
     }
 

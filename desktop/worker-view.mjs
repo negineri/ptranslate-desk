@@ -10,7 +10,7 @@ document.head.append(style);
 const panel = document.createElement("details");
 panel.id = "worker-registration";
 panel.innerHTML = `<summary>翻訳の処理を提供する</summary>
-  <p class="hint">登録すると、この端末でほかの人の文を処理するための資格を取得します。処理する内容は選べず、推論中はGPUとメモリを使います。現在は登録と資格の管理ができます。</p>
+  <p class="hint">登録すると、この端末でほかの人の文を処理するための資格を取得します。処理する内容は選べず、推論中はGPUとメモリを使います。</p>
   <form>
     <label for="worker-server-url">提供先のサーバーURL</label>
     <input id="worker-server-url" name="server_url" type="url" required autocomplete="off" spellcheck="false">
@@ -35,6 +35,7 @@ panel.innerHTML = `<summary>翻訳の処理を提供する</summary>
     </fieldset>
   </form>
   <p class="hint" role="status"></p>
+  <label id="worker-participation" hidden><input type="checkbox"> 翻訳の処理を提供する</label>
   <p id="worker-activity" class="hint" hidden></p>`;
 settingsPage.append(panel);
 const form = panel.querySelector("form");
@@ -48,24 +49,35 @@ const confirmation = form.querySelector("#worker-forget-confirmation");
 const agree = form.querySelector("#worker-forget-agree");
 const fields = [...form.querySelectorAll("input[name]")];
 const activityLine = panel.querySelector("#worker-activity");
+const participation = panel.querySelector("#worker-participation");
+const participationToggle = participation.querySelector("input");
 const phaseLabels = {
   idle: "停止中", starting: "準備中", waiting: "待機中",
   working: "処理中", paused: "一時停止中", quarantined: "検疫中", error: "処理を続けられませんでした",
 };
 let activity;
 
-function renderActivity(next) {
-  activity = next;
-  activityLine.hidden = next.phase === "idle" && next.completed === 0;
-  activityLine.textContent = `${phaseLabels[next.phase]} · 処理した区切り ${next.completed.toLocaleString("ja-JP")} 件`;
+function renderParticipation() {
+  participation.hidden = state?.expires_at == null || !state?.can_participate;
+  participationToggle.checked = !!activity?.enabled;
+  participationToggle.disabled = busy || !activity || (!activity.enabled && state?.expires_at <= Date.now() / 1000);
 }
 
+function renderActivity(next) {
+  activity = next;
+  activityLine.hidden = !next.enabled && next.phase === "idle" && next.completed === 0;
+  activityLine.textContent = `${phaseLabels[next.phase]} · 処理した区切り ${next.completed.toLocaleString("ja-JP")} 件`;
+  const notice = document.getElementById("local-worker-notice");
+  if (notice) notice.hidden = !next.enabled;
+  renderParticipation();
+}
+
+let state;
+let busy = false;
 void listen("worker-activity", ({ payload }) => renderActivity(payload)).then(async () => {
   const snapshot = await invoke("worker_activity");
   if (!activity) renderActivity(snapshot);
 }).catch(() => {});
-let state;
-let busy = false;
 
 function render() {
   const registered = state?.expires_at != null;
@@ -80,6 +92,7 @@ function render() {
   forget.hidden = !registered || !state?.can_forget;
   forget.disabled = busy;
   confirmation.disabled = busy;
+  renderParticipation();
   if (!registered) {
     confirmation.hidden = true;
     agree.checked = false;
@@ -122,6 +135,7 @@ form.addEventListener("submit", (event) => {
   void operate("register_worker", { connection, termsVersion: state.terms_version });
 });
 renew.onclick = () => operate("renew_worker");
+participationToggle.onchange = () => operate("set_worker_participation", { enabled: participationToggle.checked });
 revoke.onclick = () => operate("revoke_worker");
 forget.onclick = () => { agree.checked = false; confirmation.hidden = false; };
 form.querySelector("#worker-forget-cancel").onclick = () => {

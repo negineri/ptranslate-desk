@@ -14,7 +14,7 @@ const MAX_MESSAGE: usize = 256 * 1024;
 const POST_TIMEOUT: Duration = Duration::from_secs(5);
 type Result<T> = std::result::Result<T, ()>;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Bootstrap {
     pub(crate) broker: String,

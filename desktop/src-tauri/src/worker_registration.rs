@@ -60,6 +60,7 @@ struct Renewal {
 pub struct Status {
     connection: Connection,
     supported: bool,
+    can_participate: bool,
     expires_at: Option<u64>,
     terms_version: u32,
     message: Option<String>,
@@ -139,14 +140,19 @@ fn write_credential(entry: &dyn Vault, registration: &Registration) -> Result<()
     entry.save(&value)
 }
 
+fn now_seconds() -> Result<u64, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|now| now.as_secs())
+        .map_err(|_| "ワーカー資格の時刻を確認できませんでした".into())
+}
+
 fn expiry(seconds: u64) -> Result<u64, String> {
     if !(1..=MAX_TTL).contains(&seconds) {
         return Err("ワーカー資格の有効期限が不正です".into());
     }
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|now| now.as_secs().checked_add(seconds))
+    now_seconds()?
+        .checked_add(seconds)
         .ok_or_else(|| "ワーカー資格の有効期限を計算できませんでした".into())
 }
 
@@ -188,14 +194,67 @@ async fn authenticate(app: &AppHandle, connection: &Connection) -> Result<Auth, 
 }
 
 fn status(connection: Connection, registration: Option<&Registration>) -> Status {
+    let supported = local::worker_platform_supported();
     Status {
         connection,
-        supported: local::worker_platform_supported(),
+        supported,
+        can_participate: cfg!(target_os = "macos") && supported,
         expires_at: registration.map(|value| value.expires_at),
         terms_version: TERMS_VERSION,
         message: None,
         can_forget: false,
     }
+}
+
+#[tauri::command]
+pub async fn set_worker_participation(
+    app: AppHandle,
+    window: WebviewWindow,
+    enabled: bool,
+) -> Result<Status, String> {
+    require_main(&window)?;
+    let state = app.state::<RegistrationGate>();
+    let _gate = state
+        .0
+        .try_lock()
+        .map_err(|_| "ワーカーの設定を処理中です")?;
+    if !enabled {
+        app.state::<crate::worker_supervisor::Lifecycle>()
+            .stop_participation()
+            .await;
+    }
+    let connection = load(&app)?;
+    let registration = if connection.server_url.is_empty() {
+        None
+    } else {
+        credential(&vault(&connection))?
+    };
+    let result = status(connection.clone(), registration.as_ref());
+    if enabled {
+        if !result.can_participate {
+            return Err("この端末では翻訳の処理を提供できません".into());
+        }
+        let mut registration = registration.ok_or("先に提供先に登録してください")?;
+        if registration.expires_at <= now_seconds()? {
+            return Err("ワーカーの資格を更新してください".into());
+        }
+        let version = &app.package_info().version;
+        let agent_version = format!("{}.{}.{}", version.major, version.minor, version.patch);
+        crate::worker_supervisor::start_participation(
+            app.clone(),
+            crate::worker_agent::Bootstrap {
+                broker: connection.server_url,
+                worker_secret: std::mem::take(&mut registration.secret),
+                model_sha256: String::new(),
+                agent_version,
+                engine_port: 0,
+                engine_secret: String::new(),
+                relay_port: None,
+                relay_secret: None,
+            },
+        )?;
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -370,6 +429,9 @@ pub async fn revoke_worker(app: AppHandle, window: WebviewWindow) -> Result<Stat
         .0
         .try_lock()
         .map_err(|_| "ワーカーの設定を処理中です")?;
+    app.state::<crate::worker_supervisor::Lifecycle>()
+        .stop_participation()
+        .await;
     let connection = load(&app)?;
     let entry = vault(&connection);
     let registration = credential(&entry)?.ok_or("ワーカーが登録されていません")?;
@@ -400,6 +462,9 @@ pub async fn forget_worker_registration(
         .0
         .try_lock()
         .map_err(|_| "ワーカーの設定を処理中です")?;
+    app.state::<crate::worker_supervisor::Lifecycle>()
+        .stop_participation()
+        .await;
     let connection = load(&app)?;
     let entry = vault(&connection);
     let auth = Auth::for_worker(app.state::<Backend>().client.clone(), connection.clone());
