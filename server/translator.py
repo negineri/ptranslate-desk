@@ -37,6 +37,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from dataclasses import dataclass
 
 
 def env_int(name: str, default: int) -> int:
@@ -48,6 +49,11 @@ LISTEN_PORT = env_int("TR_LISTEN_PORT", 8002)
 STATIC_DIR = Path(os.environ.get("TR_STATIC_DIR", Path(__file__).resolve().parent / "static"))
 # 翻訳エンジン (PLaMo 3 Translate を動かす llama-server の /v1/completions)。必須
 UPSTREAM_URL = os.environ.get("TR_UPSTREAM_URL", "")
+UPSTREAMS = os.environ.get("TR_UPSTREAMS", "")
+POOL_KIND = os.environ.get("TR_POOL_KIND", "direct")
+QUEUE_TIMEOUT = env_int("TR_QUEUE_TIMEOUT", 120)
+AGING_SECONDS = env_int("TR_AGING_SECONDS", 30)
+MAX_QUEUE = env_int("TR_MAX_QUEUE", 256)
 API_KEY = os.environ.get("TR_API_KEY", "")
 MODEL = os.environ.get("TR_MODEL", "plamo-3-translate")
 # 1 回 (1 区切り) の原文の上限 (文字)。PLaMo のコンテキスト (16K トークン) は原文と訳の
@@ -147,10 +153,11 @@ userinfo_cache: dict[str, tuple[str, float]] = {}  # token の SHA-256 → (利�
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, code=None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.code = code
 
 
 def token_expiry(token: str) -> float | None:
@@ -301,6 +308,127 @@ def max_tokens(text: str) -> int:
     return max(256, min(8000, int(len(text) * 1.5) + 64))
 
 
+PURPOSES = ("interactive", "page_visible", "page_rest")
+
+
+def parse_upstreams(raw, fallback):
+    entries = json.loads(raw) if raw else [{"url": fallback, "slots": 1}]
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("TR_UPSTREAMS は空でない配列にしてください")
+    result = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"url", "slots"}:
+            raise ValueError("エンジンには url と slots を指定してください")
+        url, slots = entry["url"], entry["slots"]
+        if not isinstance(url, str):
+            raise ValueError("エンジンの URL が不正です")
+        parsed = urllib.parse.urlsplit(url)
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or type(slots) is not int
+            or not 1 <= slots <= 1000
+        ):
+            raise ValueError("エンジンの URL または枠の数が不正です")
+        parsed.port  # 不正なポートも起動時に断る。
+        result.append((url, slots))
+    return result
+
+
+@dataclass(eq=False)
+class Job:
+    user: str
+    purpose: str
+    created: float
+
+
+class DirectPool:
+    def __init__(self, upstreams, timeout=120, aging=30, max_queue=256):
+        self.urls = [url for url, _ in upstreams]
+        self.free = [slots for _, slots in upstreams]
+        self.timeout = timeout
+        self.aging = aging
+        self.max_queue = max_queue
+        self.condition = threading.Condition()
+        self.waiting = []
+        self.pages = set()
+        self.turns = {}
+        self.cursor = 0
+
+    def submit(self, user, purpose):
+        with self.condition:
+            if len(self.waiting) >= self.max_queue:
+                return None
+            job = Job(user, purpose, time.monotonic())
+            self.waiting.append(job)
+            self.condition.notify_all()
+            return job
+
+    def _next(self, now=None):
+        now = time.monotonic() if now is None else now
+        eligible = [
+            j for j in self.waiting if j.purpose == "interactive" or j.user not in self.pages
+        ]
+        if not eligible:
+            return None
+
+        def priority(j):
+            return max(0, PURPOSES.index(j.purpose) - int((now - j.created) / self.aging))
+
+        rank = min(map(priority, eligible))
+        candidates = [j for j in eligible if priority(j) == rank]
+        users = list(dict.fromkeys(j.user for j in candidates))
+        turns = [user for user in self.turns.get(rank, []) if user in users]
+        turns.extend(user for user in users if user not in turns)
+        self.turns[rank] = turns
+        return next(j for j in candidates if j.user == turns[0])
+
+    def acquire(self, job, cancel):
+        with self.condition:
+            while True:
+                if cancel.is_set():
+                    self._remove(job)
+                    return None
+                if time.monotonic() - job.created >= self.timeout:
+                    self._remove(job)
+                    raise TimeoutError
+                now = time.monotonic()
+                if any(self.free) and self._next(now) is job:
+                    index = next(
+                        (self.cursor + n) % len(self.free)
+                        for n in range(len(self.free))
+                        if self.free[(self.cursor + n) % len(self.free)]
+                    )
+                    self.free[index] -= 1
+                    self.cursor = (index + 1) % len(self.free)
+                    rank = max(
+                        0,
+                        PURPOSES.index(job.purpose) - int((now - job.created) / self.aging),
+                    )
+                    turns = self.turns[rank]
+                    turns.remove(job.user)
+                    turns.append(job.user)
+                    if job.purpose != "interactive":
+                        self.pages.add(job.user)
+                    self._remove(job)
+                    return index
+                self.condition.wait(0.1)
+
+    def _remove(self, job):
+        self.waiting.remove(job)
+        self.condition.notify_all()
+
+    def release(self, job, index):
+        with self.condition:
+            self.free[index] += 1
+            if job.purpose != "interactive":
+                self.pages.discard(job.user)
+            self.condition.notify_all()
+
+
 class UpstreamCancellation:
     """読み取り待ちでも中止できるよう、上流ソケットを保持する。"""
 
@@ -343,10 +471,18 @@ def release_active(user):
             del active[user]
 
 
-def run_upstream_for_user(user, prompt, limit, events, cancel):
+def run_upstream_for_user(user, prompt, limit, events, cancel, pool, job):
+    index = None
     try:
-        upstream_stream(prompt, limit, events, cancel)
+        index = pool.acquire(job, cancel)
+        if index is not None:
+            cancel.upstream_url = pool.urls[index]
+            upstream_stream(prompt, limit, events, cancel)
+    except TimeoutError:
+        events.put(("queue_timeout", "翻訳の順番待ちが長すぎます。しばらくしてから送ってください"))
     finally:
+        if index is not None:
+            pool.release(job, index)
         # HTTPハンドラーではなく、上流通信の終了時点で枠を返す。
         release_active(user)
 
@@ -354,7 +490,7 @@ def run_upstream_for_user(user, prompt, limit, events, cancel):
 def upstream_stream(prompt: str, limit: int, events: queue.Queue, cancel: UpstreamCancellation):
     """翻訳エンジンに投げ、届いた訳の断片を events に入れる。最後に ("done", 理由) か
     ("error", 文) を入れる。cancel が立ったら接続を切る (llama-server は生成を止める)。"""
-    url = urllib.parse.urlsplit(UPSTREAM_URL)
+    url = urllib.parse.urlsplit(getattr(cancel, "upstream_url", UPSTREAM_URL))
     body = json.dumps(
         {
             "model": MODEL,
@@ -415,7 +551,10 @@ def upstream_stream(prompt: str, limit: int, events: queue.Queue, cancel: Upstre
                 events.put(("text", choice["text"]))
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
-        events.put(("done", finish or "stop"))
+        if finish in ("stop", "length"):
+            events.put(("done", finish))
+        else:
+            events.put(("error", "翻訳サーバーとの接続が途中で切れました"))
     except (OSError, http.client.HTTPException) as e:
         if not cancel.is_set():
             log.warning("upstream failed: %s", e)
@@ -428,6 +567,21 @@ def upstream_stream(prompt: str, limit: int, events: queue.Queue, cancel: Upstre
 
 
 class TranslationHTTPServer(ThreadingHTTPServer):
+    def get_pool(self):
+        with active_lock:
+            if not hasattr(self, "pool"):
+                if POOL_KIND != "direct":
+                    raise ValueError("ボランティア枠はまだ実装していません")
+                if min(QUEUE_TIMEOUT, AGING_SECONDS, MAX_QUEUE) <= 0:
+                    raise ValueError("待ち行列の設定は正の整数にしてください")
+                self.pool = DirectPool(
+                    parse_upstreams(UPSTREAMS, UPSTREAM_URL),
+                    QUEUE_TIMEOUT,
+                    AGING_SECONDS,
+                    MAX_QUEUE,
+                )
+            return self.pool
+
     def server_bind(self):
         # HTTPServer.server_bind の getfqdn による逆引きは不要。
         # macOS のランナーでは名前解決待ちで起動が遅れることがある。
@@ -457,6 +611,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if status == 503:
+            self.send_header("Retry-After", "5")
         self.send_header("Cache-Control", "private, no-store")
         if status >= 400:
             self.send_header("Connection", "close")
@@ -499,6 +655,8 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     {
                         "user": user,
+                        "pool": {"kind": "direct"},
+                        "tier": "registered",
                         "languages": [{"code": c, "name": n} for c, n in LANGUAGES],
                         "max_chars": MAX_CHARS,
                         "max_glossary": MAX_GLOSSARY,
@@ -517,7 +675,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.translate(user)
             raise HttpError(404, "Not found")
         except HttpError as e:
-            self.send_json(e.status, {"error": e.message})
+            self.send_json(e.status, {"error": e.message, **({"code": e.code} if e.code else {})})
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
         except Exception:
@@ -557,25 +715,40 @@ class Handler(BaseHTTPRequestHandler):
             return True
 
     def translate(self, user: str) -> None:
-        req = parse_request(self.read_json_body())
+        body = self.read_json_body()
+        purpose = body.get("purpose", "interactive")
+        if purpose not in PURPOSES:
+            raise HttpError(400, "purpose が不正です")
+        group = body.get("group")
+        if group is not None and (
+            not isinstance(group, str) or not re.fullmatch(r"[A-Za-z0-9_-]{22,128}", group)
+        ):
+            raise HttpError(400, "group が不正です")
+        req = parse_request(body)
+        pool = self.server.get_pool()
         with active_lock:
             if active.get(user, 0) >= MAX_ACTIVE_PER_USER:
                 raise HttpError(
                     429,
                     "同時に訳せる数を超えています。前の翻訳が終わってから送ってください",
                 )
+            job = pool.submit(user, purpose)
+            if job is None:
+                raise HttpError(503, "翻訳の待ち行列が一杯です", "busy")
             active[user] = active.get(user, 0) + 1
         started = time.monotonic()
         events: queue.Queue = queue.Queue()
         cancel = UpstreamCancellation()
         worker = threading.Thread(
             target=run_upstream_for_user,
-            args=(user, build_prompt(req), max_tokens(req["text"]), events, cancel),
+            args=(user, build_prompt(req), max_tokens(req["text"]), events, cancel, pool, job),
             daemon=True,
         )
         try:
             worker.start()
         except Exception:
+            with pool.condition:
+                pool._remove(job)
             release_active(user)
             raise
         finish, out_chars = "error", 0
@@ -610,7 +783,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.sse({"done": True, "finish": value})
                     break
                 else:
-                    self.sse({"error": value})
+                    self.sse(
+                        {"error": value, **({"code": kind} if kind == "queue_timeout" else {})}
+                    )
                     break
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             finish = "canceled"
@@ -645,12 +820,18 @@ def main() -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JournalFormatter("%(message)s"))
     logging.basicConfig(level=logging.INFO, handlers=[handler])
-    if not UPSTREAM_URL:
+    if not UPSTREAM_URL and not UPSTREAMS:
         log.error("TR_UPSTREAM_URL is not set")
         sys.exit(2)
     if not API_KEY:
         log.warning("TR_API_KEY is empty; requests are sent without Authorization")
     server = TranslationHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
+    try:
+        server.get_pool()
+    except (ValueError, TypeError) as error:
+        log.error("プールの設定が不正です: %s", error)
+        server.server_close()
+        sys.exit(2)
     server.daemon_threads = True
     signal.signal(
         signal.SIGTERM,
