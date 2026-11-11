@@ -7,11 +7,13 @@ import urllib.parse
 
 
 class MockWorker:
-    def __init__(self, server_url, country="JP", network="192.0.2.1"):
+    def __init__(self, server_url, country="JP", network="192.0.2.1", *, tls_context=None):
         url = urllib.parse.urlsplit(server_url)
-        if url.scheme != "http" or url.hostname not in ("127.0.0.1", "localhost", "::1"):
-            raise ValueError("モックはローカルのHTTPサーバーだけに接続できます")
+        scheme = "https" if tls_context is not None else "http"
+        if url.scheme != scheme or url.hostname not in ("127.0.0.1", "localhost", "::1"):
+            raise ValueError("モックはローカルのサーバーだけに接続できます")
         self.host, self.port = url.hostname, url.port
+        self.tls_context = tls_context
         self.country, self.network = country, network
         self.secret = ""
         self.timeout = 5
@@ -26,7 +28,12 @@ class MockWorker:
             headers["X-Forwarded-User"] = owner
         if secret is not None or self.secret:
             headers["Authorization"] = "Bearer " + (self.secret if secret is None else secret)
-        conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+        if self.tls_context is None:
+            conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+        else:
+            conn = http.client.HTTPSConnection(
+                self.host, self.port, timeout=self.timeout, context=self.tls_context
+            )
         try:
             conn.request(method, path, json.dumps(body) if body is not None else None, headers)
             response = conn.getresponse()

@@ -10,6 +10,9 @@ import json
 import math
 from pathlib import Path
 import queue
+import select
+import ssl
+import subprocess
 import sys
 import tempfile
 import threading
@@ -24,6 +27,97 @@ import translator as tr  # noqa: E402
 
 MODEL = "a" * 64
 INPUT = {"text": "A synthetic translation benchmark sentence.", "target_lang": "en"}
+WORKER_ROUTES = frozenset({"/api/worker/poll", "/api/worker/result", "/api/worker/ping"})
+
+
+def tls_contexts(state_dir):
+    config = state_dir / "tls.cnf"
+    config.write_text(
+        "[req]\ndistinguished_name=subject\nx509_extensions=extensions\n"
+        "[subject]\n[extensions]\nsubjectAltName=IP:127.0.0.1\n",
+        encoding="ascii",
+    )
+    certificate = state_dir / "tls.crt"
+    key = state_dir / "tls.key"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-new",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-config",
+            str(config),
+            "-out",
+            str(certificate),
+            "-keyout",
+            str(key),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=15,
+    )
+    server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server.load_cert_chain(certificate, key)
+    return server, ssl.create_default_context(cafile=str(certificate))
+
+
+class BenchmarkHandler(tr.Handler):
+    def client_disconnected(self):
+        if not isinstance(self.connection, ssl.SSLSocket):
+            return super().client_disconnected()
+        readable, _, _ = select.select([self.connection], [], [], 0)
+        if not readable and not self.connection.pending():
+            return False
+        # SSLSocket は MSG_PEEK に対応しない。計測クライアントは1接続に1要求だけ送る。
+        timeout = self.connection.gettimeout()
+        try:
+            self.connection.setblocking(False)
+            return not self.connection.recv(1)
+        except (ssl.SSLWantReadError, ssl.SSLWantWriteError):
+            return False
+        except OSError:
+            return True
+        finally:
+            self.connection.settimeout(timeout)
+
+    def do_POST(self):
+        self.worker_delay = self.server.worker_one_way_seconds if self.path in WORKER_ROUTES else 0
+        if self.worker_delay:
+            time.sleep(self.worker_delay)
+        super().do_POST()
+
+    def end_headers(self):
+        if delay := getattr(self, "worker_delay", 0):
+            time.sleep(delay)
+        super().end_headers()
+
+
+class BenchmarkBroker(tr.TranslationHTTPServer):
+    def __init__(self, server_tls, client_tls, worker_rtt_ms):
+        super().__init__(("127.0.0.1", 0), BenchmarkHandler)
+        self.server_tls = server_tls
+        self.client_tls = client_tls
+        self.worker_one_way_seconds = worker_rtt_ms / 2000
+
+    def get_request(self):
+        socket, address = super().get_request()
+        if self.server_tls is not None:
+            try:
+                # TLS の交渉は各要求のスレッドで行う。
+                socket = self.server_tls.wrap_socket(
+                    socket, server_side=True, do_handshake_on_connect=False
+                )
+            except (OSError, ValueError):
+                socket.close()
+                raise
+        return socket, address
 
 
 @contextmanager
@@ -39,7 +133,12 @@ def serving(server):
 
 
 def first_fragment(server, index=0):
-    conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=8)
+    if server.client_tls is None:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=8)
+    else:
+        conn = http.client.HTTPSConnection(
+            "127.0.0.1", server.server_port, timeout=8, context=server.client_tls
+        )
     try:
         started = time.perf_counter()
         conn.request(
@@ -115,7 +214,12 @@ def concurrent_samples(server, count, concurrency):
 
 
 def register_worker(server, hub, index):
-    worker = MockWorker(f"http://127.0.0.1:{server.server_port}", network=f"192.0.2.{index + 1}")
+    scheme = "https" if server.client_tls is not None else "http"
+    worker = MockWorker(
+        f"{scheme}://127.0.0.1:{server.server_port}",
+        network=f"192.0.2.{index + 1}",
+        tls_context=server.client_tls,
+    )
     worker.timeout = 6
     status, registered = worker.register(f"bench-owner-{index}")
     if status != 200:
@@ -168,22 +272,26 @@ def samples_with_checks(server, hub, count, concurrency, engine):
                     raise RuntimeError("確認用ジョブと抜き取りの完了を確認できませんでした")
                 if checks["failed"]:
                     raise RuntimeError("模擬ワーカーの検査に失敗しました")
-                totals = {
-                    **during_delivery,
-                    "canaries_passed": checks["canary"],
-                    "audits_passed": checks["audit"],
-                }
         finally:
+            # 処理中の割り当ては完了させ、次のポーリングを始めずに抜ける。
             stop.set()
-            with hub.condition:
-                hub.closed = True
-                hub.condition.notify_all()
         for task in tasks:
             task.result()
+        with completed:
+            if checks["failed"]:
+                raise RuntimeError("模擬ワーカーの検査に失敗しました")
+            totals = {
+                **during_delivery,
+                "canaries_passed": checks["canary"],
+                "audits_passed": checks["audit"],
+            }
     return times, totals
 
 
-def samples(count, engine, state_dir, concurrency=1, with_checks=False):
+def samples(
+    count, engine, state_dir, concurrency=1, with_checks=False, *, tls=False, worker_rtt_ms=0
+):
+    server_tls, client_tls = tls_contexts(state_dir) if tls else (None, None)
     canary = state_dir / "canary.json"
     canary.write_text(
         json.dumps(
@@ -213,7 +321,7 @@ def samples(count, engine, state_dir, concurrency=1, with_checks=False):
     }
     with (
         patch.multiple(tr, POOL_KIND="direct", **settings),
-        serving(tr.TranslationHTTPServer(("127.0.0.1", 0), tr.Handler)) as direct,
+        serving(BenchmarkBroker(server_tls, client_tls, worker_rtt_ms)) as direct,
     ):
         direct.get_pool()
         if with_checks:
@@ -222,7 +330,7 @@ def samples(count, engine, state_dir, concurrency=1, with_checks=False):
             direct_times = [first_fragment(direct) for _ in range(count)]
     with (
         patch.multiple(tr, POOL_KIND="volunteer", **settings),
-        serving(tr.TranslationHTTPServer(("127.0.0.1", 0), tr.Handler)) as server,
+        serving(BenchmarkBroker(server_tls, client_tls, worker_rtt_ms)) as server,
         ThreadPoolExecutor(max_workers=1) as executor,
     ):
         server.get_pool()
@@ -254,26 +362,47 @@ def main():
     parser.add_argument("--samples", type=int, default=30)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--with-checks", action="store_true")
+    parser.add_argument(
+        "--tls", action="store_true", help="仲介への接続をHTTPSにする（openssl が必要）"
+    )
+    parser.add_argument(
+        "--worker-rtt-ms",
+        type=int,
+        default=0,
+        help="仲介・ワーカー間のHTTP往復に足す模擬遅延（ms）",
+    )
     args = parser.parse_args()
     if not 1 <= args.samples <= 100:
         parser.error("--samples は 1〜100 を指定してください")
     if not 1 <= args.concurrency <= min(8, args.samples):
         parser.error("--concurrency は 1〜8 かつ --samples 以下を指定してください")
+    if not 0 <= args.worker_rtt_ms <= 200:
+        parser.error("--worker-rtt-ms は 0〜200 を指定してください")
     engine, _ = make_server(delay=0.01)
     with serving(engine), tempfile.TemporaryDirectory() as directory:
         url = f"http://127.0.0.1:{engine.server_port}/v1/completions"
-        direct, volunteer, totals = samples(
-            args.samples,
-            url,
-            Path(directory),
-            args.concurrency,
-            args.with_checks or args.concurrency > 1,
-        )
+        try:
+            direct, volunteer, totals = samples(
+                args.samples,
+                url,
+                Path(directory),
+                args.concurrency,
+                args.with_checks or args.concurrency > 1,
+                tls=args.tls,
+                worker_rtt_ms=args.worker_rtt_ms,
+            )
+        except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+            parser.exit(
+                1,
+                f"測定できませんでした ({error if isinstance(error, RuntimeError) else type(error).__name__})\n",
+            )
     print(
         json.dumps(
             {
                 "samples_per_pool": args.samples,
                 "concurrency": args.concurrency,
+                "tls": args.tls,
+                "worker_rtt_ms": args.worker_rtt_ms,
                 "direct_p95_ms": round(p95(direct), 2),
                 "volunteer_p95_ms": round(p95(volunteer), 2),
                 "p95_delta_ms": round(p95(volunteer) - p95(direct), 2),
