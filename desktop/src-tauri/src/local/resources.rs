@@ -20,7 +20,8 @@ const ENGINE_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/downloa
 #[cfg(not(target_os = "macos"))]
 const ENGINE_SHA: &str = "db9ab31997e93bf713d3dfec6eb1cf1b5a6a5f2940a3d4d111ad0ffab54c87d5";
 const MODEL_URL: &str = "https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF/resolve/d44589ecd5287cd64452e9cd1e2cfdad904fe216/plamo-3-translate-2b-Q4_K_M.gguf";
-const MODEL_SHA: &str = "2189a8a0b4b359f59443ec36cfb9c9c3f603a678c00dbcee8598b3f7ea7c12fb";
+pub(super) const MODEL_SHA: &str =
+    "2189a8a0b4b359f59443ec36cfb9c9c3f603a678c00dbcee8598b3f7ea7c12fb";
 #[cfg(not(target_os = "macos"))]
 const ENGINE_BYTES: u64 = 36_865_203;
 const MODEL_BYTES: u64 = 1_807_202_144;

@@ -48,8 +48,8 @@ pub(crate) fn can_accept(
 pub(crate) async fn run(
     app: &AppHandle,
     mut command: Command,
-    config: &Bootstrap,
-    stop: oneshot::Receiver<()>,
+    mut config: Bootstrap,
+    mut stop: oneshot::Receiver<()>,
     update: impl FnMut(Status),
 ) -> Result<Status, ()> {
     let local = app.state::<crate::local::Local>();
@@ -66,7 +66,17 @@ pub(crate) async fn run(
     if !can_wait() {
         return Ok(Status::Paused);
     }
-    let mut input = Zeroizing::new(serde_json::to_vec(config).map_err(|_| ())?);
+    let engine = tokio::select! {
+        biased;
+        _ = &mut stop => return Ok(Status::Paused),
+        engine = local.prepare_worker_engine(app) => engine.map_err(|_| ())?,
+    };
+    if !can_wait() {
+        return Ok(Status::Paused);
+    }
+    engine.configure(&mut config);
+    let mut input = Zeroizing::new(serde_json::to_vec(&config).map_err(|_| ())?);
+    drop(config);
     input.push(b'\n');
     if input.len() > 16 * 1024 {
         return Err(());
@@ -82,7 +92,7 @@ pub(crate) async fn run(
         LIFETIME,
         STOP_GRACE,
         can_wait,
-        || local.try_worker_slot(),
+        || local.try_worker_slot(&engine),
     )
     .await
 }

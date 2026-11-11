@@ -20,6 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{ipc::Channel, AppHandle, Manager, WebviewWindow};
+use zeroize::Zeroize;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -62,10 +63,38 @@ struct Installation {
 struct Endpoint {
     url: String,
     key: String,
+    port: u16,
 }
+impl Endpoint {
+    fn new(port: u16, key: String) -> Self {
+        Self {
+            url: format!("http://127.0.0.1:{port}"),
+            key,
+            port,
+        }
+    }
+}
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
+pub(crate) struct WorkerEngine(Endpoint);
+
+impl WorkerEngine {
+    pub(crate) fn configure(&self, bootstrap: &mut crate::worker_agent::Bootstrap) {
+        bootstrap.engine_secret.zeroize();
+        bootstrap.engine_secret.clone_from(&self.0.key);
+        bootstrap.engine_port = self.0.port;
+        bootstrap.model_sha256 = resources::MODEL_SHA.into();
+    }
+}
+
 struct Process {
     child: Child,
     endpoint: Endpoint,
+    worker_verified: bool,
     #[cfg(target_os = "windows")]
     _job: Job,
 }
@@ -326,10 +355,27 @@ impl Local {
     pub(crate) fn has_translation_activity(&self) -> bool {
         self.activity.lock().unwrap().0 != 0
     }
-    pub(crate) fn try_worker_slot(&self) -> Option<WorkerSlot<'_>> {
+    pub(crate) fn try_worker_slot(&self, engine: &WorkerEngine) -> Option<WorkerSlot<'_>> {
+        self.reserve_worker_slot(|| {
+            self.process
+                .lock()
+                .unwrap()
+                .as_mut()
+                .is_some_and(|process| {
+                    process.worker_verified
+                        && process.endpoint.key == engine.0.key
+                        && matches!(process.child.try_wait(), Ok(None))
+                })
+        })
+    }
+
+    fn reserve_worker_slot(
+        &self,
+        expected_engine: impl FnOnce() -> bool,
+    ) -> Option<WorkerSlot<'_>> {
         let worker = self.worker_slot.try_lock().ok()?;
         let activity = self.activity.lock().unwrap();
-        if activity.0 != 0 || !self.ready.load(Ordering::SeqCst) {
+        if activity.0 != 0 || !self.ready.load(Ordering::SeqCst) || !expected_engine() {
             return None;
         }
         Some(WorkerSlot {
@@ -439,14 +485,66 @@ impl Local {
             slot.take();
         }
         self.ready.store(false, Ordering::SeqCst);
+        self.load_engine(installation(app)?, false).await
+    }
+
+    pub(crate) async fn prepare_worker_engine(
+        &self,
+        app: &AppHandle,
+    ) -> Result<WorkerEngine, String> {
+        if !worker_platform_supported() {
+            return Err("この端末は翻訳ワーカーに対応していません".into());
+        }
+        let _starting = self.starting.lock().await;
+        let _worker = self.lock_engine_change()?;
+        {
+            let mut activity = self.activity.lock().unwrap();
+            if activity.0 != 0 || self.slots.in_use() {
+                return Err("翻訳が終わってから提供を開始してください".into());
+            }
+            if let Some(process) = self.process.lock().unwrap().as_mut() {
+                if self.ready.load(Ordering::SeqCst)
+                    && process.worker_verified
+                    && matches!(process.child.try_wait(), Ok(None))
+                {
+                    activity.1 = Instant::now();
+                    return Ok(WorkerEngine(process.endpoint.clone()));
+                }
+            }
+        }
+        let install = installation(app)?;
+        resources::verify_worker_model(install.model.clone()).await?;
+        {
+            let activity = self.activity.lock().unwrap();
+            if activity.0 != 0 || self.slots.in_use() {
+                return Err("翻訳が終わってから提供を開始してください".into());
+            }
+            self.stop();
+        }
+        let endpoint = self.load_engine(install, true).await?;
+        self.activity.lock().unwrap().1 = Instant::now();
+        Ok(WorkerEngine(endpoint))
+    }
+
+    async fn load_engine(
+        &self,
+        install: Installation,
+        worker_verified: bool,
+    ) -> Result<Endpoint, String> {
+        self.ready.store(false, Ordering::SeqCst);
         self.loading.store(true, Ordering::SeqCst);
         let _loading = Loading(self);
         *self.error.lock().unwrap() = None;
-        self.start_engine(app, self.slots.limit()).await
+        self.start_engine(install, self.slots.limit(), worker_verified)
+            .await
     }
 
-    async fn start_engine(&self, app: &AppHandle, count: usize) -> Result<Endpoint, String> {
-        let install = installation(app)?;
+    async fn start_engine(
+        &self,
+        install: Installation,
+        count: usize,
+        worker_verified: bool,
+    ) -> Result<Endpoint, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|_| "推論エンジンのポートを確保できませんでした")?;
         let port = listener
@@ -455,10 +553,8 @@ impl Local {
             .port();
         let mut secret = [0u8; 32];
         getrandom::fill(&mut secret).map_err(|_| "ローカル認証キーを生成できませんでした")?;
-        let endpoint = Endpoint {
-            url: format!("http://127.0.0.1:{port}"),
-            key: URL_SAFE_NO_PAD.encode(secret),
-        };
+        let endpoint = Endpoint::new(port, URL_SAFE_NO_PAD.encode(secret));
+        secret.zeroize();
         drop(listener);
         let mut cmd = command(&install.engine);
         cmd.args(["--model"])
@@ -505,6 +601,7 @@ impl Local {
         *self.process.lock().unwrap() = Some(Process {
             child,
             endpoint: endpoint.clone(),
+            worker_verified,
             #[cfg(target_os = "windows")]
             _job: job,
         });
@@ -755,7 +852,7 @@ pub async fn measure_local_devices(
                 let endpoint = trial.start(&app).await?;
                 let (prompt, _) = prompt(&json!({"text":"This application translates text on your computer.","target_lang":"ja"}))?;
                 let started = Instant::now();
-                let response = trial.client.post(format!("{}/v1/completions",endpoint.url)).bearer_auth(endpoint.key)
+                let response = trial.client.post(format!("{}/v1/completions",endpoint.url)).bearer_auth(&endpoint.key)
                     .json(&json!({"prompt":prompt,"max_tokens":24,"temperature":0,"stream":false,"cache_prompt":false,"add_special_tokens":true,"stop":["<|plamo:tag|>","<|plamo:bos|>"]}))
                     .send().await.map_err(|_| "計測の応答を取得できませんでした".to_string())?;
                 if !response.status().is_success() { return Err("計測の応答が不正です".into()); }
@@ -1205,10 +1302,10 @@ mod tests {
         let now = Instant::now();
         local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
         let own = local.lease();
-        assert!(local.try_worker_slot().is_none());
+        assert!(local.reserve_worker_slot(|| true).is_none());
         drop(own);
         local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
-        let worker = local.try_worker_slot().unwrap();
+        let worker = local.reserve_worker_slot(|| true).unwrap();
         assert!(!local.has_translation_activity());
         assert!(!local.release_if_idle(now));
         drop(worker);
@@ -1216,11 +1313,39 @@ mod tests {
         assert!(!local.release_if_idle(Instant::now()));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn worker_can_only_reserve_the_engine_generation_it_was_given() {
+        let local = Local::new(Settings::default(), true).unwrap();
+        let endpoint = Endpoint::new(12345, "mock-current".into());
+        *local.process.lock().unwrap() = Some(Process {
+            child: Command::new("/bin/sh")
+                .args(["-c", "exec sleep 10"])
+                .spawn()
+                .unwrap(),
+            endpoint: endpoint.clone(),
+            worker_verified: false,
+        });
+        local.ready.store(true, Ordering::SeqCst);
+        let current = WorkerEngine(endpoint);
+        assert!(local.try_worker_slot(&current).is_none());
+        local
+            .process
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .worker_verified = true;
+        let stale = WorkerEngine(Endpoint::new(12345, "mock-old".into()));
+        assert!(local.try_worker_slot(&stale).is_none());
+        assert!(local.try_worker_slot(&current).is_some());
+    }
+
     #[test]
     fn worker_slot_blocks_measurement_and_engine_changes_until_released() {
         let local = Local::new(Settings::default(), true).unwrap();
         local.ready.store(true, Ordering::SeqCst);
-        let worker = local.try_worker_slot().unwrap();
+        let worker = local.reserve_worker_slot(|| true).unwrap();
         assert_eq!(
             local.stop_for_measurement(false).unwrap_err(),
             "翻訳が終わってから計測してください"
@@ -1236,7 +1361,7 @@ mod tests {
         drop(worker);
         {
             let _change = local.lock_engine_change().unwrap();
-            assert!(local.try_worker_slot().is_none());
+            assert!(local.reserve_worker_slot(|| true).is_none());
             assert!(local.ready.load(Ordering::SeqCst));
         }
         let _measurement = local.stop_for_measurement(false).unwrap();
