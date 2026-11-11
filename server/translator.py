@@ -27,7 +27,6 @@ import ipaddress
 import secrets
 import http.client
 import json
-import itertools
 import math
 import logging
 import os
@@ -1243,7 +1242,7 @@ class Handler(BaseHTTPRequestHandler):
                     finish = value
                     self.sse({"done": True, "finish": value})
                     if volunteer and assigned and value == "stop":
-                        pool.after_delivery(assigned[-1], req, "".join(translated))
+                        pool.after_delivery(assigned[-1], req, "".join(translated), job.user)
                     break
                 else:
                     self.sse(
@@ -1927,7 +1926,9 @@ def check_translation(req, translated, reference):
         reasons.append("links")
     if not translation_numbers(translated) <= translation_numbers(reference):
         reasons.append("numbers")
-    if not matches_target_script(translated, req["target"]):
+    if matches_target_script(reference, req["target"]) and not matches_target_script(
+        translated, req["target"]
+    ):
         reasons.append("language")
     return tuple(reasons)
 
@@ -2129,6 +2130,7 @@ class CanaryChecks:
         if not (0 < self.canary_rate <= 1 and 0 < self.audit_rate <= 1 and backlog > 0):
             raise ValueError("確認用ジョブと抜き取りの率・待ち行列の設定が不正です")
         self.audit_queue = queue.Queue(maxsize=backlog)
+        self.suspicious_audits = WindowCounter(3600)
         self.audit_thread = None
         self.due_canaries = {}
         self.reference_timeout = 120
@@ -2147,36 +2149,38 @@ class CanaryChecks:
     def sampled(rate):
         return secrets.randbits(53) / (1 << 53) < rate
 
-    def after_delivery(self, worker, req, translated, inspect_unsampled=False):
+    def after_delivery(self, worker, req, translated, user=None):
         """配信完了後に呼ぶ。検査の完了や待ち行列の空きを待たない。"""
         if self.cancel.is_set() or not self.health.eligible(worker):
             return False
         wid = worker["id"]
         generation = worker["owner_generation"]
+        suspicious = False
+        if user is not None:
+            allowed = "\n".join(
+                [req["text"], *(value for pair in req["glossary"] for value in pair)]
+            )
+            suspicious = (
+                len(translated) > max_tokens(req["text"]) * 6
+                or not translation_links(translated) <= translation_links(allowed)
+                or not matches_target_script(translated, req["target"])
+            )
         with self.lock:
             if self.cancel.is_set():
                 return False
             if self.sampled(self.canary_rate):
                 self.due_canaries[wid] = generation
-            if self.sampled(self.audit_rate):
+            if not suspicious and not self.sampled(self.audit_rate):
+                return False
+            if self.audit_queue.full():
+                return False
+            if suspicious:
                 try:
-                    self.audit_queue.put_nowait((wid, generation, req, translated))
-                    return True
-                except queue.Full:
-                    pass
-        if inspect_unsampled:
-            allowed = "\n".join(
-                [req["text"], *(value for pair in req["glossary"] for value in pair)]
-            )
-            passed = (
-                len(translated) <= max_tokens(req["text"]) * 6
-                and translation_links(translated) <= translation_links(allowed)
-                and matches_target_script(translated, req["target"])
-            )
-            current = self.hub.registry.info(wid)
-            if current["owner_generation"] == generation:
-                self.health.record(current, passed=passed, canary=False)
-        return False
+                    self.suspicious_audits.charge(user, 1, 5)
+                except HttpError:
+                    return False
+            self.audit_queue.put_nowait((wid, generation, req, translated))
+            return True
 
     def run_audits(self):
         while not self.cancel.is_set():
@@ -2280,13 +2284,7 @@ class CanaryChecks:
                         return None
                     result.append(value)
                 elif kind == "done":
-                    return (
-                        "".join(result).strip()
-                        if value == "stop"
-                        and result
-                        and matches_target_script("".join(result), req["target"])
-                        else None
-                    )
+                    return "".join(result).strip() if value == "stop" and result else None
                 else:
                     return None
             return None
@@ -2427,7 +2425,8 @@ class VolunteerPool(DirectPool):
         self.owner_share = float(OWNER_SHARE_MAX)
         if not (1 <= self.window <= 100 and 0 < self.owner_share <= 1):
             raise ValueError("分散の設定が不正です")
-        self.history = deque()
+        self.assignment_minutes = {}
+        self.user_history = {}
         self.running = set()
         self.held = {}
         self.stats = {}
@@ -2446,12 +2445,17 @@ class VolunteerPool(DirectPool):
                 and not checks.needs_canary(worker)
             )
 
+    def expire_assignment_minutes(self, minute):
+        for bucket in list(self.assignment_minutes):
+            if bucket <= minute - 10:
+                del self.assignment_minutes[bucket]
+
     def spread(self, job, candidates, online, now, previous_workers=()):
-        while self.history and self.history[0][0] <= now - 600:
-            self.history.popleft()
-        # 履歴を捨てて比率の上限を回避させない。
-        if len(self.history) >= 100000:
-            return None
+        minute = int(now // 60)
+        self.expire_assignment_minutes(minute)
+        assignments = Counter()
+        for counts in self.assignment_minutes.values():
+            assignments.update(counts)
         parents = {}
 
         def root(key):
@@ -2469,7 +2473,7 @@ class VolunteerPool(DirectPool):
                 if left != right:
                     parents[right] = left
 
-        for _, _, _, owner, network in self.history:
+        for owner, network in assignments:
             connect(owner, network)
         for owner, network in online:
             connect(owner, network)
@@ -2479,9 +2483,11 @@ class VolunteerPool(DirectPool):
 
         owners = {owner_group(owner) for owner, _ in online}
         count = len(owners)
-        limit = self.owner_share if count >= 5 else min(1, 1.5 / max(1, count))
-        maximum = math.ceil((len(self.history) + 1) * limit)
-        counts = Counter(owner_group(owner) for _, _, _, owner, _ in self.history)
+        limit = max(self.owner_share, min(1, 1.5 / max(1, count)))
+        maximum = math.ceil((assignments.total() + 1) * limit)
+        counts = Counter()
+        for (owner, _), amount in assignments.items():
+            counts[owner_group(owner)] += amount
         excluded = {owner_group(worker["owner"]) for worker in previous_workers}
         candidates = [
             item
@@ -2492,20 +2498,18 @@ class VolunteerPool(DirectPool):
         if not candidates:
             return None
 
-        avoid = set()
-        previous = next((row for row in reversed(self.history) if row[1] == job.user), None)
-        if previous:
-            avoid.add(owner_group(previous[3]))
+        recent = self.user_history.setdefault(job.user, deque(maxlen=self.window))
+        while recent and recent[0][0] <= now - 600:
+            recent.popleft()
+        avoid = {owner_group(recent[-1][2])} if recent else set()
         if job.group is not None:
-            recent = (
-                row for row in reversed(self.history) if row[1] == job.user and row[2] == job.group
-            )
-            for _, _, _, owner, _ in itertools.islice(recent, self.window):
-                avoid.add(owner_group(owner))
+            avoid.update(owner_group(owner) for _, group, owner in recent if group == job.group)
         preferred = [item for item in candidates if owner_group(item[1]["owner"]) not in avoid]
         selected = secrets.choice(preferred or candidates)
         _, worker, network = selected
-        self.history.append((now, job.user, job.group, worker["owner"], network))
+        owner = worker["owner"]
+        self.assignment_minutes.setdefault(minute, Counter())[owner, network] += 1
+        recent.append((now, job.group, owner))
         self.degraded |= count < 5
         return selected
 
@@ -2574,9 +2578,9 @@ class VolunteerPool(DirectPool):
         except (HttpError, sqlite3.Error):
             pass
 
-    def after_delivery(self, worker, req, translated):
+    def after_delivery(self, worker, req, translated, user):
         try:
-            self.hub.checks.after_delivery(worker, req, translated, inspect_unsampled=True)
+            self.hub.checks.after_delivery(worker, req, translated, user=user)
         except Exception as error:
             log.error("volunteer delivery check failed: %s", type(error).__name__)
 
@@ -2595,9 +2599,13 @@ class VolunteerPool(DirectPool):
 
     def report(self):
         with self.condition:
-            cutoff = time.monotonic() - 600
-            while self.history and self.history[0][0] <= cutoff:
-                self.history.popleft()
+            now = time.monotonic()
+            self.expire_assignment_minutes(int(now // 60))
+            for user, recent in list(self.user_history.items()):
+                while recent and recent[0][0] <= now - 600:
+                    recent.popleft()
+                if not recent:
+                    del self.user_history[user]
             stats, self.stats = self.stats, {}
             degraded, self.degraded = self.degraded, False
         for (tier, purpose), counts in sorted(stats.items()):
@@ -2618,7 +2626,8 @@ class VolunteerPool(DirectPool):
         self.reporter.join()
         self.report()
         with self.condition:
-            self.history.clear()
+            self.assignment_minutes.clear()
+            self.user_history.clear()
 
 
 class JournalFormatter(logging.Formatter):

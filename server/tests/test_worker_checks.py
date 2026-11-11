@@ -417,6 +417,21 @@ class CanaryApiTest(unittest.TestCase):
         self.assertTrue(self.checks.audit_queue.empty())
         self.assertNotIn(b"evil.example", self.helper.state.read_bytes())
 
+    def test_suspicious_audit_quota_is_per_user_and_full_queue_does_not_charge_it(self):
+        _, worker = self.qualified_worker()
+        req = request()
+        output = "Unexpected https://evil.example/"
+        self.checks.audit_queue.maxsize = 1
+        with patch.object(self.checks, "sampled", return_value=False):
+            for _ in range(5):
+                self.assertTrue(self.checks.after_delivery(worker, req, output, user="reader"))
+                self.assertFalse(self.checks.after_delivery(worker, req, output, user="reader"))
+                self.checks.audit_queue.get_nowait()
+                self.checks.audit_queue.task_done()
+            self.assertFalse(self.checks.after_delivery(worker, req, output, user="reader"))
+            self.assertTrue(self.checks.after_delivery(worker, req, output, user="other-reader"))
+        self.assertTrue(self.checks.health.eligible(worker))
+
     def test_passing_audit_does_not_count_towards_probation(self):
         _, worker = self.qualified_worker()
         req = request()

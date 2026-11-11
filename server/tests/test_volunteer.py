@@ -2,6 +2,8 @@
 
 import http.client
 import json
+import threading
+from collections import Counter
 import time
 import unittest
 from unittest.mock import patch
@@ -78,7 +80,7 @@ class VolunteerTest(unittest.TestCase):
             self.assertEqual(response.status, 403)
             self.assertEqual(json.load(response)["code"], "consent_required")
         self.assertEqual(waiting.get(timeout=3)[0], 204)
-        self.assertFalse(self.pool.history)
+        self.assertFalse(self.pool.assignment_minutes)
 
     def test_delivery_schedules_audit_and_qualified_canary_and_logs_only_totals(self):
         mock, worker = self.qualified("owner-a", "192.0.2.1")
@@ -119,7 +121,7 @@ class VolunteerTest(unittest.TestCase):
         for value in ("test-reader", text, "192.0.2", mock.secret):
             self.assertNotIn(value.encode(), state)
 
-    def test_unsampled_output_is_checked_after_delivery(self):
+    def test_changed_url_is_quarantined_by_reference_audit(self):
         mock, worker = self.qualified("owner-a", "192.0.2.1")
         waiting = self.poll(mock, worker)
         with patch.object(self.checks, "sampled", return_value=False):
@@ -136,7 +138,45 @@ class VolunteerTest(unittest.TestCase):
             self.helper.wait(
                 lambda: self.helper.hub.registry.info(worker["id"])["state"] == "quarantine"
             )
-        self.assertEqual(self.fixture.stats["requests"], 0)
+        self.assertEqual(self.fixture.stats["requests"], 1)
+
+    def test_matching_reference_passes_even_with_few_japanese_characters(self):
+        source = (
+            "Supported: React, Vue, Angular, Svelte, SolidJS, Preact, Ember, "
+            "Backbone, Alpine, Qwik."
+        )
+        translated = (
+            "対応: React、Vue、Angular、Svelte、SolidJS、Preact、Ember、Backbone、Alpine、Qwik。"
+        )
+        self.assertFalse(tr.matches_target_script(translated, "ja"))
+        started, release = threading.Event(), threading.Event()
+
+        def reference_stream(prompt, limit, events, cancel, url):
+            started.set()
+            if release.wait(3):
+                events.put(("text", translated))
+                events.put(("done", "stop"))
+
+        mock, worker = self.qualified("owner-a", "192.0.2.1")
+        waiting = self.poll(mock, worker)
+        with (
+            patch.object(self.checks, "sampled", return_value=False),
+            patch.object(tr, "upstream_stream", side_effect=reference_stream),
+        ):
+            try:
+                _, response = self.request(self.body(text=source, target_lang="ja"))
+                _, assignment = waiting.get(timeout=3)
+                mock.result(
+                    assignment["assignment_id"], 0, text=translated, done=True, finish="stop"
+                )
+                self.assertIn(b'"done": true', response.read())
+                self.assertTrue(started.wait(2))
+                self.assertEqual(self.helper.hub.registry.info(worker["id"])["state"], "probation")
+                self.assertEqual(self.checks.health.workers[worker["id"]]["passed"], 2)
+            finally:
+                release.set()
+            self.helper.wait(lambda: self.checks.health.workers[worker["id"]]["passed"] == 3)
+        self.assertTrue(self.checks.health.eligible(self.helper.hub.registry.info(worker["id"])))
 
     def test_cancel_queued_and_running_requests(self):
         conn, response = self.request(self.body())
@@ -174,7 +214,7 @@ class VolunteerTest(unittest.TestCase):
         self.assertIn(b"Visible fragment.", response.readline())
         pair[second][0].result(aid, 1, error="engine")
         self.assertIn(b'"code": "worker_failed"', response.read())
-        self.assertEqual(len(self.pool.history), 2)
+        self.assertEqual(sum(bucket.total() for bucket in self.pool.assignment_minutes.values()), 2)
 
     def test_spread_uses_network_and_owner_as_one_group(self):
         now = time.monotonic()
@@ -186,3 +226,25 @@ class VolunteerTest(unittest.TestCase):
         self.assertEqual(self.pool.spread(job, [a], online, now), a)
         self.assertEqual(self.pool.spread(job, [alias, other], online, now), other)
         self.assertIsNone(self.pool.spread(job, [alias], online, now, [a[1]]))
+
+    def test_five_owner_cap_allows_an_available_worker_with_two_of_seven_jobs(self):
+        now = 600
+        job = tr.Job("reader", "interactive", now)
+        online = [(f"owner-{n}", "") for n in range(5)]
+        self.pool.assignment_minutes[10] = Counter(dict(zip(online, (2, 2, 1, 1, 1))))
+        candidate = ("worker", {"owner": "owner-0"}, "")
+        self.assertEqual(self.pool.spread(job, [candidate], online, now), candidate)
+        self.assertFalse(self.pool.degraded)
+
+    def test_minute_counts_do_not_stop_at_one_hundred_thousand_assignments(self):
+        now = 600
+        job = tr.Job("reader", "interactive", now, group="g" * 22)
+        online = [("owner-a", "192.0.2.0/24")]
+        self.pool.assignment_minutes[0] = Counter({online[0]: 100000})
+        self.pool.assignment_minutes[10] = Counter({online[0]: 100000})
+        candidate = ("worker", {"owner": "owner-a"}, online[0][1])
+        for _ in range(self.pool.window + 1):
+            self.assertEqual(self.pool.spread(job, [candidate], online, now), candidate)
+        self.assertEqual(set(self.pool.assignment_minutes), {10})
+        self.assertEqual(self.pool.assignment_minutes[10].total(), 100000 + self.pool.window + 1)
+        self.assertEqual(len(self.pool.user_history[job.user]), self.pool.window)
