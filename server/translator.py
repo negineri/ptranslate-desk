@@ -46,6 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import dataclass
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from http.cookies import SimpleCookie
 
 
@@ -1258,6 +1259,11 @@ class WorkerRegistry:
                     "ALTER TABLE owners ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0"
                 )
 
+            if "generation" not in {row[1] for row in self.db.execute("PRAGMA table_info(owners)")}:
+                self.db.execute(
+                    "ALTER TABLE owners ADD COLUMN generation INTEGER NOT NULL DEFAULT 0"
+                )
+
     def register(self, owner, terms):
         if type(terms) is not int or terms != WORKER_TERMS_VERSION:
             raise HttpError(400, "参加の規約への同意が必要です")
@@ -1304,7 +1310,7 @@ class WorkerRegistry:
             raise HttpError(401, "ワーカーの資格が無効です")
         with self.lock:
             row = self.db.execute(
-                "SELECT w.id,w.owner,w.expires,w.state,o.quarantined,o.revoked FROM workers w JOIN owners o ON w.owner=o.name WHERE w.digest=?",
+                "SELECT w.id,w.owner,w.expires,w.state,o.quarantined,o.revoked,o.generation FROM workers w JOIN owners o ON w.owner=o.name WHERE w.digest=?",
                 (hashlib.sha256(secret.encode()).hexdigest(),),
             ).fetchone()
             if not row or row[2] <= time.time() or row[3] == "revoked" or row[5]:
@@ -1315,12 +1321,13 @@ class WorkerRegistry:
                 "expires": row[2],
                 "state": row[3],
                 "owner_quarantined": bool(row[4]),
+                "owner_generation": row[6],
             }
 
     def info(self, worker_id):
         with self.lock:
             row = self.db.execute(
-                "SELECT w.id,w.owner,w.expires,w.state,o.quarantined,o.revoked FROM workers w JOIN owners o ON w.owner=o.name WHERE w.id=?",
+                "SELECT w.id,w.owner,w.expires,w.state,o.quarantined,o.revoked,o.generation FROM workers w JOIN owners o ON w.owner=o.name WHERE w.id=?",
                 (worker_id,),
             ).fetchone()
             if not row or row[2] <= time.time() or row[3] == "revoked" or row[5]:
@@ -1331,19 +1338,28 @@ class WorkerRegistry:
                 "expires": row[2],
                 "state": row[3],
                 "owner_quarantined": bool(row[4]),
+                "owner_generation": row[6],
             }
 
-    def quarantine_owner(self, owner):
+    def quarantine_owner(self, owner, generation=None):
         with self.lock, self.db:
-            self.db.execute("UPDATE owners SET quarantined=1 WHERE name=? AND revoked=0", (owner,))
-            self.db.execute(
-                "UPDATE workers SET state='quarantine' WHERE owner=? AND state!='revoked'", (owner,)
-            )
+            changed = self.db.execute(
+                "UPDATE owners SET quarantined=1 WHERE name=? AND revoked=0 AND (? IS NULL OR generation=?)",
+                (owner, generation, generation),
+            ).rowcount
+            if changed:
+                self.db.execute(
+                    "UPDATE workers SET state='quarantine' WHERE owner=? AND state!='revoked'",
+                    (owner,),
+                )
 
     def release_owner(self, owner):
         with self.lock, self.db:
             self.check_owner(owner)
-            self.db.execute("UPDATE owners SET quarantined=0 WHERE name=? AND revoked=0", (owner,))
+            self.db.execute(
+                "UPDATE owners SET quarantined=0,generation=generation+1 WHERE name=? AND revoked=0",
+                (owner,),
+            )
             self.db.execute(
                 "UPDATE workers SET state='probation' WHERE owner=? AND state='quarantine'",
                 (owner,),
@@ -1388,14 +1404,14 @@ class WorkerRegistry:
         if self.revocation_callback:
             self.revocation_callback(worker_id=worker_id)
 
-    def set_state(self, worker_id, state):
+    def set_state(self, worker_id, state, generation=None):
         if state not in ("probation", "quarantine", "revoked"):
             raise ValueError("ワーカーの状態が不正です")
         with self.lock, self.db:
             changed = (
                 self.db.execute(
-                    "UPDATE workers SET state=? WHERE id=? AND (state!='revoked' OR ?='revoked') AND (?!='probation' OR EXISTS (SELECT 1 FROM owners o WHERE o.name=workers.owner AND o.revoked=0 AND o.quarantined=0))",
-                    (state, worker_id, state, state),
+                    "UPDATE workers SET state=? WHERE id=? AND (state!='revoked' OR ?='revoked') AND (?!='probation' OR EXISTS (SELECT 1 FROM owners o WHERE o.name=workers.owner AND o.revoked=0 AND o.quarantined=0)) AND (? IS NULL OR EXISTS (SELECT 1 FROM owners o WHERE o.name=workers.owner AND o.generation=?))",
+                    (state, worker_id, state, state, generation, generation),
                 ).rowcount
                 > 0
             )
@@ -1518,6 +1534,9 @@ class WorkerHub:
                 # SQLiteへはHubのロックを持たずに問い合わせる。
                 # 期限前の更新も取り込むため、資格の期限に達した場合も再確認する。
                 worker = self.valid(secret)
+                with self.condition:
+                    if wid in self.ready:
+                        self.ready[wid] = (worker, network)
                 next_validation = time.monotonic() + 5
         finally:
             with self.condition:
@@ -1842,6 +1861,8 @@ class WorkerHealth:
         with self.lock:
             return (
                 worker["id"] in self.qualified
+                and self.workers.get(worker["id"], {}).get("generation", 0)
+                == worker.get("owner_generation", 0)
                 and worker["state"] == "probation"
                 and not worker.get("owner_quarantined", False)
             )
@@ -1861,10 +1882,23 @@ class WorkerHealth:
                     "recent": deque(maxlen=20),
                 },
             )
+            generation = worker.get("owner_generation", 0)
+            if generation < max(
+                stats.get("generation", 0), self.owners.get(owner, {}).get("generation", 0)
+            ):
+                return
+            if stats.get("generation", 0) != generation:
+                stats["streak"] = 0
+                stats["recent"].clear()
+                self.qualified.discard(wid)
+            stats["generation"] = generation
+            if owner in self.owners and self.owners[owner].get("generation", 0) != generation:
+                self.owners.pop(owner)
             owner_stats = self.owners.setdefault(
                 owner,
                 {"passed": 0, "failed": 0, "errors": 0, "timeouts": 0, "failures": deque(maxlen=3)},
             )
+            owner_stats["generation"] = generation
             for bucket in (stats, owner_stats):
                 bucket[
                     "passed" if passed is True else "failed" if passed is False else "errors"
@@ -1879,9 +1913,9 @@ class WorkerHealth:
                     failures.popleft()
                 failures.append(now)
                 self.qualified.discard(wid)
-                self.registry.set_state(wid, "quarantine")
+                self.registry.set_state(wid, "quarantine", generation)
                 if len(failures) >= 3:
-                    self.registry.quarantine_owner(owner)
+                    self.registry.quarantine_owner(owner, generation)
                     self.qualified.difference_update(
                         worker_id
                         for worker_id, record in self.workers.items()
@@ -1893,13 +1927,13 @@ class WorkerHealth:
                 and sum(stats["recent"]) / len(stats["recent"]) >= 0.5
             ):
                 self.qualified.discard(wid)
-                self.registry.set_state(wid, "quarantine")
+                self.registry.set_state(wid, "quarantine", generation)
             elif (
                 passed is True
                 and stats["streak"] >= self.probation_jobs
                 and not worker.get("owner_quarantined", False)
             ):
-                if self.registry.set_state(wid, "probation"):
+                if self.registry.set_state(wid, "probation", generation):
                     self.qualified.add(wid)
                 else:
                     self.qualified.discard(wid)
@@ -1916,28 +1950,47 @@ class WorkerHealth:
 
 
 class CanaryChecks:
-    """1本の検査経路。基準生成と照合中の内容はメモリだけに置く。"""
+    """検証用エンジンの枠まで並列に照合し、内容はメモリだけに置く。"""
 
-    def __init__(self, hub, upstreams, canary_file, probation_jobs=20):
-        fd = os.open(canary_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    @staticmethod
+    def file_signature(metadata):
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+            metadata.st_size,
+        )
+
+    @staticmethod
+    def load_samples(canary_file):
+        fd = os.open(
+            canary_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
         try:
             metadata = os.fstat(fd)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16 * 1024 * 1024:
                 raise ValueError("確認用ジョブは16MiB以下の通常ファイルにしてください")
             if os.name != "nt" and (metadata.st_uid != os.getuid() or metadata.st_mode & 0o077):
                 raise ValueError("確認用ジョブのファイルを所有者本人の0600にしてください")
-            with os.fdopen(fd, "r", encoding="utf-8") as source:
+            with os.fdopen(fd, "rb") as source:
                 fd = None
                 try:
-                    data = json.load(source)
-                except (ValueError, UnicodeError):
+                    raw = source.read(16 * 1024 * 1024 + 1)
+                    if len(raw) > 16 * 1024 * 1024:
+                        raise ValueError("確認用ジョブが大きすぎます")
+                    data = json.loads(raw.decode("utf-8"))
+                    final = os.fstat(source.fileno())
+                    if CanaryChecks.file_signature(metadata) != CanaryChecks.file_signature(final):
+                        raise ValueError("確認用ジョブの読み取り中に更新されました")
+                except (ValueError, RecursionError):
                     raise ValueError("確認用ジョブのJSONが不正です") from None
         finally:
             if fd is not None:
                 os.close(fd)
         if not isinstance(data, list) or not data or len(data) > 10000:
             raise ValueError("確認用ジョブは1〜10000件のJSON配列にしてください")
-        self.samples = []
+        samples = []
         seen = set()
         allowed = {"text", "target_lang", "source_lang", "form", "context", "glossary", "history"}
         for body in data:
@@ -1949,20 +2002,65 @@ class CanaryChecks:
                 raise ValueError("確認用ジョブの入力が不正です") from None
             digest = hashlib.sha256(req["text"].encode()).hexdigest()
             if digest not in seen:
-                self.samples.append((digest, req))
+                samples.append((digest, req))
                 seen.add(digest)
+        return samples, CanaryChecks.file_signature(metadata)
+
+    def __init__(self, hub, upstreams, canary_file, probation_jobs=20):
+        self.samples, self.signature = self.load_samples(canary_file)
+        self.sample_ids = {digest for digest, _ in self.samples}
+        self.canary_file = Path(canary_file)
+        self.failed_signature = None
+        self.lock = threading.RLock()
         self.hub = hub
         self.pool = DirectPool(upstreams)
         self.health = WorkerHealth(hub.registry, probation_jobs)
         self.used = {}
+        self.reserved = {}
+        self.busy_workers = set()
         self.cancel = UpstreamCancellation()
         self.thread = None
+        self.executor = ThreadPoolExecutor(
+            max_workers=self.pool.total_slots, thread_name_prefix="canary"
+        )
         self.reference_timeout = 120
+        self.reload_interval = 1
+        self.stats_interval = 60
 
     def start(self):
         thread = threading.Thread(target=self.run, daemon=True)
         thread.start()
         self.thread = thread
+
+    def reload_if_changed(self):
+        signature = None
+        try:
+            signature = self.file_signature(self.canary_file.stat())
+            with self.lock:
+                if signature == self.signature or signature == self.failed_signature:
+                    return False
+            samples, loaded_signature = self.load_samples(self.canary_file)
+            with self.lock:
+                self.samples = samples
+                self.sample_ids = {digest for digest, _ in samples}
+                self.signature = loaded_signature
+                self.failed_signature = None
+            return True
+        except (OSError, ValueError) as error:
+            # 壊れた更新は採用せず、同じ失敗を毎秒ログに出さない。
+            failure = signature if signature is not None else ("missing",)
+            with self.lock:
+                report = failure != self.failed_signature
+                self.failed_signature = failure
+            if report:
+                log.warning("canary reload failed: %s", type(error).__name__)
+            return False
+
+    def report_exhaustion(self):
+        with self.lock:
+            count = sum(self.sample_ids <= digests for digests in self.used.values())
+        log.info("canary exhausted_owners=%d", count)
+        return count
 
     def reference(self, req):
         events = queue.Queue()
@@ -2019,64 +2117,103 @@ class CanaryChecks:
             thread.join(timeout=5.2)
 
     def run(self):
+        next_reload = next_stats = 0
         while not self.cancel.is_set():
+            now = time.monotonic()
+            if now >= next_reload:
+                self.reload_if_changed()
+                next_reload = now + self.reload_interval
+            if now >= next_stats:
+                self.report_exhaustion()
+                next_stats = now + self.stats_interval
             with self.hub.condition:
-                candidates = [
-                    worker
-                    for worker, _ in self.hub.ready.values()
-                    if not self.health.eligible(worker)
-                    and not worker.get("owner_quarantined", False)
-                    and len(self.used.get(worker["owner"], ())) < len(self.samples)
-                ]
-                worker = secrets.choice(candidates) if candidates else None
-                if worker is None:
-                    self.hub.condition.wait(0.2)
-                    continue
-            unused = [
-                (digest, req)
-                for digest, req in self.samples
-                if digest not in self.used.get(worker["owner"], set())
-            ]
-            digest, req = secrets.choice(unused)
-            try:
-                worker = self.hub.registry.info(worker["id"])
+                ready = [worker for worker, _ in self.hub.ready.values()]
+            selected = None
+            with self.lock:
+                if len(self.busy_workers) < self.pool.total_slots:
+                    candidates = [
+                        worker
+                        for worker in ready
+                        if worker["id"] not in self.busy_workers
+                        and not self.health.eligible(worker)
+                        and not worker.get("owner_quarantined", False)
+                        and self.sample_ids
+                        - self.used.get(worker["owner"], set())
+                        - self.reserved.get(worker["owner"], set())
+                    ]
+                    if candidates:
+                        worker = secrets.choice(candidates)
+                        available = (
+                            self.sample_ids
+                            - self.used.get(worker["owner"], set())
+                            - self.reserved.get(worker["owner"], set())
+                        )
+                        digest = secrets.choice(tuple(available))
+                        req = next(req for key, req in self.samples if key == digest)
+                        self.busy_workers.add(worker["id"])
+                        self.reserved.setdefault(worker["owner"], set()).add(digest)
+                        selected = (worker, digest, req)
+            if selected is not None:
+                try:
+                    self.executor.submit(self.check, *selected)
+                except RuntimeError:
+                    self.unreserve(selected[0], selected[1])
+                    if not self.cancel.is_set():
+                        raise
+            else:
                 with self.hub.condition:
-                    if worker["id"] in self.hub.ready:
-                        _, network = self.hub.ready[worker["id"]]
-                        self.hub.ready[worker["id"]] = (worker, network)
-                if self.health.eligible(worker) or worker.get("owner_quarantined", False):
-                    continue
-                reference = self.reference(req)
-                if reference is None or self.cancel.is_set():
-                    self.cancel.wait(1)
-                    continue
+                    self.hub.condition.wait(0.2)
+
+    def unreserve(self, worker, digest):
+        with self.lock:
+            self.busy_workers.discard(worker["id"])
+            reserved = self.reserved.get(worker["owner"], set())
+            reserved.discard(digest)
+            if not reserved:
+                self.reserved.pop(worker["owner"], None)
+        with self.hub.condition:
+            self.hub.condition.notify_all()
+
+    def check(self, worker, digest, req):
+        try:
+            worker = self.hub.registry.info(worker["id"])
+            with self.hub.condition:
+                if worker["id"] in self.hub.ready:
+                    _, network = self.hub.ready[worker["id"]]
+                    self.hub.ready[worker["id"]] = (worker, network)
+            if self.health.eligible(worker) or worker.get("owner_quarantined", False):
+                return
+            reference = self.reference(req)
+            if reference is None or self.cancel.is_set():
+                self.cancel.wait(1)
+                return
+            with self.lock:
                 self.used.setdefault(worker["owner"], set()).add(digest)
-                events = queue.Queue()
-                outcome = self.hub.execute_probe(
-                    req, events, self.cancel, timeout=25, target_worker=worker["id"], attempts=1
-                )
-                text = []
-                finished = False
-                while not events.empty():
-                    kind, value = events.get_nowait()
-                    if kind == "text":
-                        text.append(value)
-                    elif kind == "done":
-                        finished = value == "stop"
-                if outcome not in ("cancelled", "unavailable") and not self.cancel.is_set():
-                    current = self.hub.registry.info(worker["id"])
-                    verdict = (
-                        not check_translation(req, "".join(text), reference) if finished else None
-                    )
-                    self.health.record(current, passed=verdict, timed_out=outcome == "timeout")
-            except (HttpError, OSError, ValueError, sqlite3.Error):
-                self.cancel.wait(1)
-            except Exception as error:
-                log.error("canary check failed: %s", type(error).__name__)
-                self.cancel.wait(1)
-            finally:
-                reference = req = None
-                text = None
+            events = queue.Queue()
+            outcome = self.hub.execute_probe(
+                req, events, self.cancel, timeout=25, target_worker=worker["id"], attempts=1
+            )
+            text, finished = [], False
+            while not events.empty():
+                kind, value = events.get_nowait()
+                if kind == "text":
+                    text.append(value)
+                elif kind == "done":
+                    finished = value == "stop"
+            if outcome not in ("cancelled", "unavailable") and not self.cancel.is_set():
+                current = self.hub.registry.info(worker["id"])
+                if current["owner_generation"] != worker["owner_generation"]:
+                    return
+                verdict = not check_translation(req, "".join(text), reference) if finished else None
+                self.health.record(current, passed=verdict, timed_out=outcome == "timeout")
+        except (HttpError, OSError, ValueError, sqlite3.Error):
+            self.cancel.wait(1)
+        except Exception as error:
+            log.error("canary check failed: %s", type(error).__name__)
+            self.cancel.wait(1)
+        finally:
+            reference = req = text = None
+            self.unreserve(worker, digest)
 
     def close(self):
         self.cancel.set()
@@ -2084,6 +2221,10 @@ class CanaryChecks:
             self.hub.condition.notify_all()
         if self.thread is not None:
             self.thread.join(timeout=6)
+        self.executor.shutdown(wait=True, cancel_futures=True)
+        with self.lock:
+            self.busy_workers.clear()
+            self.reserved.clear()
 
 
 class JournalFormatter(logging.Formatter):

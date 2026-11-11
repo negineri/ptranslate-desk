@@ -14,6 +14,7 @@ class MockWorker:
         self.host, self.port = url.hostname, url.port
         self.country, self.network = country, network
         self.secret = ""
+        self.timeout = 5
 
     def call(self, path, body=None, owner=None, method="POST", secret=None):
         headers = {
@@ -25,7 +26,7 @@ class MockWorker:
             headers["X-Forwarded-User"] = owner
         if secret is not None or self.secret:
             headers["Authorization"] = "Bearer " + (self.secret if secret is None else secret)
-        conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
         try:
             conn.request(method, path, json.dumps(body) if body is not None else None, headers)
             response = conn.getresponse()

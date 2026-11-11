@@ -1,15 +1,33 @@
 """照合・試用・検疫。基準エンジンもワーカーもローカルのモックを使う。"""
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 import test_workers as workers
 from test_translator import tr, mock_plamo
+
+
+ADMIN = Path(__file__).resolve().parents[2] / "tools" / "worker_admin.py"
+
+
+def run_admin(state, *args):
+    return subprocess.run(
+        [sys.executable, str(ADMIN), *args],
+        env={**os.environ, "TR_STATE_FILE": str(state)},
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    )
 
 
 def request(text="This is a synthetic translation test."):
@@ -136,7 +154,7 @@ class WorkerHealthTest(unittest.TestCase):
 
     def test_old_schema_is_migrated(self):
         path = Path(self.directory.name) / "legacy.sqlite"
-        with tr.sqlite3.connect(path) as legacy:
+        with closing(tr.sqlite3.connect(path)) as legacy, legacy:
             legacy.execute(
                 "CREATE TABLE owners (name TEXT PRIMARY KEY, terms INTEGER, agreed TEXT, revoked INTEGER NOT NULL DEFAULT 0)"
             )
@@ -241,13 +259,123 @@ class CanaryApiTest(unittest.TestCase):
 
     def test_exhausted_corpus_does_not_repeat_same_owner(self):
         mock, data = self.helper.worker()
-        self.checks.samples = self.checks.samples[:1]
+        self.canaries.write_text(
+            json.dumps([{"text": "Single synthetic verification sentence.", "target_lang": "en"}])
+        )
+        self.assertTrue(self.checks.reload_if_changed())
         self.checks.start()
         self.answer(mock)
         self.helper.wait(lambda: data["worker_id"] in self.checks.health.workers)
         self.assertEqual(mock.poll(workers.MODEL)[0], 204)
         self.assertEqual(len(self.checks.used["alice"]), 1)
         self.assertNotIn(data["worker_id"], self.checks.health.qualified)
+
+    def test_three_slots_assign_three_workers_at_once(self):
+        self.checks.close()
+        self.checks = tr.CanaryChecks(
+            self.helper.hub,
+            [(f"http://127.0.0.1:{self.engine.server_port}/v1/completions", 3)],
+            self.canaries,
+            probation_jobs=2,
+        )
+        self.helper.hub.checks = self.checks
+        self.addCleanup(self.checks.close)
+        mocks = [self.helper.worker(owner)[0] for owner in ("alice", "alice", "bob")]
+        self.checks.start()
+        results = [
+            self.helper.run_thread(lambda mock=mock: mock.poll(workers.MODEL)) for mock in mocks
+        ]
+        assignments = []
+        for result in results:
+            status, assignment = result.get(timeout=3)
+            self.assertEqual(status, 200, assignment)
+            assignments.append(assignment)
+        self.assertEqual(len(self.helper.hub.assignments), 3)
+        self.assertNotEqual(assignments[0]["input"]["text"], assignments[1]["input"]["text"])
+        self.assertEqual(mocks[0].poll(workers.MODEL)[0], 409)
+        self.assertEqual(self.stats["requests"], 3)
+        for mock, assignment in zip(mocks, assignments):
+            self.assertEqual(
+                mock.result(
+                    assignment["assignment_id"],
+                    0,
+                    text="[en] " + assignment["input"]["text"],
+                    done=True,
+                    finish="stop",
+                )[0],
+                200,
+            )
+
+    def test_reload_keeps_used_and_scores_and_logs_only_owner_count(self):
+        first = {"text": "First private synthetic sentence.", "target_lang": "en"}
+        second = {"text": "Second private synthetic sentence.", "target_lang": "en"}
+        self.canaries.write_text(json.dumps([first]))
+        self.checks.reload_if_changed()
+        self.checks.reload_interval = 0.05
+        mock, data = self.helper.worker()
+        self.checks.start()
+        self.assertEqual(self.answer(mock), first["text"])
+        self.helper.wait(lambda: data["worker_id"] in self.checks.health.workers)
+        with self.assertLogs(tr.log, "INFO") as logs:
+            self.assertEqual(self.checks.report_exhaustion(), 1)
+        self.assertEqual(logs.output, ["INFO:translator:canary exhausted_owners=1"])
+        replacement = self.canaries.with_suffix(".new")
+        replacement.write_text(json.dumps([first, second]))
+        replacement.chmod(0o600)
+        replacement.replace(self.canaries)
+        self.helper.wait(lambda: len(self.checks.samples) == 2)
+        self.assertEqual(self.answer(mock), second["text"])
+        self.helper.wait(lambda: data["worker_id"] in self.checks.health.qualified)
+        self.assertEqual(self.checks.health.workers[data["worker_id"]]["streak"], 2)
+        self.assertEqual(len(self.checks.used["alice"]), 2)
+
+    def test_invalid_reload_keeps_previous_corpus_without_logging_content(self):
+        previous = self.checks.samples
+        self.canaries.write_text("private invalid content")
+        with self.assertLogs(tr.log, "WARNING") as logs:
+            self.assertFalse(self.checks.reload_if_changed())
+            self.assertFalse(self.checks.reload_if_changed())
+        self.assertEqual(logs.output, ["WARNING:translator:canary reload failed: ValueError"])
+        self.assertIs(self.checks.samples, previous)
+
+    def test_admin_revoke_owner_ends_poll_on_database_recheck(self):
+        self.helper.hub.poll_seconds = 10
+        mock, data = self.helper.worker()
+        mock.timeout = 8
+        waiting = self.helper.run_thread(lambda: mock.poll(workers.MODEL))
+        self.helper.wait(lambda: data["worker_id"] in self.helper.hub.ready)
+        output = run_admin(self.helper.state, "list-owners")
+        self.assertEqual(
+            json.loads(output.stdout),
+            [{"owner": "alice", "workers": 1, "quarantined": False, "revoked": False}],
+        )
+        run_admin(self.helper.state, "revoke-owner", "alice")
+        self.assertNotIn("alice", self.helper.hub.revoked_owners)
+        self.assertEqual(waiting.get(timeout=6)[0], 401)
+        self.assertTrue(
+            json.loads(run_admin(self.helper.state, "list-owners").stdout)[0]["revoked"]
+        )
+
+    def test_admin_release_invalidates_streak_and_can_revoke_one_worker(self):
+        mock, data = self.helper.worker()
+        registry = self.helper.hub.registry
+        health = self.checks.health
+        worker = registry.info(data["worker_id"])
+        health.record(worker, True)
+        health.record(worker, True)
+        self.assertTrue(health.eligible(worker))
+        registry.quarantine_owner("alice")
+        run_admin(self.helper.state, "release-owner", "alice")
+        refreshed = registry.info(data["worker_id"])
+        self.assertFalse(health.eligible(refreshed))
+        health.record(refreshed, True)
+        self.assertEqual(health.workers[data["worker_id"]]["streak"], 1)
+        self.assertFalse(health.eligible(refreshed))
+        run_admin(self.helper.state, "revoke-worker", data["worker_id"])
+        self.assertEqual(mock.poll(workers.MODEL)[0], 401)
+        self.assertFalse(
+            json.loads(run_admin(self.helper.state, "list-owners").stdout)[0]["revoked"]
+        )
 
     def test_private_corpus_permissions_and_input_are_checked(self):
         self.canaries.chmod(0o644)
