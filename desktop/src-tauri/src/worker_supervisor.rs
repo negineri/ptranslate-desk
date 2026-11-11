@@ -1,9 +1,9 @@
 //! 1件だけ動くエージェントの親側。権限制限を整えるまで画面からは起動しない。
 #![allow(dead_code)]
 use crate::worker_agent::{Bootstrap, ASSIGNED_LINE, READY_LINE, START_COMMAND};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{process::Stdio, sync::Mutex, time::Duration};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -44,6 +44,46 @@ pub(crate) fn can_accept(
     enabled && external_power == Some(true) && own_requests == 0 && !running
 }
 
+#[derive(Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Phase {
+    #[default]
+    Idle,
+    Starting,
+    Waiting,
+    Working,
+    Paused,
+    Error,
+}
+
+#[derive(Clone, Copy, Default, Serialize)]
+pub(crate) struct Activity {
+    phase: Phase,
+    completed: u64,
+}
+
+impl Activity {
+    fn finish(&mut self, result: &Result<Status, String>) {
+        self.phase = match result {
+            Ok(Status::Completed) => {
+                self.completed = self.completed.saturating_add(1);
+                Phase::Idle
+            }
+            Ok(Status::Waiting) => Phase::Idle,
+            Ok(Status::Paused) => Phase::Paused,
+            _ => Phase::Error,
+        };
+    }
+}
+
+#[tauri::command]
+pub(crate) fn worker_activity(app: AppHandle, window: WebviewWindow) -> Result<Activity, String> {
+    if window.label() != "main" {
+        return Err("メインウィンドウで操作してください".into());
+    }
+    Ok(app.state::<Lifecycle>().state.lock().unwrap().activity)
+}
+
 #[derive(Default)]
 pub(crate) struct Lifecycle {
     changes: AsyncMutex<()>,
@@ -54,6 +94,7 @@ pub(crate) struct Lifecycle {
 struct LifecycleState {
     current: Option<Running>,
     shutting_down: bool,
+    activity: Activity,
 }
 
 struct Running {
@@ -133,12 +174,31 @@ pub(crate) async fn run(
     app: AppHandle,
     command: Command,
     config: Bootstrap,
-    update: impl FnMut(Status) + Send + 'static,
 ) -> Result<Status, String> {
     tauri::async_runtime::spawn(async move {
         let lifecycle = app.state::<Lifecycle>();
         let (_running, stop) = lifecycle.begin().await?;
-        run_one(&app, command, config, stop, update).await
+        let publish = |change: &dyn Fn(&mut Activity)| {
+            let snapshot = {
+                let mut state = lifecycle.state.lock().unwrap();
+                change(&mut state.activity);
+                state.activity
+            };
+            let _ = app.emit_to("main", "worker-activity", snapshot);
+        };
+        publish(&|state| state.phase = Phase::Starting);
+        let result = run_one(&app, command, config, stop, |status| {
+            publish(&|state| {
+                state.phase = match status {
+                    Status::Waiting => Phase::Waiting,
+                    Status::Working => Phase::Working,
+                    _ => state.phase,
+                }
+            });
+        })
+        .await;
+        publish(&|state| state.finish(&result));
+        result
     })
     .await
     .map_err(|_| "ワーカーの監督処理を完了できませんでした".to_owned())?
@@ -243,6 +303,7 @@ async fn supervise<Permit>(
         stdin.write_all(&input).await.map_err(|_| ())?;
         stdin.flush().await.map_err(|_| ())?;
         drop(input);
+        update(Status::Waiting);
         let mut last = None;
         let mut reserve = Some(reserve);
         let mut admission_check = tokio::time::interval_at(
@@ -365,6 +426,22 @@ mod tests {
     }
 
     #[test]
+    fn activity_counts_only_completed_assignments_and_exposes_no_details() {
+        let mut activity = Activity::default();
+        activity.finish(&Ok(Status::Paused));
+        assert_eq!(
+            serde_json::to_value(activity).unwrap(),
+            serde_json::json!({"phase":"paused","completed":0})
+        );
+        activity.finish(&Ok(Status::Completed));
+        activity.finish(&Err("private detail".into()));
+        assert_eq!(
+            serde_json::to_value(activity).unwrap(),
+            serde_json::json!({"phase":"error","completed":1})
+        );
+    }
+
+    #[test]
     fn admission_requires_power_idle_and_one_slot() {
         assert!(can_accept(true, Some(true), 0, false));
         assert!(!can_accept(false, Some(true), 0, false));
@@ -481,7 +558,17 @@ mod tests {
         let powered = std::cell::Cell::new(true);
         let script = format!("{ready}printf '%s\\n' '{{\"status\":\"assigned\"}}'; read permission; test \"$permission\" = go || exit 1; printf '%s\\n' '{{\"status\":\"working\"}}'; sleep 1; printf '%s\\n' '{{\"status\":\"completed\"}}'");
         assert_eq!(
-            mock(&script, rx, |_| powered.set(false), || powered.get()).await,
+            mock(
+                &script,
+                rx,
+                |status| {
+                    if status == Status::Working {
+                        powered.set(false);
+                    }
+                },
+                || powered.get()
+            )
+            .await,
             Ok(Status::Completed)
         );
     }
@@ -496,7 +583,7 @@ mod tests {
             mock(
                 script,
                 rx,
-                |_| panic!("unexpected working status"),
+                |status| assert_ne!(status, Status::Working),
                 || {
                     checks += 1;
                     can_accept(true, Some(true), usize::from(checks > 1), false)
@@ -522,8 +609,9 @@ mod tests {
                 &format!("{working}{after_work}"),
                 rx,
                 |status| {
-                    assert_eq!(status, Status::Working);
-                    tx.take().unwrap().send(()).unwrap();
+                    if status == Status::Working {
+                        tx.take().unwrap().send(()).unwrap();
+                    }
                 },
                 || true,
             )

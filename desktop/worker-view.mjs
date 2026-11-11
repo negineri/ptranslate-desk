@@ -1,6 +1,7 @@
 import { settingsPage } from "./settings-view.mjs";
 
 const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 const style = document.createElement("style");
 style.textContent = `#worker-registration form { display: grid; gap: 8px; margin-top: 12px; }
   #worker-registration input[name] { width: 100%; min-width: 0; }
@@ -33,7 +34,8 @@ panel.innerHTML = `<summary>翻訳の処理を提供する</summary>
       <button type="button" id="worker-forget-cancel">キャンセル</button>
     </fieldset>
   </form>
-  <p class="hint" role="status"></p>`;
+  <p class="hint" role="status"></p>
+  <p id="worker-activity" class="hint" hidden></p>`;
 settingsPage.append(panel);
 const form = panel.querySelector("form");
 const terms = form.querySelector("#worker-terms");
@@ -45,6 +47,23 @@ const forget = form.querySelector("#worker-forget");
 const confirmation = form.querySelector("#worker-forget-confirmation");
 const agree = form.querySelector("#worker-forget-agree");
 const fields = [...form.querySelectorAll("input[name]")];
+const activityLine = panel.querySelector("#worker-activity");
+const phaseLabels = {
+  idle: "停止中", starting: "準備中", waiting: "待機中",
+  working: "処理中", paused: "一時停止中", error: "処理を続けられませんでした",
+};
+let activity;
+
+function renderActivity(next) {
+  activity = next;
+  activityLine.hidden = next.phase === "idle" && next.completed === 0;
+  activityLine.textContent = `${phaseLabels[next.phase]} · 処理した区切り ${next.completed.toLocaleString("ja-JP")} 件`;
+}
+
+void listen("worker-activity", ({ payload }) => renderActivity(payload)).then(async () => {
+  const snapshot = await invoke("worker_activity");
+  if (!activity) renderActivity(snapshot);
+}).catch(() => {});
 let state;
 let busy = false;
 
