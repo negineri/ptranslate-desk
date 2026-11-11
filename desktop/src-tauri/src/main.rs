@@ -19,6 +19,7 @@ mod updates;
 mod windows;
 mod worker_agent;
 mod worker_registration;
+mod worker_supervisor;
 
 #[cfg(feature = "smoke-test")]
 #[tauri::command]

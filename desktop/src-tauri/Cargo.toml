@@ -24,7 +24,7 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"
 tempfile = "3"
 zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-tokio = { version = "1", features = ["time", "net", "io-util", "sync", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["time", "net", "io-util", "sync", "macros", "rt-multi-thread", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

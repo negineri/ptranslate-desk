@@ -1,7 +1,7 @@
 //! 親プロセスから1件分の接続情報を受け取り、最大1件を処理する。
 use crate::translation::{prompt, Decoder};
 use reqwest::{Client, Response, StatusCode, Url};
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,15 +13,15 @@ const MAX_MESSAGE: usize = 256 * 1024;
 const POST_TIMEOUT: Duration = Duration::from_secs(5);
 type Result<T> = std::result::Result<T, ()>;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Bootstrap {
-    broker: String,
-    worker_secret: String,
-    model_sha256: String,
-    agent_version: String,
-    engine_port: u16,
-    engine_secret: String,
+pub(crate) struct Bootstrap {
+    pub(crate) broker: String,
+    pub(crate) worker_secret: String,
+    pub(crate) model_sha256: String,
+    pub(crate) agent_version: String,
+    pub(crate) engine_port: u16,
+    pub(crate) engine_secret: String,
 }
 
 impl Drop for Bootstrap {
