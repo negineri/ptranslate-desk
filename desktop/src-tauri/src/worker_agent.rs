@@ -13,6 +13,18 @@ use zeroize::{Zeroize, Zeroizing};
 const MAX_MESSAGE: usize = 256 * 1024;
 const POST_TIMEOUT: Duration = Duration::from_secs(5);
 type Result<T> = std::result::Result<T, ()>;
+type RequestResult<T> = std::result::Result<T, RequestError>;
+
+enum RequestError {
+    Failed,
+    Rejected,
+}
+
+impl From<()> for RequestError {
+    fn from(_: ()) -> Self {
+        Self::Failed
+    }
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -192,50 +204,55 @@ impl Agent {
         })
     }
 
-    async fn post(&self, route: &str, body: &Value, limit: Duration) -> Result<Response> {
-        self.client
+    async fn post(&self, route: &str, body: &Value, limit: Duration) -> RequestResult<Response> {
+        let response = self
+            .client
             .post(self.broker.join(route).map_err(|_| ())?)
             .bearer_auth(&self.config.worker_secret)
             .timeout(limit)
             .json(body)
             .send()
             .await
-            .map_err(|_| ())
+            .map_err(|_| ())?;
+        match response.status() {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(RequestError::Rejected),
+            _ => Ok(response),
+        }
     }
 
-    async fn send_result(&self, id: &str, seq: &AtomicU64, mut body: Value) -> Result<bool> {
+    async fn send_result(&self, id: &str, seq: &AtomicU64, mut body: Value) -> RequestResult<bool> {
         body["assignment_id"] = json!(id);
         body["seq"] = json!(seq.load(Ordering::Relaxed));
         let response = self.post("/api/worker/result", &body, POST_TIMEOUT).await?;
         if response.status() != StatusCode::OK {
-            return Err(());
+            return Err(RequestError::Failed);
         }
         let reply: ResultReply = json_body(response).await?;
         seq.fetch_add(1, Ordering::Relaxed);
         Ok(reply.stop)
     }
 
-    async fn stop_requested(&self, id: &str) -> Result<()> {
+    async fn stop_requested(&self, id: &str) -> RequestResult<()> {
         loop {
             sleep(Duration::from_secs(5)).await;
             let response = self
                 .post("/api/worker/ping", &json!({"active":[id]}), POST_TIMEOUT)
                 .await?;
             if response.status() != StatusCode::OK {
-                return Err(());
+                return Err(RequestError::Failed);
             }
             let reply: PingReply = json_body(response).await?;
             if !reply.stop.is_empty() {
                 return if reply.stop.len() == 1 && reply.stop[0] == id {
                     Ok(())
                 } else {
-                    Err(())
+                    Err(RequestError::Failed)
                 };
             }
         }
     }
 
-    async fn flush(&self, id: &str, seq: &AtomicU64, text: &mut String) -> Result<bool> {
+    async fn flush(&self, id: &str, seq: &AtomicU64, text: &mut String) -> RequestResult<bool> {
         while !text.is_empty() {
             // JSONエスケープ後も1回のPOSTを64KiBより小さく保つ。
             let end = text
@@ -259,7 +276,7 @@ impl Agent {
         seq: &AtomicU64,
         prompt: String,
         limit: usize,
-    ) -> Result<bool> {
+    ) -> RequestResult<bool> {
         let url = format!(
             "http://127.0.0.1:{}/v1/completions",
             self.config.engine_port
@@ -272,7 +289,7 @@ impl Agent {
             }))
             .send().await.map_err(|_| ())?;
         if response.status() != StatusCode::OK {
-            return Err(());
+            return Err(RequestError::Failed);
         }
         let id = &assignment.assignment_id;
         let mut decoder = Decoder::default();
@@ -294,7 +311,7 @@ impl Agent {
                             count += text.chars().count();
                             tail.push_str(text);
                             if count > limit * 6 || tail.contains("<|plamo:") {
-                                return Err(());
+                                return Err(RequestError::Failed);
                             }
                             if let Some((start, _)) = tail.char_indices().rev().nth(6) {
                                 tail.drain(..start);
@@ -307,7 +324,7 @@ impl Agent {
                         }
                         if let Some(finish) = event["finish"].as_str() {
                             if !matches!(finish, "stop" | "length") {
-                                return Err(());
+                                return Err(RequestError::Failed);
                             }
                             if self.flush(id, seq, &mut buffer).await? {
                                 return Ok(false);
@@ -335,19 +352,21 @@ impl Agent {
                 let response = self.post("/api/worker/poll", &poll, Duration::from_secs(35)).await?;
                 match response.status() {
                     StatusCode::NO_CONTENT => Ok(Poll::Idle(idle_status(&response))),
-                    StatusCode::OK => json_body(response).await.map(Poll::Assigned),
-                    _ => Err(()),
+                    StatusCode::OK => Ok(Poll::Assigned(json_body(response).await?)),
+                    _ => Err(RequestError::Failed),
                 }
-            } => match result? {
-                Poll::Assigned(assignment) => assignment,
-                Poll::Idle(status) => return Ok(status),
+            } => match result {
+                Ok(Poll::Assigned(assignment)) => assignment,
+                Ok(Poll::Idle(status)) => return Ok(status),
+                Err(RequestError::Rejected) => return Ok("rejected"),
+                Err(RequestError::Failed) => return Err(()),
             }
         };
         let seq = AtomicU64::new(0);
         let result = match assignment_prompt(&assignment) {
             Ok((prompt, limit)) => {
                 tokio::select! {
-                    _ = &mut parent_closed => Err(()),
+                    _ = &mut parent_closed => Err(RequestError::Failed),
                     stop = self.stop_requested(&assignment.assignment_id) => stop.map(|_| false),
                     result = timeout(
                         Duration::from_secs(assignment.deadline_seconds),
@@ -356,19 +375,28 @@ impl Agent {
                             status("working");
                             self.translate(&assignment, &seq, prompt, limit).await
                         },
-                    ) => result.map_err(|_| ()).and_then(|value| value),
+                    ) => result.map_err(|_| RequestError::Failed).and_then(|value| value),
                 }
             }
-            Err(()) => Err(()),
+            Err(()) => Err(RequestError::Failed),
         };
         match result {
             Ok(true) => Ok("completed"),
             Ok(false) => Ok("paused"),
-            Err(()) => {
-                if hex(&assignment.assignment_id, 32) {
-                    let _ = self
-                        .send_result(&assignment.assignment_id, &seq, json!({"error":"engine"}))
-                        .await;
+            Err(RequestError::Rejected) => Ok("rejected"),
+            Err(RequestError::Failed) => {
+                if hex(&assignment.assignment_id, 32)
+                    && matches!(
+                        self.send_result(
+                            &assignment.assignment_id,
+                            &seq,
+                            json!({"error":"engine"})
+                        )
+                        .await,
+                        Err(RequestError::Rejected)
+                    )
+                {
+                    return Ok("rejected");
                 }
                 Err(())
             }
@@ -625,7 +653,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_poll_reports_quarantine_header() {
+    async fn poll_distinguishes_rejection_from_temporary_errors_and_quarantine() {
         use tokio::io::AsyncWriteExt;
         let broker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut agent = Agent::new(Bootstrap {
@@ -641,18 +669,36 @@ mod tests {
         .ok()
         .unwrap();
         agent.broker = Url::parse(&format!("http://{}/", broker.local_addr().unwrap())).unwrap();
-        let (_parent, closed) = tokio::sync::oneshot::channel();
-        let serve = async {
-            let (mut socket, route, _) = mock_request(&broker).await;
-            assert_eq!(route, "/api/worker/poll");
-            socket.write_all(b"HTTP/1.1 204 No Content\r\nX-PTranslate-Worker-State: quarantine\r\nConnection: close\r\n\r\n").await.unwrap();
-        };
-        let (result, ()) = timeout(Duration::from_secs(5), async {
-            tokio::join!(agent.run(closed, std::future::ready(Err(()))), serve)
-        })
-        .await
-        .unwrap();
-        assert_eq!(result.unwrap(), "quarantined");
+        for (response, expected) in [
+            (
+                "204 No Content\r\nX-PTranslate-Worker-State: quarantine",
+                Ok("quarantined"),
+            ),
+            ("401 Unauthorized", Ok("rejected")),
+            ("403 Forbidden", Ok("rejected")),
+            ("503 Service Unavailable", Err(())),
+        ] {
+            let (_parent, closed) = tokio::sync::oneshot::channel();
+            let serve = async {
+                let (mut socket, route, _) = mock_request(&broker).await;
+                assert_eq!(route, "/api/worker/poll");
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {response}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            };
+            let (result, ()) = timeout(Duration::from_secs(5), async {
+                tokio::join!(agent.run(closed, std::future::ready(Err(()))), serve)
+            })
+            .await
+            .unwrap();
+            assert_eq!(result, expected);
+        }
     }
 
     async fn mock_assignment(stop: bool, allowed: bool) {

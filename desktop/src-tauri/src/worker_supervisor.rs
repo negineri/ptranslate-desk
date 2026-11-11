@@ -18,6 +18,8 @@ const ADMISSION_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_GRACE: Duration = Duration::from_secs(6);
 const MAX_LINE: usize = 64;
+const INITIAL_RETRY: Duration = Duration::from_secs(5);
+const MAX_RETRY: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +30,11 @@ pub(crate) enum Status {
     Paused,
     Quarantined,
     Error,
+    Rejected,
+    #[serde(skip)]
+    QuickWaiting,
+    #[serde(skip)]
+    PreparationFailed,
 }
 
 #[derive(Deserialize)]
@@ -67,17 +74,39 @@ pub(crate) struct Activity {
 }
 
 impl Activity {
-    fn finish(&mut self, result: &Result<Status, String>) {
-        self.phase = match result {
+    fn finish(
+        &mut self,
+        result: &Result<Status, String>,
+        retry: &mut Duration,
+    ) -> Option<Duration> {
+        let (phase, delay) = match result {
             Ok(Status::Completed) => {
                 self.completed = self.completed.saturating_add(1);
-                Phase::Idle
+                *retry = INITIAL_RETRY;
+                (Phase::Idle, Duration::from_millis(250))
             }
-            Ok(Status::Waiting) => Phase::Idle,
-            Ok(Status::Paused) => Phase::Paused,
-            Ok(Status::Quarantined) => Phase::Quarantined,
-            _ => Phase::Error,
+            Ok(Status::Waiting) => {
+                *retry = INITIAL_RETRY;
+                (Phase::Idle, Duration::from_millis(250))
+            }
+            Ok(Status::Paused) => (Phase::Paused, Duration::from_secs(2)),
+            Ok(Status::Quarantined) => {
+                *retry = INITIAL_RETRY;
+                (Phase::Quarantined, Duration::from_secs(2))
+            }
+            Ok(Status::Rejected | Status::PreparationFailed) => {
+                self.phase = Phase::Error;
+                self.enabled = false;
+                return None;
+            }
+            _ => {
+                let delay = *retry;
+                *retry = (delay * 2).min(MAX_RETRY);
+                (Phase::Error, delay)
+            }
         };
+        self.phase = phase;
+        Some(delay)
     }
 }
 
@@ -222,6 +251,7 @@ pub(crate) fn start_participation(app: AppHandle, config: Bootstrap) -> Result<(
             change(&mut state.activity);
             publish(&app, &state.activity);
         };
+        let mut retry = INITIAL_RETRY;
         let failed = loop {
             let (running, stop) = tokio::select! {
                 biased;
@@ -244,12 +274,13 @@ pub(crate) fn start_participation(app: AppHandle, config: Bootstrap) -> Result<(
             })
             .await;
             drop(running);
-            update(&|state| state.finish(&result));
-            let delay = match result {
-                Ok(Status::Completed | Status::Waiting) => Duration::from_millis(250),
-                Ok(Status::Paused | Status::Quarantined) => Duration::from_secs(2),
-                _ => break true,
+            let delay = {
+                let mut state = lifecycle.state.lock().unwrap();
+                let delay = state.activity.finish(&result, &mut retry);
+                publish(&app, &state.activity);
+                delay
             };
+            let Some(delay) = delay else { break true };
             tokio::select! {
                 biased;
                 _ = &mut stopped => break false,
@@ -292,8 +323,10 @@ async fn run_one(
         biased;
         _ = &mut stop => return Ok(Status::Paused),
         engine = local.prepare_worker_engine(app) => match engine {
-            Err(_) if !can_wait() => return Ok(Status::Paused),
-            result => result?,
+            Ok(engine) => engine,
+            Err(crate::local::WorkerPreparationError::Busy) => return Ok(Status::Paused),
+            Err(crate::local::WorkerPreparationError::Unavailable) => return Ok(Status::PreparationFailed),
+            Err(crate::local::WorkerPreparationError::Startup(error)) => return Err(error),
         },
     };
     if !can_wait() {
@@ -371,6 +404,7 @@ async fn supervise<Permit>(
     if !matches!(stop.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
         return Ok(Status::Paused);
     }
+    let started = tokio::time::Instant::now();
     let mut child = command.kill_on_drop(true).spawn().map_err(|_| ())?;
     let mut stdin = child.stdin.take().ok_or(())?;
     let stdout = child.stdout.take().ok_or(())?;
@@ -442,11 +476,27 @@ async fn supervise<Permit>(
             let event: Update = serde_json::from_slice(&line).map_err(|_| ())?;
             match (last, event.status) {
                 (None, Status::Working) if permit.is_some() => update(Status::Working),
-                (None, Status::Waiting | Status::Paused | Status::Quarantined | Status::Error)
-                | (Some(Status::Working), Status::Completed | Status::Paused | Status::Error) => {}
+                (
+                    None,
+                    Status::Waiting
+                    | Status::Paused
+                    | Status::Quarantined
+                    | Status::Error
+                    | Status::Rejected,
+                )
+                | (
+                    Some(Status::Working),
+                    Status::Completed | Status::Paused | Status::Error | Status::Rejected,
+                ) => {}
                 _ => return Err(()),
             }
-            last = Some(event.status);
+            last = Some(
+                if event.status == Status::Waiting && started.elapsed() < Duration::from_secs(1) {
+                    Status::QuickWaiting
+                } else {
+                    event.status
+                },
+            );
         }
     };
     let result = tokio::select! {
@@ -543,17 +593,50 @@ mod tests {
     #[test]
     fn activity_counts_only_completed_assignments_and_exposes_no_details() {
         let mut activity = Activity::default();
-        activity.finish(&Ok(Status::Paused));
+        let mut retry = INITIAL_RETRY;
+        activity.finish(&Ok(Status::Paused), &mut retry);
         assert_eq!(
             serde_json::to_value(activity).unwrap(),
             serde_json::json!({"phase":"paused","completed":0,"enabled":false})
         );
-        activity.finish(&Ok(Status::Completed));
-        activity.finish(&Err("private detail".into()));
+        activity.finish(&Ok(Status::Completed), &mut retry);
+        activity.finish(&Err("private detail".into()), &mut retry);
         assert_eq!(
             serde_json::to_value(activity).unwrap(),
             serde_json::json!({"phase":"error","completed":1,"enabled":false})
         );
+    }
+
+    #[test]
+    fn retries_transient_failures_until_a_normal_result_or_rejection() {
+        let mut activity = Activity {
+            enabled: true,
+            ..Activity::default()
+        };
+        let mut retry = INITIAL_RETRY;
+        for normal in [Status::Completed, Status::Waiting, Status::Quarantined] {
+            for seconds in [5, 10, 20, 40, 80, 160, 300, 300] {
+                let result = if seconds == 5 {
+                    Ok(Status::QuickWaiting)
+                } else {
+                    Ok(Status::Error)
+                };
+                assert_eq!(
+                    activity.finish(&result, &mut retry),
+                    Some(Duration::from_secs(seconds))
+                );
+                assert!(activity.enabled);
+                assert!(activity.phase == Phase::Error);
+            }
+            assert!(activity.finish(&Ok(normal), &mut retry).is_some());
+            assert_eq!(retry, INITIAL_RETRY);
+        }
+        for status in [Status::Rejected, Status::PreparationFailed] {
+            activity.enabled = true;
+            assert_eq!(activity.finish(&Ok(status), &mut retry), None);
+            assert!(!activity.enabled);
+            assert!(activity.phase == Phase::Error);
+        }
     }
 
     #[test]
@@ -598,7 +681,8 @@ mod tests {
         let ready = "printf '%s\\n' '{\"status\":\"ready\"}'; ";
         for (script, expected) in [
             ("read config; printf '%s\\n' '{\"status\":\"assigned\"}'; read permission; test \"$permission\" = go || exit 1; printf '%s\\n' '{\"status\":\"working\"}' '{\"status\":\"completed\"}'", Ok(Status::Completed)),
-            ("read config; printf '%s\\n' '{\"status\":\"waiting\"}'", Ok(Status::Waiting)),
+            ("read config; printf '%s\\n' '{\"status\":\"waiting\"}'", Ok(Status::QuickWaiting)),
+            ("read config; printf '%s\\n' '{\"status\":\"rejected\"}'", Ok(Status::Rejected)),
             ("read config; printf '%s\\n' '{\"status\":\"assigned\"}'; read permission; test \"$permission\" = go || exit 1; printf '%s\\n' '{\"status\":\"working\"}'", Err(())),
             ("read config; printf '%s\\n' '{\"status\":\"waiting\",\"text\":\"x\"}'", Err(())),
             ("read config; printf '%s\\n' '{\"status\":\"waiting\"}'; exit 1", Err(())),

@@ -66,7 +66,10 @@ function renderParticipation() {
 function renderActivity(next) {
   activity = next;
   activityLine.hidden = !next.enabled && next.phase === "idle" && next.completed === 0;
-  activityLine.textContent = `${phaseLabels[next.phase]} · 処理した区切り ${next.completed.toLocaleString("ja-JP")} 件`;
+  const phase = next.phase === "error" && next.enabled
+    ? "処理を続けられませんでした。しばらくして再開します"
+    : phaseLabels[next.phase];
+  activityLine.textContent = `${phase} · 処理した区切り ${next.completed.toLocaleString("ja-JP")} 件`;
   const notice = document.getElementById("local-worker-notice");
   if (notice) notice.hidden = !next.enabled;
   renderParticipation();

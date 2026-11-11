@@ -82,6 +82,12 @@ impl Drop for Endpoint {
 
 pub(crate) struct WorkerEngine(Endpoint);
 
+pub(crate) enum WorkerPreparationError {
+    Busy,
+    Unavailable,
+    Startup(String),
+}
+
 impl WorkerEngine {
     pub(crate) fn configure(&self, bootstrap: &mut crate::worker_agent::Bootstrap) {
         bootstrap.engine_secret.zeroize();
@@ -569,33 +575,36 @@ impl Local {
     pub(crate) async fn prepare_worker_engine(
         &self,
         app: &AppHandle,
-    ) -> Result<(WorkerEngine, WorkerStandby<'_>), String> {
+    ) -> Result<(WorkerEngine, WorkerStandby<'_>), WorkerPreparationError> {
+        use WorkerPreparationError::{Busy, Startup, Unavailable};
         if !worker_platform_supported() {
-            return Err("この端末は翻訳ワーカーに対応していません".into());
+            return Err(Unavailable);
         }
         {
             let _starting = self.starting.lock().await;
-            let _worker = self.lock_engine_change()?;
-            if let Some(engine) = self.reusable_worker_engine()? {
+            let _worker = self.lock_engine_change().map_err(|_| Busy)?;
+            if let Some(engine) = self.reusable_worker_engine().map_err(|_| Busy)? {
                 return Ok((engine, self.worker_standby()));
             }
         }
-        let install = installation(app)?;
+        let install = installation(app).map_err(|_| Unavailable)?;
         // 大きなモデルを読む間は、自分の翻訳や設定変更を止めない。
-        resources::verify_worker_model(install.model.clone()).await?;
+        resources::verify_worker_model(install.model.clone())
+            .await
+            .map_err(|_| Unavailable)?;
         let _starting = self.starting.lock().await;
-        let _worker = self.lock_engine_change()?;
-        if let Some(engine) = self.reusable_worker_engine()? {
+        let _worker = self.lock_engine_change().map_err(|_| Busy)?;
+        if let Some(engine) = self.reusable_worker_engine().map_err(|_| Busy)? {
             return Ok((engine, self.worker_standby()));
         }
         {
             let activity = self.activity.lock().unwrap();
             if activity.0 != 0 || self.slots.in_use() {
-                return Err("翻訳が終わってから提供を開始してください".into());
+                return Err(Busy);
             }
             self.stop();
         }
-        let endpoint = self.load_engine(install, true).await?;
+        let endpoint = self.load_engine(install, true).await.map_err(Startup)?;
         Ok((WorkerEngine(endpoint), self.worker_standby()))
     }
 
