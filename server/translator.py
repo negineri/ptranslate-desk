@@ -1216,6 +1216,7 @@ class WorkerRegistry:
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.lock = threading.RLock()
         self.per_owner = per_owner
+        self.revocation_callback = None
         with self.db:
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS owners (name TEXT PRIMARY KEY, terms INTEGER, agreed TEXT, revoked INTEGER NOT NULL DEFAULT 0)"
@@ -1229,6 +1230,10 @@ class WorkerRegistry:
             raise HttpError(400, "参加の規約への同意が必要です")
         with self.lock, self.db:
             self.check_owner(owner)
+            self.db.execute(
+                "DELETE FROM workers WHERE owner=? AND expires<=? AND state!='revoked'",
+                (owner, time.time()),
+            )
             if (
                 self.db.execute("SELECT count(*) FROM workers WHERE owner=?", (owner,)).fetchone()[
                     0
@@ -1296,7 +1301,8 @@ class WorkerRegistry:
             return [
                 {"worker_id": row[0], "state": row[1], "expires_at": row[2]}
                 for row in self.db.execute(
-                    "SELECT id,state,expires FROM workers WHERE owner=? ORDER BY id", (owner,)
+                    "SELECT id,state,expires FROM workers WHERE owner=? AND expires>? ORDER BY id",
+                    (owner, time.time()),
                 )
             ]
 
@@ -1306,12 +1312,17 @@ class WorkerRegistry:
             self.db.execute("DELETE FROM workers WHERE id=?", (worker_id,))
             if not self.db.execute("SELECT 1 FROM workers WHERE owner=?", (owner,)).fetchone():
                 self.db.execute("DELETE FROM owners WHERE name=? AND revoked=0", (owner,))
+        if self.revocation_callback:
+            self.revocation_callback(worker_id=worker_id)
 
     def set_state(self, worker_id, state):
         if state not in ("probation", "quarantine", "revoked"):
             raise ValueError("ワーカーの状態が不正です")
         with self.lock, self.db:
             self.db.execute("UPDATE workers SET state=? WHERE id=?", (state, worker_id))
+        # DBのロックを解放してからHubへ通知し、ロックの順序を逆転させない。
+        if state == "revoked" and self.revocation_callback:
+            self.revocation_callback(worker_id=worker_id)
 
     def revoke_owner(self, owner):
         with self.lock, self.db:
@@ -1320,6 +1331,8 @@ class WorkerRegistry:
                 (owner,),
             )
             self.db.execute("DELETE FROM workers WHERE owner=?", (owner,))
+        if self.revocation_callback:
+            self.revocation_callback(owner=owner)
 
     def close(self):
         with self.lock:
@@ -1356,6 +1369,26 @@ class WorkerHub:
         self.assignments = {}
         self.poll_seconds, self.first_seconds, self.deadline_seconds = 25, 20, 120
         self.closed = False
+        self.revoked_workers = set()
+        self.revoked_owners = set()
+        self.registry.revocation_callback = self.notify_revoked
+
+    def notify_revoked(self, worker_id=None, owner=None):
+        with self.condition:
+            if worker_id is not None:
+                self.revoked_workers.add(worker_id)
+            if owner is not None:
+                self.revoked_owners.add(owner)
+            for wid, (worker, _) in list(self.ready.items()):
+                if wid in self.revoked_workers or worker["owner"] in self.revoked_owners:
+                    del self.ready[wid]
+            for aid, assignment in list(self.assignments.items()):
+                if (
+                    assignment["worker"] in self.revoked_workers
+                    or assignment["owner"] in self.revoked_owners
+                ):
+                    self._fail(aid)
+            self.condition.notify_all()
 
     @staticmethod
     def version(value):
@@ -1384,17 +1417,27 @@ class WorkerHub:
             self.polling.add(wid)
             self.ready[wid] = (worker, network)
             self.condition.notify_all()
-            deadline = time.monotonic() + self.poll_seconds
-            try:
-                while not self.closed and time.monotonic() < deadline:
-                    self.valid(secret)
-                    if disconnected():
+        deadline = time.monotonic() + self.poll_seconds
+        next_validation = time.monotonic() + 5
+        try:
+            while True:
+                with self.condition:
+                    if wid in self.revoked_workers or worker["owner"] in self.revoked_owners:
+                        raise HttpError(401, "ワーカーの資格が無効です")
+                    now = time.monotonic()
+                    if self.closed or now >= deadline or disconnected():
                         return None
-                    if wid in self.deliveries:
-                        return self.deliveries.pop(wid)
-                    self.condition.wait(0.1)
-                return None
-            finally:
+                    if now < next_validation and time.time() < worker["expires"]:
+                        if wid in self.deliveries:
+                            return self.deliveries.pop(wid)
+                        self.condition.wait(min(0.1, next_validation - now, deadline - now))
+                        continue
+                # SQLiteへはHubのロックを持たずに問い合わせる。
+                # 期限前の更新も取り込むため、資格の期限に達した場合も再確認する。
+                worker = self.valid(secret)
+                next_validation = time.monotonic() + 5
+        finally:
+            with self.condition:
                 self.polling.discard(wid)
                 self.ready.pop(wid, None)
                 delivery = self.deliveries.pop(wid, None)

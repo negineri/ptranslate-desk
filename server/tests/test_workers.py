@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from test_translator import tr
 from mock_worker import MockWorker
@@ -118,6 +118,47 @@ class WorkerApiTest(unittest.TestCase):
             mock.call("/api/worker/" + data["worker_id"], owner="alice", method="DELETE")[0], 200
         )
         self.assertEqual(mock.call("/api/worker/ping", {"active": []}, secret=secret)[0], 401)
+
+    def test_revocation_wakes_waiting_poll_within_one_second(self):
+        self.hub.poll_seconds = 10
+        for owner_revocation, owner in ((False, "revoke-worker"), (True, "revoke-owner")):
+            mock, data = self.worker(owner)
+            result = self.run_thread(lambda: mock.poll(MODEL))
+            self.wait(lambda: data["worker_id"] in self.hub.ready)
+            started = time.monotonic()
+            if owner_revocation:
+                self.hub.registry.revoke_owner(owner)
+            else:
+                self.hub.registry.set_state(data["worker_id"], "revoked")
+            response = result.get(timeout=1)
+            self.assertEqual(response[0], 401)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertNotIn(data["worker_id"], self.hub.ready)
+
+    def test_expired_worker_does_not_fill_registration_limit(self):
+        self.hub.registry.per_owner = 1
+        mock, data = self.worker()
+        with self.hub.registry.lock, self.hub.registry.db:
+            self.hub.registry.db.execute(
+                "UPDATE workers SET expires=? WHERE id=?", (int(time.time()) - 1, data["worker_id"])
+            )
+        status, listing = mock.call("/api/worker/mine", owner="alice", method="GET")
+        self.assertEqual(status, 200)
+        self.assertEqual(listing["workers"], [])
+        status, replacement = mock.register("alice")
+        self.assertEqual(status, 200)
+        self.assertNotEqual(replacement["worker_id"], data["worker_id"])
+        with self.hub.registry.lock:
+            self.assertIsNone(
+                self.hub.registry.db.execute(
+                    "SELECT 1 FROM workers WHERE id=?", (data["worker_id"],)
+                ).fetchone()
+            )
+            self.hub.registry.db.execute(
+                "UPDATE workers SET state='revoked',expires=?", (int(time.time()) - 1,)
+            )
+            self.hub.registry.db.commit()
+        self.assertEqual(mock.register("alice")[0], 429)
 
     def test_authentication_region_version_and_no_job(self):
         mock, data = self.worker()
@@ -268,3 +309,77 @@ class WorkerStorageTest(unittest.TestCase):
                     tr.WorkerRegistry(root / "state")
             finally:
                 root.chmod(0o700)
+
+
+class WorkerPollingLoadTest(unittest.TestCase):
+    def test_two_hundred_waiters_do_not_query_registry_every_tick(self):
+        registry = Mock()
+        hub = tr.WorkerHub(registry, MODEL)
+        hub.poll_seconds = 20
+        calls = []
+        calls_lock = threading.Lock()
+        failures = queue.Queue()
+
+        def authenticate(secret):
+            # 別スレッドでもHubのロックを取れることを確認する。
+            acquired = []
+
+            def acquire():
+                ok = hub.condition.acquire(timeout=0.5)
+                acquired.append(ok)
+                if ok:
+                    hub.condition.release()
+
+            checker = threading.Thread(target=acquire)
+            checker.start()
+            checker.join(1)
+            if acquired != [True]:
+                raise AssertionError("SQLiteの確認中にHubがロックされています")
+            with calls_lock:
+                calls.append(time.monotonic())
+            return {
+                "id": secret,
+                "owner": secret,
+                "expires": time.time() + 3600,
+                "state": "probation",
+            }
+
+        registry.authenticate.side_effect = authenticate
+
+        def poll(index):
+            try:
+                hub.poll(str(index), {"agent_version": "0.5.0", "model": MODEL}, "", lambda: False)
+            except BaseException as error:
+                failures.put(error)
+
+        threads = [
+            threading.Thread(target=poll, args=(index,), daemon=True) for index in range(200)
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            deadline = time.monotonic() + 5
+            while len(hub.ready) != 200 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(len(hub.ready), 200)
+            started = time.monotonic()
+            with calls_lock:
+                baseline = len(calls)
+            # 全員待機済みの時間窓を計測し、開始時の認証は数えない。
+            time.sleep(1.1)
+            with calls_lock:
+                queries = len(calls) - baseline
+            self.assertLessEqual(queries / (time.monotonic() - started), 50)
+            # 5秒後には再確認される。確認そのものを省略していないことも確かめる。
+            deadline = time.monotonic() + 5
+            while registry.authenticate.call_count <= baseline and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertGreater(registry.authenticate.call_count, baseline)
+        finally:
+            with hub.condition:
+                hub.closed = True
+                hub.condition.notify_all()
+            for thread in threads:
+                thread.join(3)
+        self.assertTrue(failures.empty(), list(failures.queue))
+        self.assertFalse(hub.polling)

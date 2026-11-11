@@ -465,6 +465,20 @@ server {
 利用者から送られた `X-Forwarded-User` は必ず検証結果で上書きします。
 8002/8080/4180番は外部から到達できないことも確認してください。
 
+### ワーカーAPIを有効にする場合の前段
+
+OIDCを通さず仲介へ渡すワーカーAPIは、`/api/worker/poll`、`/api/worker/result`、
+`/api/worker/ping` の3つだけです。パスの完全一致で設定し、`/api/worker/` の前方一致で認証を外さないでください。
+nginxでは `location = /api/worker/poll`、`location = /api/worker/result`、
+`location = /api/worker/ping` の3つを用意し、それぞれに `proxy_set_header X-Forwarded-User "";` を指定します。
+クライアントが送った利用者名を仲介へ通さず、仲介はワーカーのBearer資格を検証します。
+これらの場所でも、IP・国のヘッダーを前段が検証済みの値へ上書きする設定と、SSE・キャッシュの要件を維持してください。
+nginxの `proxy_set_header` は同じ階層で指定すると上位からの継承が変わるため、必要なヘッダーを各場所で明示します。
+
+`/api/worker/register`、`/api/worker/renew`、`/api/worker/mine`、
+`DELETE /api/worker/<id>` はOIDCを通します。認証済みの要求だけに、前段が検証した `X-Forwarded-User` を付けます。
+匿名用APIの設定と、ワーカー管理APIの認証除外を混同しないでください。
+
 ## 8. デスクトップの接続先を設定する
 
 [READMEのmacOSインストール手順](../README.md#インストールmacos)でアプリを入れます。
