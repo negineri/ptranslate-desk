@@ -514,6 +514,7 @@ fn main() {
         .manage(resident::Resident::default())
         .manage(updates::Updates::default())
         .manage(worker_registration::RegistrationGate::default())
+        .manage(worker_supervisor::Lifecycle::default())
         .setup(move |app| {
             app.manage(local::Local::load(app.handle())?);
             let connection = connection::load(app.handle())?;

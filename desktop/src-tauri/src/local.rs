@@ -1031,6 +1031,8 @@ pub async fn save_local_settings(
         return Err("同時に訳す数は1〜64で指定してください".into());
     }
     let local = app.state::<Local>();
+    let lifecycle = app.state::<crate::worker_supervisor::Lifecycle>();
+    let _change = lifecycle.stop_for_engine_change().await;
     let _starting = local.starting.lock().await;
     local.apply_settings(settings, |settings| {
         persist_settings(&app, settings)?;
@@ -1055,6 +1057,8 @@ pub async fn set_local_active(
             return Err(error);
         }
     } else {
+        let lifecycle = app.state::<crate::worker_supervisor::Lifecycle>();
+        let _change = lifecycle.stop_for_engine_change().await;
         let _worker = local.lock_engine_change()?;
         local.active.store(false, Ordering::SeqCst);
         crate::cancel_matching(&app, |request| request.local);

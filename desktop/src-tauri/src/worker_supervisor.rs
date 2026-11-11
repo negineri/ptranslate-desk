@@ -2,12 +2,12 @@
 #![allow(dead_code)]
 use crate::worker_agent::{Bootstrap, ASSIGNED_LINE, READY_LINE, START_COMMAND};
 use serde::Deserialize;
-use std::{process::Stdio, time::Duration};
+use std::{process::Stdio, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Manager};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::oneshot,
+    sync::{oneshot, watch, Mutex as AsyncMutex, MutexGuard},
     time::timeout,
 };
 use zeroize::Zeroizing;
@@ -44,8 +44,87 @@ pub(crate) fn can_accept(
     enabled && external_power == Some(true) && own_requests == 0 && !running
 }
 
-/// commandのOS権限制限は呼び出し側で設定する。資格を引数や環境変数に入れない。
+#[derive(Default)]
+pub(crate) struct Lifecycle {
+    changes: AsyncMutex<()>,
+    current: Mutex<Option<Running>>,
+}
+
+struct Running {
+    stop: Option<oneshot::Sender<()>>,
+    finished: watch::Receiver<()>,
+}
+
+struct RunLease<'a> {
+    lifecycle: &'a Lifecycle,
+    _finished: watch::Sender<()>,
+}
+
+impl Drop for RunLease<'_> {
+    fn drop(&mut self) {
+        self.lifecycle.current.lock().unwrap().take();
+    }
+}
+
+impl Lifecycle {
+    async fn begin(&self) -> Result<(RunLease<'_>, oneshot::Receiver<()>), String> {
+        let _change = self.changes.lock().await;
+        let mut current = self.current.lock().unwrap();
+        if current.is_some() {
+            return Err("翻訳ワーカーはすでに動いています".into());
+        }
+        let (stop, requested) = oneshot::channel();
+        let (done, finished) = watch::channel(());
+        *current = Some(Running {
+            stop: Some(stop),
+            finished,
+        });
+        Ok((
+            RunLease {
+                lifecycle: self,
+                _finished: done,
+            },
+            requested,
+        ))
+    }
+
+    // 停止待ちと設定変更を同じガードで守り、途中に次の子が起動しないようにする。
+    pub(crate) async fn stop_for_engine_change(&self) -> MutexGuard<'_, ()> {
+        let change = self.changes.lock().await;
+        let finished = {
+            let mut current = self.current.lock().unwrap();
+            current.as_mut().map(|run| {
+                if let Some(stop) = run.stop.take() {
+                    let _ = stop.send(());
+                }
+                run.finished.clone()
+            })
+        };
+        if let Some(mut finished) = finished {
+            let _ = finished.changed().await;
+        }
+        change
+    }
+}
+
+/// 呼び出し側が待機を中止しても、監督タスクは子の停止と回収まで続ける。
 pub(crate) async fn run(
+    app: AppHandle,
+    command: Command,
+    config: Bootstrap,
+    update: impl FnMut(Status) + Send + 'static,
+) -> Result<Status, String> {
+    tauri::async_runtime::spawn(async move {
+        let lifecycle = app.state::<Lifecycle>();
+        let (_running, stop) = lifecycle.begin().await?;
+        run_one(&app, command, config, stop, update).await
+    })
+    .await
+    .map_err(|_| "ワーカーの監督処理を完了できませんでした".to_owned())?
+}
+
+/// commandのOS権限制限は呼び出し側で設定する。資格を引数や環境変数に入れない。
+async fn run_one(
     app: &AppHandle,
     mut command: Command,
     mut config: Bootstrap,
@@ -224,6 +303,24 @@ async fn supervise<Permit>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn engine_changes_wait_for_cleanup_and_block_the_next_run() {
+        let lifecycle = Lifecycle::default();
+        let (running, stopped) = lifecycle.begin().await.unwrap();
+        assert!(lifecycle.begin().await.is_err());
+        let change = lifecycle.stop_for_engine_change();
+        tokio::pin!(change);
+        tokio::select! {
+            result = &mut change => { drop(result); panic!("回収前に変更を許可した"); },
+            result = stopped => result.unwrap(),
+        }
+        drop(running);
+        let change = change.await;
+        assert!(lifecycle.changes.try_lock().is_err());
+        drop(change);
+        assert!(lifecycle.begin().await.is_ok());
+    }
 
     #[test]
     fn admission_requires_power_idle_and_one_slot() {
