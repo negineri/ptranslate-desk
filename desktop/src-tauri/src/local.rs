@@ -3,7 +3,7 @@ mod benchmark;
 mod memory;
 mod parallel;
 pub mod resources;
-use crate::translation::{prompt, Decoder};
+use crate::translation::{languages, prompt, Decoder};
 use crate::Message;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
@@ -242,6 +242,17 @@ fn installation(app: &AppHandle) -> Result<Installation, String> {
     }
     Ok(value)
 }
+pub(crate) fn worker_platform_supported() -> bool {
+    resources::supported()
+}
+
+pub(crate) async fn verify_worker_model(app: &AppHandle) -> Result<(), String> {
+    if !worker_platform_supported() {
+        return Err("この端末は翻訳ワーカーに対応していません".into());
+    }
+    resources::verify_worker_model(installation(app)?.model).await
+}
+
 fn command(path: &PathBuf) -> Command {
     let mut command = Command::new(path);
     #[cfg(target_os = "windows")]

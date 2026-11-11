@@ -138,6 +138,19 @@ fn verify(path: PathBuf, expected: &'static str, cancel: Arc<AtomicBool>) -> Res
     }
     Ok(format!("{:x}", hash.finalize()) == expected)
 }
+pub(super) async fn verify_worker_model(path: PathBuf) -> Result<(), String> {
+    let valid = tauri::async_runtime::spawn_blocking(move || {
+        verify(path, MODEL_SHA, Arc::new(AtomicBool::new(false)))
+    })
+    .await
+    .map_err(|_| "モデルの検証を完了できませんでした")??;
+    if valid {
+        Ok(())
+    } else {
+        Err("モデルの検証に失敗しました。設定から取得し直してください".into())
+    }
+}
+
 async fn fetch(
     client: &reqwest::Client,
     operation: &Operation,

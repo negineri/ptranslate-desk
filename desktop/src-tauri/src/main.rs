@@ -18,6 +18,7 @@ mod updates;
 #[cfg(target_os = "windows")]
 mod windows;
 mod worker_agent;
+mod worker_registration;
 
 #[cfg(feature = "smoke-test")]
 #[tauri::command]
@@ -381,6 +382,7 @@ fn main() {
         .manage(chrome_bridge::Status::default())
         .manage(resident::Resident::default())
         .manage(updates::Updates::default())
+        .manage(worker_registration::RegistrationGate::default())
         .setup(move |app| {
             app.manage(local::Local::load(app.handle())?);
             let connection = connection::load(app.handle())?;
@@ -487,6 +489,10 @@ fn main() {
         cancel_login,
         start_request,
         stop_request,
+        worker_registration::worker_registration_status,
+        worker_registration::register_worker,
+        worker_registration::renew_worker,
+        worker_registration::revoke_worker,
         connection::load_connection,
         connection::save_connection,
         settings::load_settings,
@@ -529,6 +535,10 @@ fn main() {
             cancel_login,
             start_request,
             stop_request,
+            worker_registration::worker_registration_status,
+            worker_registration::register_worker,
+            worker_registration::renew_worker,
+            worker_registration::revoke_worker,
             connection::load_connection,
             connection::save_connection,
             settings::load_settings,

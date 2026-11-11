@@ -14,7 +14,7 @@ fn field(body: &Value, name: &str, limit: usize, required: bool) -> Result<Strin
     }
     Ok(value)
 }
-fn languages() -> Value {
+pub(crate) fn languages() -> Value {
     serde_json::from_str(include_str!("../gen/local-languages.json"))
         .expect("生成した言語一覧が不正です")
 }

@@ -125,6 +125,18 @@ impl Auth {
         Self::with_connection(client, crate::connection::Connection::default())
     }
     pub fn with_connection(client: Client, connection: crate::connection::Connection) -> Self {
+        Self::with_account(client, connection, "")
+    }
+
+    pub(crate) fn for_worker(client: Client, connection: crate::connection::Connection) -> Self {
+        Self::with_account(client, connection, "worker-login-")
+    }
+
+    fn with_account(
+        client: Client,
+        connection: crate::connection::Connection,
+        prefix: &str,
+    ) -> Self {
         // モックでも本番へのヘッダー偽装はできない。接続先はループバック固定。
         let mock = std::env::var("PTRANSLATE_MOCK").as_deref() == Ok("1");
         Self {
@@ -138,7 +150,7 @@ impl Auth {
             discovery_url: connection.discovery_url.clone(),
             client_id: connection.client_id.clone(),
             vault: Arc::new(OsVault {
-                account: connection.vault_account(),
+                account: format!("{prefix}{}", connection.vault_account()),
             }),
             credentials: Mutex::new(Credentials::default()),
             cancellation: watch::channel(0).0,

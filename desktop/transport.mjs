@@ -2,6 +2,7 @@ import { settingsPage, showPage, accountSlot, stageSettings, hasPendingSettings 
 import { desktopFetch as request } from "./ipc.mjs";
 import "./updates.mjs";
 import "./connection.mjs";
+import "./worker-view.mjs";
 import { modeReady } from "./local-view.mjs";
 import { runSetup } from "./setup-wizard.mjs";
 const { invoke } = window.__TAURI__.core;
