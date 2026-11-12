@@ -1,10 +1,10 @@
 (async () => {
   let step = "ログイン";
   const $ = (id) => document.getElementById(id);
-  const wait = async (check) => {
+  const wait = async (check, timeoutMessage = () => "タイムアウト") => {
     const end = Date.now() + 15000;
     while (!await check()) {
-      if (Date.now() > end) throw new Error("タイムアウト");
+      if (Date.now() > end) throw new Error(timeoutMessage());
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   };
@@ -167,11 +167,16 @@
     if (!$("server-active").checked || !$("server-settings-panel").contains($("server-active"))) throw new Error("サーバースイッチ");
     $("translation-tab").click();
     step = "自動翻訳とストリーミング";
+    const translationStatus = $("status");
+    const translationTimeout = () => translationStatus.textContent || "状態表示なしでタイムアウト";
     $("src").value = "Hello Mac";
     $("src").dispatchEvent(new Event("input"));
-    await wait(() => !$("stop").hidden);
-    await wait(() => $("out").textContent.includes("Hello"));
-    await wait(() => $("status").textContent === "訳し終わりました");
+    step = "自動翻訳の開始";
+    await wait(() => !$("stop").hidden, translationTimeout);
+    step = "最初の訳の断片";
+    await wait(() => $("out").textContent.includes("Hello"), translationTimeout);
+    step = "自動翻訳の完了";
+    await wait(() => translationStatus.textContent === "訳し終わりました", translationTimeout);
     if (!$("out").textContent.includes("[ja] Hello Mac")) throw new Error("訳文");
     step = "設定タブへの切り替えと翻訳の保持";
     const output = $("out").textContent;
