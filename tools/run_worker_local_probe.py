@@ -33,7 +33,7 @@ from mock_worker import MockWorker
 ROOT = Path(__file__).resolve().parent.parent
 TEST = "worker_agent::real_model_probe::restricted_worker"
 TEXT = "Hello. This application translates text on your computer."
-BENCH_TEXT = "This is a synthetic staging translation test."
+BENCH_TEXT = "Test {number:03d}. This is a synthetic staging translation test."
 
 
 def require(condition, message):
@@ -363,7 +363,7 @@ def translate(server, *, text=TEXT, cancel=False, stop_parent=None):
                 require(event.get("finish") == "stop", "翻訳が正常終了していません")
                 require(re.search(r"[ぁ-んァ-ン一-龯]", translated), "日本語の訳がありません")
                 return {
-                    "first_ms": round(first * 1000),
+                    "first_ms": round(first * 1000, 3),
                     "total_ms": round((time.monotonic() - started) * 1000),
                     "chunks": chunks,
                     "chars": len(translated),
@@ -392,7 +392,8 @@ def measure_empty_slots(server, hub, info, idle, binary, certificate, config, sa
             with direct_pool.condition:
                 return direct_pool.free == [1] and not direct_pool.waiting
 
-        def sample(mode):
+        def sample(mode, number):
+            text = BENCH_TEXT.format(number=number)
             wait(idle, "計測開始前に実エンジンの枠が空きません")
             if mode != "volunteer":
                 wait(direct_ready, "直結枠が空いていません")
@@ -403,13 +404,13 @@ def measure_empty_slots(server, hub, info, idle, binary, certificate, config, sa
                     if mode == "direct_uncached"
                     else nullcontext(),
                 ):
-                    return translate(direct, text=BENCH_TEXT)["first_ms"]
+                    return translate(direct, text=text)["first_ms"]
 
             worker = Worker(binary, certificate, config)
             try:
                 wait(ready, "計測開始前にワーカーが仲介で待機状態になりません")
                 require(idle() and ready(), "計測開始時にボランティア枠が空いていません")
-                first = translate(server, text=BENCH_TEXT)["first_ms"]
+                first = translate(server, text=text)["first_ms"]
                 worker.finish("completed")
                 return first
             finally:
@@ -421,21 +422,42 @@ def measure_empty_slots(server, hub, info, idle, binary, certificate, config, sa
 
         # 各条件を一度実行してから計測を始め、先に送る条件は順に変える。
         modes = tuple(results)
-        for mode in modes:
-            sample(mode)
+        for number, mode in enumerate(modes):
+            sample(mode, number)
+        number = len(modes)
         for index in range(samples):
             first = index % len(modes)
             for mode in modes[first:] + modes[:first]:
-                results[mode].append(sample(mode))
+                results[mode].append(sample(mode, number))
+                number += 1
     latency = {mode: p95(times) for mode, times in results.items()}
     print(
         json.dumps(
             {
                 "samples_per_condition": samples,
-                **{f"{mode}_p50_ms": median(times) for mode, times in results.items()},
+                **{f"{mode}_p50_ms": round(median(times), 3) for mode, times in results.items()},
                 **{f"{mode}_p95_ms": value for mode, value in latency.items()},
-                "p95_delta_ms": latency["volunteer"] - latency["direct"],
-                "p95_delta_uncached_ms": latency["volunteer"] - latency["direct_uncached"],
+                **{f"{mode}_max_ms": max(times) for mode, times in results.items()},
+                **{
+                    f"{mode}_over_200_ms_count": sum(value > 200 for value in times)
+                    for mode, times in results.items()
+                },
+                "p95_delta_ms": round(latency["volunteer"] - latency["direct"], 3),
+                "p95_delta_uncached_ms": round(
+                    latency["volunteer"] - latency["direct_uncached"], 3
+                ),
+                "paired_delta_over_200_ms_count": sum(
+                    volunteer - direct > 200
+                    for volunteer, direct in zip(
+                        results["volunteer"], results["direct"], strict=True
+                    )
+                ),
+                "paired_delta_uncached_over_200_ms_count": sum(
+                    volunteer - direct > 200
+                    for volunteer, direct in zip(
+                        results["volunteer"], results["direct_uncached"], strict=True
+                    )
+                ),
             }
         ),
         flush=True,
