@@ -23,7 +23,6 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"
 tempfile = "3"
-zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tokio = { version = "1", features = ["time", "net", "io-util", "sync", "macros", "rt-multi-thread", "process"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
@@ -41,6 +40,12 @@ tauri-plugin-deep-link = "2"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+# zip の展開の試験は全 OS で行う。
+zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# 推論エンジンを zip で配るのは Windows だけ。
+[target.'cfg(not(any(target_os = "macos", target_os = "linux")))'.dependencies]
+zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-registry = "0.6"

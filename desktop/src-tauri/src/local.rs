@@ -320,6 +320,8 @@ pub(crate) async fn verify_worker_model(app: &AppHandle) -> Result<(), String> {
 }
 
 fn command(path: &PathBuf) -> Command {
+    // 書き換えるのは Windows だけ。
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
     let mut command = Command::new(path);
     #[cfg(target_os = "windows")]
     {
@@ -668,6 +670,8 @@ impl Local {
                 cmd.args(["--device", &device]);
             }
         }
+        // 起動に失敗したジョブの後始末で止めるのは Windows だけ。
+        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
         let mut child = cmd
             .spawn()
             .map_err(|_| "推論エンジンを起動できませんでした")?;

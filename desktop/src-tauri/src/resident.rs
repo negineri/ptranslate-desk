@@ -155,6 +155,11 @@ pub fn shortcut_enabled(app: &AppHandle, shortcut: &str) -> bool {
     enabled && app.state::<Backend>().session.lock().unwrap().logged_in
 }
 
+// 呼び出すのは macOS と Windows のキー監視と、画面の試験だけ。
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", feature = "smoke-test")),
+    allow(dead_code)
+)]
 pub fn copy_key(app: &AppHandle, copy: bool, repeated: bool) {
     if repeated {
         return;
