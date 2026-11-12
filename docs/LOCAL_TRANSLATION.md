@@ -250,7 +250,8 @@ Apple M2の取得済みPLaMo 3 Translate 2B Q4_K_Mで、SHA-256の一致、実�
 Ubuntu 24.04以降の x64 で、Tauri のビルド依存を導入してから `desktop/` で
 `npm ci` と `npm run build -- --bundles deb` を実行します。生成した `.deb` は
 `apt install ./<パッケージ名>.deb` で導入します。ワーカーには bubblewrap、Landlock ABI 4 以降、
-名前空間の作成を許す OS 設定、および Linux がシステムの外部電源を報告する端末が必要です。
+名前空間の作成を許す OS 設定が必要です。ワーカーは Linux が外部電源を報告する場合に新規受付を行います。
+Linux が電源デバイスを一つも報告せず、`systemd-detect-virt --vm` が VM と判定した場合も受付を許可します。
 ワーカー資格と OIDC の認証情報はデスクトップセッションの Secret Service に保存します。
 大きな UID の環境でパッケージのアーカイブヘッダーを読み込めない場合は、ビルドを
 `fakeroot npm run build -- --bundles deb` で実行します。
@@ -263,6 +264,21 @@ cargo test --locked linux_agent_uses_only_the_two_sandbox_relays -- --ignored
 
 実機では、アプリでモデルを取得し、AC電源で提供先にログイン・登録して提供をオンにします。ステージングの
 検証エンジンには実機と同じモデルを設定し、合成文で試用、配信、中止、提供オフ、登録解除を確認します。
+
+#### Ubuntu VM での実モデル確認（2026-11-12）
+
+Ubuntu 26.04 x64 の KVM VM で、電源デバイスを報告しない状態から CPU ワーカーを起動した。
+以下の試験はローカル HTTPS 仲介、bubblewrap、Landlock、本番と同じ Unix ソケット中継を使う。
+通常の保存先と別のモデル・エンジンを使う場合は `--installation` で設定ファイルを指定できる。
+
+```sh
+python3 tools/run_worker_local_probe.py --device none
+```
+
+合成文で登録、実モデルによる試用1件、翻訳の逐次配信、実モデルによる抜き取り1件、
+利用者の中止、待機中・推論中の親停止、ワーカーとエンジンの処理枠の回収、登録解除後の401を確認した。
+短文1件の最初の断片は209 ms、全体は688 msだった。推論中の親停止から子の回収まで17 ms、
+依頼元へのエラー通知まで106 msだった。親の操作は試験で模擬し、設定画面・OIDC・ステージングの回線は試験範囲外。
 
 ## Chrome拡張との連携
 

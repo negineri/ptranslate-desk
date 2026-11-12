@@ -73,14 +73,24 @@ pub(crate) fn external_power() -> Option<bool> {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn external_power() -> Option<bool> {
-    linux_power(std::path::Path::new("/sys/class/power_supply"))
+    static VM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    linux_power(std::path::Path::new("/sys/class/power_supply"), || {
+        *VM.get_or_init(|| {
+            std::process::Command::new("/usr/bin/systemd-detect-virt")
+                .args(["--vm", "--quiet"])
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    })
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn linux_power(root: &std::path::Path) -> Option<bool> {
+fn linux_power(root: &std::path::Path, is_vm: impl FnOnce() -> bool) -> Option<bool> {
     let mut offline = false;
     let mut unknown = false;
+    let mut empty = true;
     for entry in std::fs::read_dir(root).ok()? {
+        empty = false;
         let path = entry.ok()?.path();
         let kind = std::fs::read_to_string(path.join("type")).ok()?;
         if matches!(kind.trim(), "Battery" | "UPS") {
@@ -101,6 +111,9 @@ fn linux_power(root: &std::path::Path) -> Option<bool> {
             _ => unknown = true,
         }
     }
+    if empty && is_vm() {
+        return Some(true);
+    }
     (offline && !unknown).then_some(false)
 }
 
@@ -119,13 +132,22 @@ mod tests {
         let supply = root.path().join("AC");
         std::fs::create_dir(&supply).unwrap();
         std::fs::write(supply.join("type"), "Mains\n").unwrap();
-        assert_eq!(linux_power(root.path()), None);
+        assert_eq!(linux_power(root.path(), || false), None);
+        assert_eq!(linux_power(root.path(), || true), None);
         std::fs::write(supply.join("online"), "0\n").unwrap();
-        assert_eq!(linux_power(root.path()), Some(false));
+        assert_eq!(linux_power(root.path(), || true), Some(false));
         std::fs::write(supply.join("online"), "1\n").unwrap();
-        assert_eq!(linux_power(root.path()), Some(true));
+        assert_eq!(linux_power(root.path(), || false), Some(true));
         std::fs::write(supply.join("scope"), "Device\n").unwrap();
-        assert_eq!(linux_power(root.path()), None);
+        assert_eq!(linux_power(root.path(), || false), None);
+    }
+
+    #[test]
+    fn linux_vm_without_power_devices_can_offer_work() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(linux_power(root.path(), || true), Some(true));
+        assert_eq!(linux_power(root.path(), || false), None);
+        assert_eq!(linux_power(&root.path().join("missing"), || true), None);
     }
 
     #[test]

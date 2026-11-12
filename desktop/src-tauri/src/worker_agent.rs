@@ -175,6 +175,14 @@ impl Agent {
     }
 
     fn with_transport(config: Bootstrap, unix_relay: bool) -> Result<Self> {
+        Self::with_root_certificate(config, unix_relay, None)
+    }
+
+    fn with_root_certificate(
+        config: Bootstrap,
+        unix_relay: bool,
+        certificate: Option<reqwest::Certificate>,
+    ) -> Result<Self> {
         let broker = broker_origin(&config.broker)?;
         if !config
             .worker_secret
@@ -195,6 +203,9 @@ impl Agent {
                 .read_timeout(Duration::from_secs(30))
         };
         let mut client = builder();
+        if let Some(certificate) = certificate {
+            client = client.add_root_certificate(certificate);
+        }
         let mut engine_client = None;
         match (config.relay_port, config.relay_secret.as_deref()) {
             (Some(port), Some(secret)) if !unix_relay && port != 0 && !secret.is_empty() => {
@@ -506,7 +517,7 @@ fn run_with_runtime(
     }))
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod real_model_probe;
 
 pub(crate) fn entry() {

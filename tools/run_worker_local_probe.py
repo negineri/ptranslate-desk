@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""macOSの制限付きワーカーを取得済み実モデルとローカル仲介で確認する。通常のCIでは実行しない。"""
+"""macOS・Ubuntuの制限付きワーカーを実モデルとローカル仲介で確認する。"""
 
 import argparse
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import http.client
 import json
@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from unittest.mock import patch
 
@@ -70,9 +71,8 @@ def test_binary():
 
 
 @contextmanager
-def engine(device):
-    home = Path.home() / "Library/Application Support/com.witenp.ptranslate-desk/inference"
-    install = json.loads((home / "installation.json").read_text())
+def engine(device, installation):
+    install = json.loads(installation.read_text())
     source = (ROOT / "desktop/src-tauri/src/local/resources.rs").read_text()
     expected = re.search(r'MODEL_SHA: &str =\s*"([a-f0-9]{64})"', source)[1]
     with Path(install["model"]).open("rb") as model:
@@ -212,9 +212,16 @@ class Worker:
         self.exited_at = None
         self.lock = threading.Lock()
         env = {
-            "PTRANSLATE_WORKER_PROBE_PORTS": f"{bootstrap['relay_port']},{bootstrap['engine_port']}",
             "PTRANSLATE_WORKER_PROBE_CA": certificate,
         }
+        if sys.platform == "linux":
+            env["PTRANSLATE_WORKER_PROBE_LINUX_PORTS"] = (
+                f"{urllib.parse.urlsplit(bootstrap['broker']).port},{bootstrap['engine_port']}"
+            )
+        else:
+            env["PTRANSLATE_WORKER_PROBE_PORTS"] = (
+                f"{bootstrap['relay_port']},{bootstrap['engine_port']}"
+            )
         self.process = subprocess.Popen(
             [binary, "--exact", TEST, "--ignored", "--nocapture", "--test-threads=1"],
             env=env,
@@ -363,13 +370,14 @@ def translate(server, *, cancel=False, stop_parent=None):
         connection.close()
 
 
-def probe(binary, directory, device):
+def probe(binary, directory, device, installation):
     issues = []
+    linux = sys.platform == "linux"
     server_tls, client_tls = tls_contexts(directory)
     canary = directory / "canary.json"
     canary.write_text(json.dumps([{"text": "Synthetic check.", "target_lang": "ja"}]))
     canary.chmod(0o600)
-    with engine(device) as (port, secret, model, idle):
+    with engine(device, installation) as (port, secret, model, idle):
         settings = {
             "POOL_KIND": "volunteer",
             "STATE_FILE": str(directory / "worker.sqlite"),
@@ -389,6 +397,8 @@ def probe(binary, directory, device):
             ),
             "QUEUE_TIMEOUT": 4,
         }
+        if linux:
+            settings.update(PROBATION_JOBS=1, CANARY_RATE="0.05", AUDIT_RATE="1")
         with patch.multiple(tr, **settings), serving(Broker(server_tls, client_tls)) as server:
             server.get_pool()
             hub = server.get_workers()
@@ -399,10 +409,11 @@ def probe(binary, directory, device):
             status, account = registered.register("probe-owner")
             require(status == 200, "ローカル仲介へのワーカー登録に失敗しました")
             info = hub.registry.info(account["worker_id"])
-            # 配信経路に集中するため、試用の成績は試験内で合格にする。品質検査は別試験。
-            for _ in range(hub.checks.health.probation_jobs):
-                hub.checks.health.record(info, passed=True)
-            print("ローカル仲介へのワーカー登録: PASS（試用の成績は模擬）", flush=True)
+            if not linux:
+                # macOS の試験は従来どおり配信経路に絞る。
+                for _ in range(hub.checks.health.probation_jobs):
+                    hub.checks.health.record(info, passed=True)
+            print("ローカル仲介へのワーカー登録: PASS", flush=True)
             result_events = []
             original_result = hub.result
 
@@ -416,9 +427,16 @@ def probe(binary, directory, device):
                 return response
 
             with (
-                patch.object(hub.checks, "after_delivery", return_value=False),
+                (
+                    patch.object(hub.checks, "sampled", side_effect=lambda rate: rate == 1)
+                    if linux
+                    else patch.object(hub.checks, "after_delivery", return_value=False)
+                ),
                 patch.object(hub, "result", side_effect=observe_result),
-                relay(server.server_port) as (relay_port, relay_secret),
+                nullcontext((None, None)) if linux else relay(server.server_port) as (
+                    relay_port,
+                    relay_secret,
+                ),
             ):
                 config = {
                     "broker": f"https://127.0.0.1:{server.server_port}",
@@ -431,6 +449,17 @@ def probe(binary, directory, device):
                     "relay_secret": relay_secret,
                 }
                 certificate = (directory / "tls.crt").read_text()
+                if linux:
+                    worker = Worker(binary, certificate, config)
+                    try:
+                        worker.finish("completed", 30)
+                        wait(
+                            lambda: hub.checks.health.eligible(info),
+                            "実モデルでの試用が合格しませんでした",
+                        )
+                    finally:
+                        worker.close()
+                    print("実モデルでの試用1件: PASS", flush=True)
                 for scenario in ("complete", "cancel", "parent-stop", "parent-stop-running"):
                     worker = Worker(binary, certificate, config)
                     try:
@@ -493,6 +522,17 @@ def probe(binary, directory, device):
                             )
                             wait(idle, "中止・完了後に実エンジンの処理枠が空きません", 6)
                             print(f"{scenario}: PASS {json.dumps(result)}", flush=True)
+                            if linux and scenario == "complete":
+
+                                def audit_passed():
+                                    health = hub.checks.health
+                                    with health.lock:
+                                        return health.workers[info["id"]]["passed"] == 2
+
+                                wait(
+                                    audit_passed, "実モデルでの配信後の抜き取りが合格しませんでした"
+                                )
+                                print("実モデルでの配信後の抜き取り1件: PASS", flush=True)
                             if issues:
                                 print(f"親停止後のエラー通知: FAIL ({issues[-1]})", flush=True)
                     finally:
@@ -523,12 +563,23 @@ def probe(binary, directory, device):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", choices=["MTL0", "none"], default="MTL0")
+    parser.add_argument("--device", choices=["MTL0", "none"])
+    parser.add_argument("--installation", type=Path, help="取得済みの installation.json")
     args = parser.parse_args()
-    if sys.platform != "darwin":
-        parser.error("この検証はmacOS専用です")
+    if sys.platform not in ("darwin", "linux"):
+        parser.error("この検証はmacOSとUbuntuに対応しています")
+    device = args.device or ("MTL0" if sys.platform == "darwin" else "none")
+    if sys.platform == "linux" and device != "none":
+        parser.error("Ubuntuでは --device none を指定してください")
+    if sys.platform == "darwin":
+        data = Path.home() / "Library/Application Support"
+    else:
+        data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    installation = (
+        args.installation or data / "com.witenp.ptranslate-desk/inference/installation.json"
+    )
     with tempfile.TemporaryDirectory(prefix="ptranslate-worker-probe-") as directory:
-        probe(test_binary(), Path(directory), args.device)
+        probe(test_binary(), Path(directory), device, installation)
 
 
 if __name__ == "__main__":
