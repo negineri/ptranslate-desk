@@ -85,6 +85,7 @@ export async function runSetup(local, existingSettings, { manual = false, saveSh
         <h2>サーバーにログイン</h2>
         <p class="hint">ブラウザが開き、アカウントで認証します。</p>
         <button type="button" id="wizard-login" class="primary">ログインする</button>
+        <button type="button" id="wizard-anonymous">匿名で始める</button>
         <button type="button" id="wizard-cancel-login" hidden>ログインを中止</button>
         <p id="wizard-session-only" class="hint warn" hidden>OS の資格情報に保存できなかったため、アプリを終了すると再ログインが必要です。</p>
       </div>
@@ -149,6 +150,7 @@ export async function runSetup(local, existingSettings, { manual = false, saveSh
   const next = find("wizard-next");
   const consent = find("wizard-license-agree");
   const login = find("wizard-login");
+  const anonymousLogin = find("wizard-anonymous");
   const cancelLogin = find("wizard-cancel-login");
   const status = find("wizard-status");
   find("wizard-local-unavailable").hidden = local.supported;
@@ -202,7 +204,9 @@ export async function runSetup(local, existingSettings, { manual = false, saveSh
       (step === "model" && !modelAvailable) || (step === "login" && !authenticated);
     next.textContent = step === "done" ? "翻訳を開始" : "次へ";
     login.disabled = pending || authenticated;
-    login.textContent = authenticated ? "ログイン済み" : "ログインする";
+    login.textContent = authenticated ? (session.server_anonymous ? "匿名で利用中" : "ログイン済み") : "ログインする";
+    anonymousLogin.hidden = authenticated || session.mock;
+    anonymousLogin.disabled = pending;
     find("wizard-session-only").hidden = !sessionOnly;
     if (step === "done") {
       const rows = [["ライセンス", "同意済み"], ["ショートカット", shortcut.value === "custom" ? shortcutValue() : shortcut.selectedOptions[0]?.textContent ?? ""]];
@@ -255,6 +259,10 @@ export async function runSetup(local, existingSettings, { manual = false, saveSh
       await invoke("login");
       await refreshLogin();
     } finally { cancelLogin.hidden = true; }
+  });
+  anonymousLogin.onclick = () => void perform(async () => {
+    await invoke("login_anonymous");
+    await refreshLogin();
   });
   cancelLogin.onclick = () => void invoke("cancel_login").catch((error) => report(String(error), true));
   next.onclick = () => void perform(async () => {

@@ -178,7 +178,7 @@ Pythonサービスとコンテナはどちらか一方を使います。
 
 | 環境変数                            | 既定                                          | 意味                                             |
 | ----------------------------------- | --------------------------------------------- | ------------------------------------------------ |
-| `TR_UPSTREAM_URL`                   | (必須)                                        | 翻訳エンジン (llama-server) の `/v1/completions` |
+| `TR_UPSTREAM_URL`                   | (`TR_UPSTREAMS` が空なら必須)                                        | 翻訳エンジン (llama-server) の `/v1/completions` |
 | `TR_API_KEY`                        | 空                                            | 翻訳エンジンに付ける `Authorization: Bearer`     |
 | `TR_MODEL` | `plamo-3-translate` | 翻訳エンジンに渡すモデル名 |
 | `TR_LISTEN_HOST` / `TR_LISTEN_PORT` | `127.0.0.1` / `8002` (コンテナでは `0.0.0.0`) | 待ち受け                                         |
@@ -186,6 +186,23 @@ Pythonサービスとコンテナはどちらか一方を使います。
 | `TR_MAX_PROMPT_CHARS`               | 12000                                         | 文脈・前の訳・用語集を合わせた上限 (文字)        |
 | `TR_MAX_GLOSSARY` | 200 | 用語集の組数の上限 |
 | `TR_MAX_ACTIVE_PER_USER`            | 2                                             | 1 人が同時に流せる翻訳の数                       |
+| `TR_UPSTREAMS` | 空 | 複数エンジンのJSON配列。例: `[{"url":"http://127.0.0.1:8080/v1/completions","slots":2}]`。各 `slots` は1〜1000 |
+| `TR_UPSTREAM_SLOTS` | 4 | `TR_UPSTREAMS` が空のときの実行枠。1〜1000の整数。エンジンの並列数より多い分はエンジン側で待つ。`TR_UPSTREAMS` 指定時は使用・検証しない |
+| `TR_POOL_KIND` | direct | 直結プールは `direct`、ボランティア枠は `volunteer`。後者の起動条件はボランティア仕様を参照 |
+| `TR_STATE_FILE` | 空 | ワーカー登録用SQLite。空ならワーカーAPIは無効。POSIXでは親を0700にする。ボランティア枠では必須 |
+| `TR_WORKER_MODEL_SHA256` | 空 | ワーカーAPIを有効にする場合に必須。承認するモデルの小文字16進数64桁 |
+| `TR_AUDIT_UPSTREAMS` | 空 | 確認用ジョブの基準を作る運営のエンジン。`url` と `slots` のJSON配列。`TR_CANARY_FILE` と両方指定して検査を有効にする |
+| `TR_CANARY_FILE` | 空 | 非公開の合成ジョブのJSON配列。16MiB・10,000件まで。所有者だけが読める0600にし、本番の文をリポジトリに置かない |
+| `TR_PROBATION_JOBS` | 20 | 試用と端末の検疫から合格するまでに必要な連続合格数。正の整数 |
+| `TR_WORKERS_PER_OWNER` | 2 | 所有者あたりの登録上限 |
+| `TR_MIN_AGENT_VERSION` | 空 | 受けるエージェントの最小版（数値3つ）。空なら `0.0.0` |
+| `TR_ANON_ENABLED` | 0 | 匿名の資格のAPIを有効にするか。前段からだけ仲介に接続できる構成で使う |
+| `TR_TOKEN_KEY` | 空 | 匿名を有効にする場合に必須。32バイト以上の秘密の鍵。リポジトリ・ログには入れない |
+| `TR_ANON_ISSUE_PER_MINUTE` | 100 | 全体の資格発行の試みの1分の上限 |
+| `TR_ANON_SHARE` | 0.5 | 登録済みの待ちがある場合の匿名の実行枠の割合（0より大きく1以下、最低1枠） |
+| `TR_CLIENT_IP_HEADER` | 空 | 信頼する前段が上書きするIPヘッダー。空ならIP単位の制限を使わない |
+| `TR_COUNTRY_HEADER` / `TR_ALLOWED_COUNTRIES` | 空 / 空 | 信頼する前段の国ヘッダーと許可する国のカンマ区切り一覧（例 `JP`）。一覧が空なら制限しない |
+| `TR_MAX_OPEN_REQUESTS` | 1000 | 開いた接続の上限。超過は503 |
 | `TR_UPSTREAM_TIMEOUT` | 600 | 翻訳エンジンとの通信タイムアウト（秒） |
 | `TR_HEARTBEAT_SECONDS` | 15 | SSEのハートビート間隔（秒） |
 | `TR_USERINFO_URL` | 空 | IdPのuserinfo。`X-Forwarded-User` が無く前段が検証したBearerだけがあるとき、ここから `preferred_username` を引く（access tokenにユーザー名が入らないIdP向け。[かんたん構築ガイド](SELF_HOSTING_COMPOSE.md)） |
@@ -451,6 +468,47 @@ server {
 `auth_request` モジュールのあるnginxを使い、`sudo nginx -t` が通ってから再読み込みします。
 利用者から送られた `X-Forwarded-User` は必ず検証結果で上書きします。
 8002/8080/4180番は外部から到達できないことも確認してください。
+
+### ワーカーAPIを有効にする場合の前段
+
+OIDCを通さず仲介へ渡すワーカーAPIは、`/api/worker/poll`、`/api/worker/result`、
+`/api/worker/ping` の3つだけです。パスの完全一致で設定し、`/api/worker/` の前方一致で認証を外さないでください。
+nginxでは `location = /api/worker/poll`、`location = /api/worker/result`、
+`location = /api/worker/ping` の3つを用意し、それぞれに `proxy_set_header X-Forwarded-User "";` を指定します。
+クライアントが送った利用者名を仲介へ通さず、仲介はワーカーのBearer資格を検証します。
+これらの場所でも、IP・国のヘッダーを前段が検証済みの値へ上書きする設定と、SSE・キャッシュの要件を維持してください。
+nginxの `proxy_set_header` は同じ階層で指定すると上位からの継承が変わるため、必要なヘッダーを各場所で明示します。
+
+`/api/worker/register`、`/api/worker/renew`、`/api/worker/mine`、
+`DELETE /api/worker/<id>` はOIDCを通します。認証済みの要求だけに、前段が検証した `X-Forwarded-User` を付けます。
+匿名用APIの設定と、ワーカー管理APIの認証除外を混同しないでください。
+
+Webで匿名利用を有効にする場合は、`TR_ANON_ENABLED=1` と公開HTTPSの `TR_PUBLIC_SERVER_URL` を設定し、
+未ログインでも翻訳画面と静的ファイルを開けるよう前段を設定します。
+`/api/anonymous` と匿名資格付きの `/api/config`・`/api/translate` を仲介へ渡し、
+画面の「アカウントでログイン」が使う `/oauth2/start?rd=%2F` を認証プロキシへ渡します。
+
+### 確認用の文の更新と運営用CLI
+
+確認用の文は定期的に入れ替えます。`TR_CANARY_FILE` と同じディレクトリに、仲介の実行ユーザーだけが読める
+0600の新しいファイルを書いてから、ファイル名を置き換えてください。仲介は約1秒ごとに変更を確認します。
+不正なファイルは採用せず、使用済みの文と成績は読み直しても保持します。コンテナで使う場合は、
+ファイルを差し替えられるように親ディレクトリをマウントします。
+1分ごとの `canary exhausted_owners=N` が、文を使い切った所有者数です。文を足す目安にしてください。
+確認用ジョブは `TR_AUDIT_UPSTREAMS` の枠の合計まで並列に処理します。
+
+運営用CLIはリポジトリの `tools/worker_admin.py` です。仲介と同じOSユーザーで、同じ `TR_STATE_FILE` を指定して実行します。
+別プロセスから既存のSQLiteを直接開きます。`--state-file` でもファイルを指定できます。
+
+| `python3 tools/worker_admin.py` の後ろに付ける操作 | 動き |
+| --- | --- |
+| `list-owners` | 所有者名、登録記録数（期限切れを含む）、検疫と失効の状態をJSONで表示。成績は表示しない |
+| `revoke-owner <name>` | 所有者とその全ワーカーを失効させる |
+| `revoke-worker <worker_id>` | 1台を失効させる |
+| `release-owner <name>` | 所有者全体の検疫を解除し、各端末の試用をやり直す。失効した端末は戻さない |
+
+待機中のポーリングへの失効反映は、仲介の次の5秒ごとのDB再確認です。新しい要求はその場で資格を確認します。
+運営用HTTP APIはありません。ボランティア枠の利用者APIには同意の版が必要です。クライアントの同意画面と公開前の条件はボランティア仕様を参照してください。
 
 ## 8. デスクトップの接続先を設定する
 

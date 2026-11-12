@@ -22,6 +22,7 @@ const panel = document.createElement("details");
 panel.id = "local-settings";
 panel.innerHTML = `
   <summary id="local-settings-title">ローカル翻訳の設定</summary>
+  <p id="local-worker-notice" class="hint" hidden>翻訳の処理を提供している間は、推論エンジンが動き続けます</p>
   <div id="local-options">
     <p class="hint">PLaMo 3 Translate 2Bをこの端末で動かします。<a data-plamo-license href="https://plamo.preferredai.jp/info/plamo-community-license-ja" target="_blank" rel="noreferrer">PLaMoコミュニティライセンス</a></p>
     <div class="setup-group" id="local-model-controls">

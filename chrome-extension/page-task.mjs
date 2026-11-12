@@ -3,7 +3,7 @@
 import { MAX_IN_FLIGHT } from "./scheduler.mjs";
 import { splitText, translateChunk } from "./translation.mjs";
 import { apiFetch, pinConnection, RelayError } from "./relay.mjs";
-import { requestSettings } from "./settings.mjs";
+import { requestSettings, volunteerFields } from "./settings.mjs";
 import { ensureOk, LoginRequired } from "./translate.mjs";
 
 export const MAX_BLOCKS = 3000;
@@ -120,9 +120,18 @@ export function runPageTask(port, deps) {
     const settings = await deps.settings();
     requestDeps = await pinConnection(deps, settings);
     const config = await (await call("api/config")).json();
+    // ページのURLや本文を使わず、翻訳を開始するたびに新しい値を作る。
+    const groupId = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))))
+      .replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+    const pageFields = (id) => ({
+      group: groupId,
+      purpose: priority.has(id) ? "page_visible" : "page_rest",
+    });
     // 訳す先の自動はページ全体の文で決める
     const sample = blocks.map((b) => b.text).join("\n");
-    const common = requestSettings(sample, settings, config);
+    const consent = await volunteerFields(settings, config,
+      deps.incognito ? "シークレットウィンドウではボランティア枠を使えません" : "");
+    const common = { ...requestSettings(sample, settings, config), ...consent };
     if (common.source_lang && common.source_lang === common.target_lang) {
       throw new RelayError("same-lang", "原文と訳す先が同じ言語です");
     }
@@ -130,7 +139,7 @@ export function runPageTask(port, deps) {
     const todo = candidates.slice(0, MAX_BLOCKS);
     const omitted = candidates.length - todo.length;
     const name = (code) => config.languages?.find((l) => l.code === code)?.name || code;
-    post({ type: "start", total: todo.length, target: common.target_lang, targetName: name(common.target_lang) });
+    post({ type: "start", total: todo.length, target: common.target_lang, targetName: name(common.target_lang), ...(consent.consent ? { volunteer: true } : {}) });
     let previous = null;
     let truncated = 0;
     let done = 0;
@@ -207,7 +216,7 @@ export function runPageTask(port, deps) {
     async function translateGroup(group, previous) {
       if (group.length > 1) {
         const text = group.map((block, i) => `${i + 1}. ${block.text}`).join("\n");
-        const res = await call("api/translate", JSON.stringify({ ...common, text, history: [] }), group[0].id);
+        const res = await call("api/translate", JSON.stringify({ ...common, ...pageFields(group[0].id), text, history: [] }), group[0].id);
         let output = "";
         const finish = await translateChunk(res, (part) => { output += part; });
         const translations = finish === "stop" && numberedTranslations(output, group.length);
@@ -233,7 +242,7 @@ export function runPageTask(port, deps) {
           const source = chunk.text.trim();
           const lead = out + chunk.text.match(/^\s*/)[0];
           const res = await call("api/translate", JSON.stringify({
-            ...common, text: source, history: previous ? [previous] : [],
+            ...common, ...pageFields(block.id), text: source, history: previous ? [previous] : [],
           }), block.id);
           let buf = "";
           const finish = await translateChunk(res, (part) => {
@@ -253,6 +262,7 @@ export function runPageTask(port, deps) {
 
 // 失敗を画面に出す言葉と、手当ての種類にする
 export function describe(e) {
+  if (e?.code === "consent_required") return { code: e.code, message: e.message, remedy: "options" };
   if (e instanceof LoginRequired) return { code: "login", message: e.message };
   if (e instanceof RelayError) {
     const remedy = e.code === "no-server" || e.code === "no-permission" ? "options" : undefined;

@@ -336,10 +336,7 @@ mod tests {
     async fn truncated_translation_is_not_a_valid_speed_sample() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = Endpoint {
-            url: format!("http://{}", listener.local_addr().unwrap()),
-            key: "test".into(),
-        };
+        let endpoint = Endpoint::new(listener.local_addr().unwrap().port(), "test".into());
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut data = [0; 8192];
@@ -390,10 +387,7 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         for parallel in [1, 4, 12] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = Endpoint {
-                url: format!("http://{}", listener.local_addr().unwrap()),
-                key: "test".into(),
-            };
+            let endpoint = Endpoint::new(listener.local_addr().unwrap().port(), "test".into());
             let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));

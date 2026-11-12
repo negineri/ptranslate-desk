@@ -1,3 +1,4 @@
+import { volunteerFields } from "./volunteer-consent.mjs";
 import { desktopFetch } from "./ipc.mjs";
 import { guessTarget, parseGlossary, splitText, translateChunk } from "./translation.mjs";
 const { invoke } = window.__TAURI__.core;
@@ -18,7 +19,9 @@ function scheduleResize() {
     const style = getComputedStyle(out);
     const padding = [style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth]
       .reduce((sum, value) => sum + parseFloat(value), 0);
-    const height = Math.ceil(chrome + Math.max(80, $("translation").getBoundingClientRect().height) + padding);
+    const dialog = $("volunteer-consent");
+    const contentHeight = chrome + Math.max(80, $("translation").getBoundingClientRect().height) + padding;
+    const height = Math.ceil(dialog.open ? Math.max(contentHeight, dialog.scrollHeight + 40) : contentHeight);
     const key = `${revision}:${height}:${window.innerWidth}`;
     if (key === lastResize) return;
     lastResize = key;
@@ -28,7 +31,7 @@ function scheduleResize() {
   });
 }
 const sizeObserver = new ResizeObserver(scheduleResize);
-for (const id of ["translation", "status", "direction"]) sizeObserver.observe($(id));
+for (const id of ["translation", "status", "direction", "volunteer-consent"]) sizeObserver.observe($(id));
 new MutationObserver(scheduleResize).observe(document.querySelector("main"), { childList: true, subtree: true, characterData: true });
 
 function stop() {
@@ -36,6 +39,8 @@ function stop() {
   controller?.abort();
   controller = null;
   revision = null;
+  const dialog = $("volunteer-consent");
+  if (dialog.open) dialog.close();
   $("translation").textContent = "";
   $("status").textContent = "";
   $("copy").disabled = true;
@@ -46,6 +51,8 @@ async function show() {
   const content = await invoke("popup_content");
   if (mine !== sequence || !content || content.revision === revision) return;
   controller?.abort();
+  const dialog = $("volunteer-consent");
+  if (dialog.open) dialog.close();
   revision = content.revision;
   const abort = new AbortController();
   controller = abort;
@@ -64,10 +71,11 @@ async function show() {
     abort.signal.throwIfAborted();
     const target = !settings.target || settings.target === "auto" ? guessTarget(content.text) : settings.target;
     const name = (code) => config.languages.find((lang) => lang.code === code)?.name || code;
-    $("direction").textContent = `${settings.source ? name(settings.source) : "自動で判定"} → ${name(target)}`;
+    $("direction").textContent = `${config.pool?.kind === "volunteer" ? "ボランティア枠 · " : ""}${settings.source ? name(settings.source) : "自動で判定"} → ${name(target)}`;
     if (settings.source === target) throw new Error("原文と訳す先が同じ言語です");
     const common = {
-      target_lang: target, source_lang: settings.source || null,
+      ...volunteerFields(config, { onAgree: () => { revision = null; void show(); } }),
+      purpose: "interactive", target_lang: target, source_lang: settings.source || null,
       form: target === "ja" ? settings.form || null : null, context: "",
       glossary: parseGlossary(settings.glossary || "", config.max_glossary),
     };

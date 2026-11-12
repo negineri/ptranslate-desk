@@ -17,7 +17,7 @@
 <body><main>
   <h1><img class="brand-mark" src="./logo.png" width="32" height="32" alt="">設定</h1>
   <p class="hint">接続後は、拡張のアイコンを左クリックするとページ全体を翻訳します。設定はアイコンを右クリックして開けます。</p>
-  <p class="sub">サーバーモードの翻訳には PTranslate のサーバーとそのアカウントが要ります。ログインは Web版 (サーバーURLのページ) で行い、拡張はそのログインを使います。</p>
+  <p class="sub">アカウントで使う場合は Web版でログインしてください。接続先が匿名利用に対応していれば、アカウントなしでも翻訳できます。</p>
   <section>
     <label for="mode">翻訳する場所</label>
     <select id="mode"><option value="server">サーバーで翻訳</option><option value="local">このPCで翻訳</option></select>
@@ -34,7 +34,15 @@
     <div class="row">
       <button id="save" class="primary">接続</button>
       <button id="login" hidden>Web版を開いてログイン</button>
+      <button id="anonymous-start" type="button" hidden>匿名で始める</button>
+      <button id="anonymous-forget" type="button" hidden>匿名利用をやめる</button>
       <span id="status" class="hint" role="status"></span>
+    </div>
+    <div id="volunteer-consent" hidden>
+      <p>この接続先はボランティア枠です。原文、文脈、用語集、直前の区切りの原文と訳を参加者の端末で処理します。ページ翻訳ではログイン後のページの本文も送られます。</p>
+      <p>参加者は内容を読めます。規約で記録を禁止していますが、技術的には防げません。訳の改ざんをすべて検出することはできません。</p>
+      <p>運営と CDN の事業者も内容を読めます。検査のため一部を運営のエンジンで訳し直します。他人の個人情報、業務上の秘密、認証情報はローカル翻訳か運営管理枠で訳してください。</p>
+      <button id="volunteer-agree" type="button">この接続先への送信に同意する</button>
     </div>
   </section>
   <section>

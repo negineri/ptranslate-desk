@@ -7,6 +7,12 @@ export class LoginRequired extends Error {}
 // 応答の状態を画面の言葉にする (SPEC 5.2)。本番の 403 は HTML なので状態だけを見る
 export async function ensureOk(res) {
   if (res.ok) return res;
+  if (res.status === 403) {
+    const error = await res.json().catch(() => null);
+    if (error?.code === "consent_required") {
+      throw Object.assign(new Error("設定でボランティア枠への送信に同意してください"), { code: error.code });
+    }
+  }
   if (res.status === 401 || res.status === 403) {
     throw new LoginRequired("ログインしていません。Web版でログインしてから、もう一度試してください");
   }
@@ -34,7 +40,7 @@ export async function translateInto(el, text, common, { signal, fetch = extensio
       el.append(node);
       const res = await ensureOk(
         await fetch("api/translate", {
-          body: JSON.stringify({ ...common, text: source, history: previous ? [previous] : [] }),
+          body: JSON.stringify({ ...common, purpose: "interactive", text: source, history: previous ? [previous] : [] }),
           signal,
         }),
       );
@@ -69,6 +75,6 @@ export function errorMessage(error) {
 // ログインや設定が要るときの手当てのボタン
 export function remedy(error) {
   if (error instanceof LoginRequired) return "login";
-  if (error?.code === "local" || error?.code === "no-server" || error?.code === "no-permission") return "options";
+  if (error?.code === "consent_required" || error?.code === "local" || error?.code === "no-server" || error?.code === "no-permission") return "options";
   return null;
 }

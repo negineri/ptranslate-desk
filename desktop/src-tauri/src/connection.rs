@@ -28,7 +28,9 @@ impl Connection {
         self.server_url = self.server_url.trim().into();
         self.discovery_url = self.discovery_url.trim().into();
         self.client_id = self.client_id.trim().into();
-        for value in [&self.server_url, &self.discovery_url] {
+        for value in std::iter::once(&self.server_url)
+            .chain(std::iter::once(&self.discovery_url).filter(|url| !url.is_empty()))
+        {
             let url = Url::parse(value).map_err(|_| "接続先のURLが不正です")?;
             if url.scheme() != "https"
                 || url.host_str().is_none()
@@ -45,7 +47,9 @@ impl Connection {
             return Err("サーバーURLにはパスを付けず、https://translate.example.com の形式で指定してください".into());
         }
         self.server_url = server.origin().ascii_serialization();
-        self.discovery_url = Url::parse(&self.discovery_url).unwrap().to_string();
+        if !self.discovery_url.is_empty() {
+            self.discovery_url = Url::parse(&self.discovery_url).unwrap().to_string();
+        }
         if self.client_id.is_empty()
             || self.client_id.len() > 256
             || self.client_id.chars().any(char::is_control)

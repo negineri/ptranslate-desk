@@ -2,6 +2,7 @@ import { settingsPage, showPage, accountSlot, stageSettings, hasPendingSettings 
 import { desktopFetch as request } from "./ipc.mjs";
 import "./updates.mjs";
 import "./connection.mjs";
+import "./worker-view.mjs";
 import { modeReady } from "./local-view.mjs";
 import { runSetup } from "./setup-wizard.mjs";
 const { invoke } = window.__TAURI__.core;
@@ -54,6 +55,11 @@ const cancelLogin = document.createElement("button");
 cancelLogin.textContent = "ログインを中止";
 cancelLogin.hidden = true;
 serverAccess.after(cancelLogin);
+const anonymousStart = document.createElement("button");
+anonymousStart.type = "button";
+anonymousStart.textContent = "匿名で始める";
+anonymousStart.hidden = true;
+serverAccess.after(anonymousStart);
 cancelLogin.addEventListener("click", () => { void invoke("cancel_login").catch(showError); });
 if (/Mac/.test(navigator.platform)) {
   const keychainHelp = document.createElement("details");
@@ -146,7 +152,9 @@ async function restoreSession() {
   const useLocal = translationMode();
   loginSwitch.disabled = !serverConfigured || status.logging_in || serverSwitching;
   loginSwitch.checked = serverAuthenticated;
-  serverStatus.textContent = status.logging_in ? "ログイン中" : status.server_session_only ? "今回のみログイン中" : serverAuthenticated ? "ログイン済み" :
+  anonymousStart.hidden = status.mock || !serverConfigured || serverAuthenticated;
+  anonymousStart.disabled = status.logging_in || serverSwitching;
+  serverStatus.textContent = status.logging_in ? "ログイン中" : status.server_anonymous ? "匿名で利用中" : status.server_session_only ? "今回のみログイン中" : serverAuthenticated ? "ログイン済み" :
     serverConfigured ? "未接続" : "接続先未設定";
   cancelLogin.hidden = !status.logging_in;
   if (status.logged_in || useLocal) resolveLogin();
@@ -162,6 +170,20 @@ loginSwitch.addEventListener("change", async () => {
   try {
     await pendingSave;
     await invoke(active ? "login" : "logout");
+  } catch (error) { showError(error); }
+  finally {
+    serverSwitching = false;
+    await restoreSession().catch(showError);
+  }
+});
+
+anonymousStart.addEventListener("click", async () => {
+  if (serverSwitching) return;
+  serverSwitching = true;
+  anonymousStart.disabled = loginSwitch.disabled = true;
+  try {
+    await pendingSave;
+    await invoke("login_anonymous");
   } catch (error) { showError(error); }
   finally {
     serverSwitching = false;

@@ -25,6 +25,7 @@ import mock_plamo  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("translator", ROOT / "server" / "translator.py")
 tr = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = tr
 spec.loader.exec_module(tr)
 
 
@@ -400,7 +401,7 @@ class UpstreamCancellationTest(unittest.TestCase):
             self.assertEqual(right.recv(1), b"")
             cancellation.detach()
         with patch.object(tr.http.client, "HTTPConnection") as connection:
-            tr.upstream_stream("test", 256, tr.queue.Queue(), cancellation)
+            tr.upstream_stream("test", 256, tr.queue.Queue(), cancellation, tr.UPSTREAM_URL)
             connection.return_value.connect.assert_not_called()
             connection.return_value.request.assert_not_called()
 

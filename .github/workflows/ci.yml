@@ -47,6 +47,8 @@ jobs:
       - run: npm ci --ignore-scripts
         working-directory: chrome-extension
       - run: node --test chrome-extension/tests/*.test.mjs
+      - run: node desktop/build.mjs
+      - run: node --test desktop/tests/*.test.mjs server/tests/test_web_anonymous.mjs
 
   desktop-windows:
     needs: version
@@ -131,6 +133,60 @@ jobs:
           name: macos-app
           path: desktop/macos-app.zip
           if-no-files-found: error
+
+  desktop-linux:
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: desktop/src-tauri
+          shared-key: desktop-linux
+      - name: Tauri とワーカーの依存をインストール
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev bubblewrap
+      - run: node desktop/build.mjs
+      - run: cargo fmt --check
+        working-directory: desktop/src-tauri
+      - run: cargo test --locked
+        working-directory: desktop/src-tauri
+      - name: Linux ワーカーの隔離を試験
+        working-directory: desktop/src-tauri
+        env:
+          LC_ALL: C
+        run: |
+          probe=(/usr/bin/bwrap --unshare-all --unshare-user --disable-userns
+            --die-with-parent --new-session --cap-drop ALL --ro-bind / / -- /usr/bin/true)
+          if ! output=$("${probe[@]}" 2>&1); then
+            # Ubuntu 24.04 の AppArmor による非特権 user namespace 制限を
+            # このステップの間だけ緩める。隔離試験自体は非特権のまま実行する。
+            if [[ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null)" == 1 ]] &&
+              sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; then
+              trap 'sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
+            fi
+            if ! output=$("${probe[@]}" 2>&1); then
+              printf '%s\n' "$output" >&2
+              case "$output" in
+                *"No permissions to create a new namespace"*|*"Operation not permitted"*|*"Permission denied"*)
+                  echo "::warning::ランナーで名前空間を作成できないため隔離試験は未実施です。docs/LOCAL_TRANSLATION.md の Ubuntu の手順で実行してください。"
+                  exit 0
+                  ;;
+                *) exit 1 ;;
+              esac
+            fi
+          fi
+          cargo test --locked linux_agent_uses_only_the_two_sandbox_relays -- --ignored
 
   chrome-extension-release-build:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')

@@ -67,3 +67,23 @@ export function chromeRegistrationUrl(id) {
 export function connectionKey(settings) {
   return settings.mode === "local" ? "local" : `server:${settings.server}`;
 }
+
+export function consentKey(server) {
+  return `volunteer-consent:${normalizeServerUrl(server)}`;
+}
+
+export async function volunteerFields(settings, config, blocked = "") {
+  if (settings.mode === "local" || config.pool?.kind !== "volunteer") return {};
+  const version = config.pool.consent_version;
+  if (blocked) throw new Error(blocked);
+  if (Number.isSafeInteger(version) && version > 0) {
+    const key = consentKey(settings.server);
+    if ((await chrome.storage.local.get(key))[key] === version) return { consent: version };
+  }
+  throw Object.assign(new Error("設定でボランティア枠への送信に同意してください"), { code: "consent_required" });
+}
+
+
+export function anonymousKey(server) {
+  return `anonymous:${normalizeServerUrl(server)}`;
+}

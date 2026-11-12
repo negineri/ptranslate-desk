@@ -466,3 +466,17 @@ test("追加翻訳が長引くと翻訳中を表示し、中止した後に遅�
   assert.equal(p.shadow.querySelector(".msg").textContent, "中止");
   p.w.close();
 });
+
+test("ページ翻訳は入力欄と編集可能なスロット内の文を送らない", () => {
+  const p = page('<textarea>Draft</textarea><select><option>Choice</option></select><edit-box><span>Slotted draft</span></edit-box><p>Article text</p>', (w) => {
+    w.document.querySelector("edit-box").attachShadow({ mode: "open" }).innerHTML =
+      '<div contenteditable="plaintext-only"><slot></slot><p>Shadow draft</p></div>';
+  });
+  try {
+    assert.deepEqual(Array.from(p.blocks, (b) => b.text), ["Article text"]);
+    p.receive({ type: "start", total: 1, volunteer: true });
+    assert.match(p.shadow.querySelector(".msg").textContent, /ボランティア枠/);
+  } finally {
+    p.w.close();
+  }
+});

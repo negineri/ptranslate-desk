@@ -3,6 +3,7 @@ mod benchmark;
 mod memory;
 mod parallel;
 pub mod resources;
+use crate::translation::{languages, prompt, Decoder};
 use crate::Message;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
@@ -13,12 +14,13 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
 };
 use tauri::{ipc::Channel, AppHandle, Manager, WebviewWindow};
+use zeroize::Zeroize;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -61,10 +63,44 @@ struct Installation {
 struct Endpoint {
     url: String,
     key: String,
+    port: u16,
 }
+impl Endpoint {
+    fn new(port: u16, key: String) -> Self {
+        Self {
+            url: format!("http://127.0.0.1:{port}"),
+            key,
+            port,
+        }
+    }
+}
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
+pub(crate) struct WorkerEngine(Endpoint);
+
+pub(crate) enum WorkerPreparationError {
+    Busy,
+    Unavailable,
+    Startup(String),
+}
+
+impl WorkerEngine {
+    pub(crate) fn configure(&self, bootstrap: &mut crate::worker_agent::Bootstrap) {
+        bootstrap.engine_secret.zeroize();
+        bootstrap.engine_secret.clone_from(&self.0.key);
+        bootstrap.engine_port = self.0.port;
+        bootstrap.model_sha256 = resources::MODEL_SHA.into();
+    }
+}
+
 struct Process {
     child: Child,
     endpoint: Endpoint,
+    worker_verified: bool,
     #[cfg(target_os = "windows")]
     _job: Job,
 }
@@ -123,6 +159,8 @@ pub struct Local {
     error: Mutex<Option<String>>,
     activity: Mutex<(usize, Instant)>,
     measuring: tokio::sync::Mutex<()>,
+    worker_slot: tokio::sync::Mutex<()>,
+    worker_standby: AtomicUsize,
     measurement_cancel: Operation,
     downloads: resources::Downloads,
     slots: parallel::Slots,
@@ -150,6 +188,28 @@ impl Operation {
         }
     }
 }
+pub(crate) struct WorkerStandby<'a>(&'a Local);
+
+impl Drop for WorkerStandby<'_> {
+    fn drop(&mut self) {
+        let mut activity = self.0.activity.lock().unwrap();
+        activity.1 = Instant::now();
+        self.0.worker_standby.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+pub(crate) struct WorkerSlot<'a> {
+    local: &'a Local,
+    _permit: parallel::Permit<'a>,
+    _worker: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl Drop for WorkerSlot<'_> {
+    fn drop(&mut self) {
+        self.local.activity.lock().unwrap().1 = Instant::now();
+    }
+}
+
 struct Lease<'a>(&'a Local);
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
@@ -171,6 +231,13 @@ fn should_release(active: usize, last: Instant, now: Instant, minutes: u64) -> b
     active == 0
         && now.saturating_duration_since(last) >= Duration::from_secs(minutes.saturating_mul(60))
 }
+struct MeasurementGuards<'a> {
+    _worker: tokio::sync::MutexGuard<'a, ()>,
+    _starting: tokio::sync::MutexGuard<'a, ()>,
+    _change: tokio::sync::MutexGuard<'a, ()>,
+    _measuring: tokio::sync::MutexGuard<'a, ()>,
+}
+
 struct ResumeAfterMeasurement(AppHandle);
 impl Drop for ResumeAfterMeasurement {
     fn drop(&mut self) {
@@ -241,6 +308,17 @@ fn installation(app: &AppHandle) -> Result<Installation, String> {
     }
     Ok(value)
 }
+pub(crate) fn worker_platform_supported() -> bool {
+    resources::supported()
+}
+
+pub(crate) async fn verify_worker_model(app: &AppHandle) -> Result<(), String> {
+    if !worker_platform_supported() {
+        return Err("この端末は翻訳ワーカーに対応していません".into());
+    }
+    resources::verify_worker_model(installation(app)?.model).await
+}
+
 fn command(path: &PathBuf) -> Command {
     let mut command = Command::new(path);
     #[cfg(target_os = "windows")]
@@ -286,6 +364,8 @@ impl Local {
             error: Mutex::new(None),
             activity: Mutex::new((0, Instant::now())),
             measuring: tokio::sync::Mutex::new(()),
+            worker_slot: tokio::sync::Mutex::new(()),
+            worker_standby: AtomicUsize::new(0),
             measurement_cancel: Operation::default(),
             downloads: resources::Downloads::default(),
         })
@@ -296,6 +376,101 @@ impl Local {
     pub fn active(&self) -> bool {
         self.active.load(Ordering::SeqCst)
     }
+    // 実行枠を待っているローカル翻訳と Chrome 連携も含む。
+    pub(crate) fn has_translation_activity(&self) -> bool {
+        self.activity.lock().unwrap().0 != 0
+    }
+    pub(crate) fn try_worker_slot(&self, engine: &WorkerEngine) -> Option<WorkerSlot<'_>> {
+        self.reserve_worker_slot(|| {
+            self.process
+                .lock()
+                .unwrap()
+                .as_mut()
+                .is_some_and(|process| {
+                    process.worker_verified
+                        && process.endpoint.key == engine.0.key
+                        && matches!(process.child.try_wait(), Ok(None))
+                })
+        })
+    }
+
+    fn reserve_worker_slot(
+        &self,
+        expected_engine: impl FnOnce() -> bool,
+    ) -> Option<WorkerSlot<'_>> {
+        let worker = self.worker_slot.try_lock().ok()?;
+        let activity = self.activity.lock().unwrap();
+        if activity.0 != 0 || !self.ready.load(Ordering::SeqCst) || !expected_engine() {
+            return None;
+        }
+        Some(WorkerSlot {
+            local: self,
+            _permit: self.slots.try_acquire().ok()?,
+            _worker: worker,
+        })
+    }
+    fn lock_engine_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        self.worker_slot
+            .try_lock()
+            .map_err(|_| "ボランティアの処理が終わってから変更してください".into())
+    }
+
+    fn apply_settings(
+        &self,
+        settings: Settings,
+        before_stop: impl FnOnce(&Settings) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let _worker = self.lock_engine_change()?;
+        before_stop(&settings)?;
+        self.stop();
+        self.slots.resize(settings.parallel);
+        *self.settings.lock().unwrap() = settings;
+        self.configured.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn prepare_measurement<'a>(
+        &'a self,
+        lifecycle: &'a crate::worker_supervisor::Lifecycle,
+        pending_translation: impl FnOnce() -> bool,
+    ) -> Result<MeasurementGuards<'a>, String> {
+        let measuring = self
+            .measuring
+            .try_lock()
+            .map_err(|_| "デバイスはすでに計測中です")?;
+        self.measurement_cancel.reset();
+        // ワーカーの準備も starting を取るため、先に停止と回収を待つ。
+        let change = tokio::select! {
+            _ = self.measurement_cancel.canceled() => return Err("計測を中止しました".into()),
+            guard = lifecycle.stop_for_engine_change() => guard,
+        };
+        let starting = tokio::select! {
+            _ = self.measurement_cancel.canceled() => return Err("計測を中止しました".into()),
+            guard = self.starting.lock() => guard,
+        };
+        let worker = self.stop_for_measurement(pending_translation())?;
+        Ok(MeasurementGuards {
+            _worker: worker,
+            _starting: starting,
+            _change: change,
+            _measuring: measuring,
+        })
+    }
+
+    fn stop_for_measurement(
+        &self,
+        pending_translation: bool,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        const BUSY: &str = "翻訳が終わってから計測してください";
+        let worker = self.worker_slot.try_lock().map_err(|_| BUSY)?;
+        let activity = self.activity.lock().unwrap();
+        if pending_translation || activity.0 != 0 || self.slots.in_use() {
+            return Err(BUSY.into());
+        }
+        self.stop();
+        Ok(worker)
+    }
+
     fn lease(&self) -> Lease<'_> {
         let mut activity = self.activity.lock().unwrap();
         activity.0 += 1;
@@ -306,6 +481,11 @@ impl Local {
         self.ready.store(false, Ordering::SeqCst);
         self.process.lock().unwrap().take();
     }
+    fn worker_standby(&self) -> WorkerStandby<'_> {
+        self.worker_standby.fetch_add(1, Ordering::SeqCst);
+        WorkerStandby(self)
+    }
+
     fn release_if_idle(&self, now: Instant) -> bool {
         if !self.ready.load(Ordering::SeqCst)
             || (self.enabled() && !self.settings.lock().unwrap().auto_release)
@@ -318,12 +498,26 @@ impl Local {
         // 判定から停止まで同じロックを保持し、新しい要求のlease取得との隙間をなくす。
         // leaseは実行枠の待機前に取得するため、拡張を含む待機中の要求も保護する。
         let activity = self.activity.lock().unwrap();
-        if !should_release(
-            activity.0,
-            activity.1,
-            now,
-            self.settings.lock().unwrap().idle_minutes,
-        ) {
+        if self.slots.in_use()
+            || !should_release(
+                activity.0,
+                activity.1,
+                now,
+                self.settings.lock().unwrap().idle_minutes,
+            )
+        {
+            return false;
+        }
+        if self.worker_standby.load(Ordering::SeqCst) != 0
+            && self
+                .process
+                .lock()
+                .unwrap()
+                .as_mut()
+                .is_some_and(|process| {
+                    process.worker_verified && matches!(process.child.try_wait(), Ok(None))
+                })
+        {
             return false;
         }
         self.stop();
@@ -361,14 +555,78 @@ impl Local {
             slot.take();
         }
         self.ready.store(false, Ordering::SeqCst);
+        self.load_engine(installation(app)?, false).await
+    }
+
+    fn reusable_worker_engine(&self) -> Result<Option<WorkerEngine>, String> {
+        let activity = self.activity.lock().unwrap();
+        if activity.0 != 0 || self.slots.in_use() {
+            return Err("翻訳が終わってから提供を開始してください".into());
+        }
+        let mut process = self.process.lock().unwrap();
+        Ok(process.as_mut().and_then(|process| {
+            (self.ready.load(Ordering::SeqCst)
+                && process.worker_verified
+                && matches!(process.child.try_wait(), Ok(None)))
+            .then(|| WorkerEngine(process.endpoint.clone()))
+        }))
+    }
+
+    pub(crate) async fn prepare_worker_engine(
+        &self,
+        app: &AppHandle,
+    ) -> Result<(WorkerEngine, WorkerStandby<'_>), WorkerPreparationError> {
+        use WorkerPreparationError::{Busy, Startup, Unavailable};
+        if !worker_platform_supported() {
+            return Err(Unavailable);
+        }
+        {
+            let _starting = self.starting.lock().await;
+            let _worker = self.lock_engine_change().map_err(|_| Busy)?;
+            if let Some(engine) = self.reusable_worker_engine().map_err(|_| Busy)? {
+                return Ok((engine, self.worker_standby()));
+            }
+        }
+        let install = installation(app).map_err(|_| Unavailable)?;
+        // 大きなモデルを読む間は、自分の翻訳や設定変更を止めない。
+        resources::verify_worker_model(install.model.clone())
+            .await
+            .map_err(|_| Unavailable)?;
+        let _starting = self.starting.lock().await;
+        let _worker = self.lock_engine_change().map_err(|_| Busy)?;
+        if let Some(engine) = self.reusable_worker_engine().map_err(|_| Busy)? {
+            return Ok((engine, self.worker_standby()));
+        }
+        {
+            let activity = self.activity.lock().unwrap();
+            if activity.0 != 0 || self.slots.in_use() {
+                return Err(Busy);
+            }
+            self.stop();
+        }
+        let endpoint = self.load_engine(install, true).await.map_err(Startup)?;
+        Ok((WorkerEngine(endpoint), self.worker_standby()))
+    }
+
+    async fn load_engine(
+        &self,
+        install: Installation,
+        worker_verified: bool,
+    ) -> Result<Endpoint, String> {
+        self.ready.store(false, Ordering::SeqCst);
         self.loading.store(true, Ordering::SeqCst);
         let _loading = Loading(self);
         *self.error.lock().unwrap() = None;
-        self.start_engine(app, self.slots.limit()).await
+        self.start_engine(install, self.slots.limit(), worker_verified)
+            .await
     }
 
-    async fn start_engine(&self, app: &AppHandle, count: usize) -> Result<Endpoint, String> {
-        let install = installation(app)?;
+    async fn start_engine(
+        &self,
+        install: Installation,
+        count: usize,
+        worker_verified: bool,
+    ) -> Result<Endpoint, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|_| "推論エンジンのポートを確保できませんでした")?;
         let port = listener
@@ -377,10 +635,8 @@ impl Local {
             .port();
         let mut secret = [0u8; 32];
         getrandom::fill(&mut secret).map_err(|_| "ローカル認証キーを生成できませんでした")?;
-        let endpoint = Endpoint {
-            url: format!("http://127.0.0.1:{port}"),
-            key: URL_SAFE_NO_PAD.encode(secret),
-        };
+        let endpoint = Endpoint::new(port, URL_SAFE_NO_PAD.encode(secret));
+        secret.zeroize();
         drop(listener);
         let mut cmd = command(&install.engine);
         cmd.args(["--model"])
@@ -427,6 +683,7 @@ impl Local {
         *self.process.lock().unwrap() = Some(Process {
             child,
             endpoint: endpoint.clone(),
+            worker_verified,
             #[cfg(target_os = "windows")]
             _job: job,
         });
@@ -625,28 +882,16 @@ pub async fn measure_local_devices(
         );
     }
     let local = app.state::<Local>();
-    let _measuring = local
-        .measuring
-        .try_lock()
-        .map_err(|_| "デバイスはすでに計測中です")?;
-    local.measurement_cancel.reset();
-    let _starting = tokio::select! {
-        _ = local.measurement_cancel.canceled() => return Err("計測を中止しました".into()),
-        guard = local.starting.lock() => guard,
-    };
-    if local.activity.lock().unwrap().0 > 0
-        || app
-            .state::<crate::Backend>()
-            .session
-            .lock()
-            .unwrap()
-            .requests
-            .values()
-            .any(|r| r.translation && !r.task.inner().is_finished())
-    {
-        return Err("翻訳が終わってから計測してください".into());
-    }
-    local.stop();
+    let lifecycle = app.state::<crate::worker_supervisor::Lifecycle>();
+    let _measurement = local
+        .prepare_measurement(&lifecycle, || {
+            app.state::<crate::Backend>()
+                .session
+                .lock()
+                .unwrap()
+                .has_pending_translation()
+        })
+        .await?;
     let _resume = ResumeAfterMeasurement(app.clone());
     let mut devices = tokio::select! {
         _ = local.measurement_cancel.canceled() => return Err("計測を中止しました。デバイスは手動でも選べます".into()),
@@ -683,7 +928,7 @@ pub async fn measure_local_devices(
                 let endpoint = trial.start(&app).await?;
                 let (prompt, _) = prompt(&json!({"text":"This application translates text on your computer.","target_lang":"ja"}))?;
                 let started = Instant::now();
-                let response = trial.client.post(format!("{}/v1/completions",endpoint.url)).bearer_auth(endpoint.key)
+                let response = trial.client.post(format!("{}/v1/completions",endpoint.url)).bearer_auth(&endpoint.key)
                     .json(&json!({"prompt":prompt,"max_tokens":24,"temperature":0,"stream":false,"cache_prompt":false,"add_special_tokens":true,"stop":["<|plamo:tag|>","<|plamo:bos|>"]}))
                     .send().await.map_err(|_| "計測の応答を取得できませんでした".to_string())?;
                 if !response.status().is_success() { return Err("計測の応答が不正です".into()); }
@@ -719,7 +964,6 @@ pub async fn measure_local_devices(
             benchmark::measure(&app, &progress, gpu).await?;
         }
     }
-    drop(_starting);
     if local.measurement_cancel.canceled.load(Ordering::SeqCst) {
         return Err("計測を中止しました。デバイスは手動でも選べます".into());
     }
@@ -763,8 +1007,10 @@ fn probe_output(cmd: &mut Command) -> Result<String, String> {
         }
     };
     let started = Instant::now();
+    // macOSでは初回のMetal初期化を待つ。Windowsの待ち時間は維持する。
+    let timeout = Duration::from_secs(if cfg!(target_os = "macos") { 60 } else { 10 });
     while matches!(child.try_wait(), Ok(None)) {
-        if started.elapsed() >= Duration::from_secs(10) {
+        if started.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
             return Err("確認用の処理がタイムアウトしました".into());
@@ -824,14 +1070,14 @@ pub async fn save_local_settings(
         return Err("同時に訳す数は1〜64で指定してください".into());
     }
     let local = app.state::<Local>();
+    let lifecycle = app.state::<crate::worker_supervisor::Lifecycle>();
+    let _change = lifecycle.stop_for_engine_change().await;
     let _starting = local.starting.lock().await;
-    persist_settings(&app, &settings)?;
-    crate::cancel_matching(&app, |request| request.local);
-    local.stop();
-    local.slots.resize(settings.parallel);
-    *local.settings.lock().unwrap() = settings;
-    local.configured.store(true, Ordering::SeqCst);
-    Ok(())
+    local.apply_settings(settings, |settings| {
+        persist_settings(&app, settings)?;
+        crate::cancel_matching(&app, |request| request.local);
+        Ok(())
+    })
 }
 #[tauri::command]
 pub async fn set_local_active(
@@ -850,105 +1096,15 @@ pub async fn set_local_active(
             return Err(error);
         }
     } else {
+        let lifecycle = app.state::<crate::worker_supervisor::Lifecycle>();
+        let _change = lifecycle.stop_for_engine_change().await;
+        let _worker = local.lock_engine_change()?;
         local.active.store(false, Ordering::SeqCst);
         crate::cancel_matching(&app, |request| request.local);
         let _starting = local.starting.lock().await;
         local.stop();
     }
     Ok(())
-}
-
-fn field(body: &Value, name: &str, limit: usize, required: bool) -> Result<String, String> {
-    let value = match body.get(name) {
-        None | Some(Value::Null) => "",
-        Some(v) => v.as_str().ok_or("文字列の指定が不正です")?,
-    }
-    .replace("\r\n", "\n");
-    if value.chars().count() > limit || value.contains("<|plamo:") {
-        return Err("文字数の上限を超えているか、使えない文字列が含まれています".into());
-    }
-    if required && value.trim().is_empty() {
-        return Err("原文が空です".into());
-    }
-    Ok(value)
-}
-fn languages() -> Value {
-    serde_json::from_str(include_str!("../gen/local-languages.json"))
-        .expect("生成した言語一覧が不正です")
-}
-pub fn prompt(body: &Value) -> Result<(String, usize), String> {
-    let text = field(body, "text", 4000, true)?;
-    let target = field(body, "target_lang", 32, true)?;
-    let source = field(body, "source_lang", 32, false)?;
-    let valid_lang = |v: &str| {
-        languages()
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|l| l["code"] == v)
-    };
-    if !valid_lang(&target) || (!source.is_empty() && !valid_lang(&source)) {
-        return Err("言語の指定が不正です".into());
-    }
-    let form = field(body, "form", 32, false)?;
-    if !form.is_empty() && (target != "ja" || !["plain", "polite"].contains(&form.as_str())) {
-        return Err("文体の指定が不正です".into());
-    }
-    let context = field(body, "context", 12000, false)?;
-    let lang = |v: &str| {
-        if v.is_empty() {
-            String::new()
-        } else {
-            format!("<|plamo:key|>lang<|plamo:val|>{v}")
-        }
-    };
-    let mut value = "<|plamo:tag|>dataset<|plamo:msg|>translation".to_string();
-    if !context.trim().is_empty() {
-        value += &format!("<|plamo:tag|>context<|plamo:msg|>{}", context.trim());
-    }
-    for (name, max, source_limit, target_limit) in
-        [("history", 4, 4000, 12000), ("glossary", 200, 200, 200)]
-    {
-        if let Some(raw) = body.get(name).filter(|v| !v.is_null()) {
-            let pairs = raw.as_array().ok_or("文脈または用語集の形式が不正です")?;
-            if pairs.len() > max {
-                return Err("文脈または用語集の件数が上限を超えています".into());
-            }
-            let mut glossary = String::new();
-            for pair in pairs {
-                if !pair.is_object() {
-                    return Err("文脈または用語集の形式が不正です".into());
-                }
-                let src = field(pair, "source", source_limit, false)?;
-                let dst = field(pair, "target", target_limit, false)?;
-                if src.trim().is_empty() || dst.trim().is_empty() {
-                    continue;
-                }
-                if name == "history" {
-                    value += &format!("<|plamo:tag|>input{}<|plamo:msg|>{src}<|plamo:tag|>output{}<|plamo:msg|>{dst}", lang(&source), lang(&target));
-                } else {
-                    glossary +=
-                        &format!("<|plamo:index|>{}<|plamo:item|>{}", src.trim(), dst.trim());
-                }
-            }
-            if !glossary.is_empty() {
-                value += &format!("<|plamo:tag|>glossary{glossary}");
-            }
-        }
-    }
-    value += &format!(
-        "<|plamo:tag|>input{}<|plamo:msg|>{text}<|plamo:tag|>output{}",
-        lang(&source),
-        lang(&target)
-    );
-    if !form.is_empty() {
-        value += &format!("<|plamo:key|>form<|plamo:val|>{form}");
-    }
-    value += "<|plamo:msg|>";
-    if value.chars().count() > 12000 {
-        return Err("文脈・前の訳・用語集を合わせて長すぎます".into());
-    }
-    Ok((value, (text.chars().count() * 3 / 2 + 64).clamp(256, 8000)))
 }
 
 pub type SendResult<'a> =
@@ -1052,46 +1208,6 @@ pub async fn request(
         json!({"error":"ローカル翻訳の接続が途中で切れました"}),
     )
     .await
-}
-
-#[derive(Default)]
-pub struct Decoder {
-    buffer: Vec<u8>,
-    done: bool,
-}
-impl Decoder {
-    pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<Value>, String> {
-        self.buffer.extend_from_slice(bytes);
-        if self.buffer.len() > 1024 * 1024 {
-            return Err("推論エンジンの応答が長すぎます".into());
-        }
-        let mut events = vec![];
-        while let Some(end) = self.buffer.iter().position(|c| *c == b'\n') {
-            let line: Vec<_> = self.buffer.drain(..=end).collect();
-            let line = std::str::from_utf8(&line)
-                .map_err(|_| "応答の文字コードが不正です")?
-                .trim();
-            let Some(data) = line.strip_prefix("data:").map(str::trim) else {
-                continue;
-            };
-            if data == "[DONE]" {
-                continue;
-            }
-            let value: Value = serde_json::from_str(data).map_err(|_| "応答の形式が不正です")?;
-            if value.get("error").is_some() {
-                return Err("ローカル推論エンジンがエラーを返しました".into());
-            }
-            let choice = &value["choices"][0];
-            if let Some(text) = choice["text"].as_str().filter(|s| !s.is_empty()) {
-                events.push(json!({"t":text}));
-            }
-            if let Some(finish) = choice["finish_reason"].as_str() {
-                events.push(json!({"done":true,"finish":finish}));
-                self.done = true;
-            }
-        }
-        Ok(events)
-    }
 }
 
 #[cfg(test)]
@@ -1224,6 +1340,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
         received.await.unwrap();
+        assert!(local.has_translation_activity());
         let now = Instant::now();
         local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
         assert_eq!(local.activity.lock().unwrap().0, 2);
@@ -1236,6 +1353,7 @@ mod tests {
         // Port切断によるタスクの中止でもleaseと実行枠を返し、ここから未使用時間を数える。
         bridge.abort();
         assert!(bridge.await.unwrap_err().is_cancelled());
+        assert!(!local.has_translation_activity());
         let last = {
             let activity = local.activity.lock().unwrap();
             assert_eq!(activity.0, 0);
@@ -1246,6 +1364,146 @@ mod tests {
         assert!(!local.release_if_idle(last + Duration::from_secs(59)));
         assert!(local.ready.load(Ordering::SeqCst));
         assert!(local.release_if_idle(last + Duration::from_secs(60)));
+        assert!(!local.ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn worker_slot_protects_the_engine_without_counting_as_own_translation() {
+        let local = Local::new(
+            Settings {
+                enabled: true,
+                auto_release: true,
+                idle_minutes: 1,
+                ..Settings::default()
+            },
+            true,
+        )
+        .unwrap();
+        local.ready.store(true, Ordering::SeqCst);
+        let now = Instant::now();
+        local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
+        let own = local.lease();
+        assert!(local.reserve_worker_slot(|| true).is_none());
+        drop(own);
+        local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
+        let worker = local.reserve_worker_slot(|| true).unwrap();
+        assert!(!local.has_translation_activity());
+        assert!(!local.release_if_idle(now));
+        drop(worker);
+        assert_eq!(local.slots.available_permits(), local.slots.limit());
+        assert!(!local.release_if_idle(Instant::now()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_can_only_reserve_the_engine_generation_it_was_given() {
+        let local = Local::new(Settings::default(), true).unwrap();
+        let endpoint = Endpoint::new(12345, "mock-current".into());
+        *local.process.lock().unwrap() = Some(Process {
+            child: Command::new("/bin/sh")
+                .args(["-c", "exec sleep 10"])
+                .spawn()
+                .unwrap(),
+            endpoint: endpoint.clone(),
+            worker_verified: false,
+        });
+        local.ready.store(true, Ordering::SeqCst);
+        let current = WorkerEngine(endpoint);
+        assert!(local.try_worker_slot(&current).is_none());
+        local
+            .process
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .worker_verified = true;
+        let stale = WorkerEngine(Endpoint::new(12345, "mock-old".into()));
+        assert!(local.try_worker_slot(&stale).is_none());
+        assert!(local.try_worker_slot(&current).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standby_preserves_verified_engine_and_restarts_idle_clock_on_drop() {
+        let local = Local::new(
+            Settings {
+                idle_minutes: 1,
+                ..Settings::default()
+            },
+            true,
+        )
+        .unwrap();
+        *local.process.lock().unwrap() = Some(Process {
+            child: Command::new("/bin/sh")
+                .args(["-c", "exec sleep 10"])
+                .spawn()
+                .unwrap(),
+            endpoint: Endpoint::new(12345, "mock-current".into()),
+            worker_verified: true,
+        });
+        local.ready.store(true, Ordering::SeqCst);
+        let now = Instant::now();
+        local.activity.lock().unwrap().1 = now - Duration::from_secs(120);
+        let standby = local.worker_standby();
+        assert!(!local.release_if_idle(now));
+        drop(standby);
+        let last = local.activity.lock().unwrap().1;
+        assert!(last >= now);
+        assert!(!local.release_if_idle(last + Duration::from_secs(59)));
+        assert!(local.release_if_idle(last + Duration::from_secs(60)));
+    }
+
+    #[tokio::test]
+    async fn measurement_requests_worker_stop_and_waits_before_stopping_engine() {
+        let local = Local::new(Settings::default(), true).unwrap();
+        let lifecycle = crate::worker_supervisor::Lifecycle::default();
+        local.ready.store(true, Ordering::SeqCst);
+        let (run, stop) = lifecycle.begin().await.unwrap();
+        let standby = local.worker_standby();
+        let measurement = local.prepare_measurement(&lifecycle, || false);
+        tokio::pin!(measurement);
+        tokio::select! {
+            _ = &mut measurement => panic!("ワーカーの回収前に計測を開始した"),
+            result = stop => result.unwrap(),
+        }
+        assert!(local.ready.load(Ordering::SeqCst));
+        drop(standby);
+        drop(run);
+        let measuring = measurement.await.unwrap();
+        assert!(!local.ready.load(Ordering::SeqCst));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), lifecycle.begin())
+                .await
+                .is_err()
+        );
+        drop(measuring);
+        assert!(lifecycle.begin().await.is_ok());
+    }
+
+    #[test]
+    fn worker_slot_blocks_measurement_and_engine_changes_until_released() {
+        let local = Local::new(Settings::default(), true).unwrap();
+        local.ready.store(true, Ordering::SeqCst);
+        let worker = local.reserve_worker_slot(|| true).unwrap();
+        assert_eq!(
+            local.stop_for_measurement(false).unwrap_err(),
+            "翻訳が終わってから計測してください"
+        );
+        assert_eq!(
+            local
+                .apply_settings(Settings::default(), |_| panic!("設定を保存してはいけない"))
+                .unwrap_err(),
+            "ボランティアの処理が終わってから変更してください"
+        );
+        assert!(local.ready.load(Ordering::SeqCst));
+
+        drop(worker);
+        {
+            let _change = local.lock_engine_change().unwrap();
+            assert!(local.reserve_worker_slot(|| true).is_none());
+            assert!(local.ready.load(Ordering::SeqCst));
+        }
+        let _measurement = local.stop_for_measurement(false).unwrap();
         assert!(!local.ready.load(Ordering::SeqCst));
     }
 
@@ -1318,59 +1576,5 @@ mod tests {
         let activity = local.activity.lock().unwrap();
         assert_eq!(activity.0, 0);
         assert!(!should_release(activity.0, activity.1, Instant::now(), 5));
-    }
-
-    #[test]
-    fn server_prompt_fixtures() {
-        let cases: Vec<Value> = serde_json::from_str(include_str!(
-            "../../../shared/local-translation-fixtures.json"
-        ))
-        .unwrap();
-        for case in cases {
-            let (actual, limit) = prompt(&case["body"]).unwrap();
-            assert_eq!(actual, case["prompt"].as_str().unwrap(), "{}", case["name"]);
-            assert_eq!(limit, case["max_tokens"].as_u64().unwrap() as usize);
-        }
-    }
-
-    #[test]
-    fn reject_invalid_requests() {
-        for body in [
-            json!({"text":" ","target_lang":"ja"}),
-            json!({"text":"<|plamo:tag|>","target_lang":"ja"}),
-            json!({"text":"x".repeat(4001),"target_lang":"ja"}),
-            json!({"text":"test","target_lang":"invalid"}),
-            json!({"text":"test","target_lang":"en","form":"polite"}),
-            json!({"text":"test","target_lang":"ja","history":vec![json!({"source":"a","target":"b"}); 5]}),
-            json!({"text":"test","target_lang":"ja","glossary":[{"source":"<|plamo:","target":"b"}]}),
-        ] {
-            assert!(prompt(&body).is_err());
-        }
-    }
-
-    #[test]
-    fn sse_handles_fragmented_unicode_and_finish() {
-        let raw = ": keepalive\r\ndata: {\"choices\":[{\"text\":\"こんにちは🌸\",\"finish_reason\":null}]}\r\n\r\ndata: {\"choices\":[{\"text\":\"\",\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-        let mut decoder = Decoder::default();
-        let mut events = vec![];
-        for b in raw.bytes() {
-            events.extend(decoder.feed(&[b]).unwrap());
-        }
-        assert_eq!(
-            events,
-            vec![
-                json!({"t":"こんにちは🌸"}),
-                json!({"done":true,"finish":"stop"})
-            ]
-        );
-        assert!(decoder.done);
-    }
-
-    #[test]
-    fn reject_malformed_engine_response() {
-        assert!(Decoder::default().feed(b"data: invalid\n").is_err());
-        assert!(Decoder::default()
-            .feed(&vec![b'x'; 1024 * 1024 + 1])
-            .is_err());
     }
 }

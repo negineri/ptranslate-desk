@@ -166,7 +166,9 @@ mod tests {
         let wire: String = (0..300)
             .map(|i| format!("data: {}\n\n", json!({"choices":[{"text":i.to_string()}]})))
             .collect();
-        let events = local::Decoder::default().feed(wire.as_bytes()).unwrap();
+        let events = crate::translation::Decoder::default()
+            .feed(wire.as_bytes())
+            .unwrap();
         assert_eq!(events.len(), 300);
         let producer = tokio::spawn(async move {
             for event in events {

@@ -201,7 +201,7 @@ async fn install<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn restart_after_update(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+pub async fn restart_after_update(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
     require_main(&window)?;
     if !app
         .state::<Updates>()
@@ -214,7 +214,12 @@ pub fn restart_after_update(app: AppHandle, window: WebviewWindow) -> Result<(),
         return Err("再起動が必要な更新はありません".into());
     }
     crate::cancel_all(&app);
-    app.restart();
+    let (_, finished) = app
+        .state::<crate::worker_supervisor::Lifecycle>()
+        .begin_shutdown();
+    crate::worker_supervisor::Lifecycle::wait_for_exit(finished).await;
+    app.request_restart();
+    Ok(())
 }
 
 pub fn schedule(app: &AppHandle) {

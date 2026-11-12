@@ -14,6 +14,7 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   chrome.contextMenus.create({ id: PAGE_MENU_ID, title: "PTranslate でこのページを翻訳", contexts: ["page"] });
   chrome.contextMenus.create({ id: SETTINGS_MENU_ID, title: "設定", contexts: ["action"] });
   await chrome.storage.session.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
+  await chrome.storage.local.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
   if (reason === "install") await chrome.runtime.openOptionsPage();
 });
 
@@ -22,15 +23,18 @@ const apiDeps = {
   server: async () => (await loadSettings()).server,
   hasPermission: (server) => chrome.permissions.contains({ origins: [originPattern(server)] }),
   settings: loadSettings,
+  anonymousStorage: chrome.storage.local,
 };
 
 chrome.runtime.onConnect.addListener((port) => {
   const sender = port.sender;
   // 拡張の画面からの API 呼び出し (transport.mjs)
-  if (port.name === "api" && isExtensionPage(sender, EXTENSION_ROOT)) return relay(port, apiDeps);
+  if (port.name === "api" && isExtensionPage(sender, EXTENSION_ROOT)) {
+    return relay(port, { ...apiDeps, anonymousActions: sender.url === `${EXTENSION_ROOT}options.html` });
+  }
   // ページ全体の翻訳 (page-content.js)。拡張が注入した、タブの一番上の枠の content script だけ受ける
   if (port.name === "page-translate" && sender?.id === chrome.runtime.id && sender.tab && sender.frameId === 0) {
-    return runPageTask(port, apiDeps);
+    return runPageTask(port, { ...apiDeps, incognito: sender.tab.incognito || chrome.extension?.inIncognitoContext });
   }
   port.disconnect();
 });
@@ -103,7 +107,29 @@ function readSelection() {
     const r = selection.getRangeAt(selection.rangeCount - 1).getBoundingClientRect();
     if (r.width || r.height) rect = { top: r.top, bottom: r.bottom, left: r.left, right: r.right };
   }
-  return { text, rect };
+  const editable = "input, textarea, select, [contenteditable]";
+  const range = selection?.rangeCount === 1 ? selection.getRangeAt(0) : null;
+  const node = range?.commonAncestorContainer;
+  const insideEditor = (start) => {
+    for (let current = start; current; current = current.assignedSlot || current.parentElement || current.getRootNode().host) {
+      if (current.matches?.(editable)) return true;
+    }
+    return false;
+  };
+  let safe = Boolean(range && document.designMode !== "on" && node.getRootNode() === document &&
+    range.toString() === text && !insideEditor(node));
+  if (safe) {
+    // 選択範囲が編集欄を横切る場合や、選んだ文が編集欄にスロットで入る場合も除く。
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode(current) {
+        if (!range.intersectsNode(current)) return NodeFilter.FILTER_REJECT;
+        return current.matches?.(editable) || insideEditor(current.assignedSlot)
+          ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+      },
+    });
+    safe = !walker.nextNode();
+  }
+  return { text, rect, safe };
 }
 
 async function pickSelection(tabId, frameId) {
@@ -113,7 +139,7 @@ async function pickSelection(tabId, frameId) {
     const hit = results.find((r) => r.result?.text?.trim());
     if (!hit) return null;
     // 枠 (iframe) の中の選択の位置はページの座標と違うので使わない
-    return { text: hit.result.text, rect: hit.frameId === 0 ? hit.result.rect : null };
+    return { text: hit.result.text, safe: hit.result.safe === true, rect: hit.frameId === 0 ? hit.result.rect : null };
   } catch {
     return null; // chrome:// や PDF のビューアーなどは読めない
   }
@@ -125,7 +151,9 @@ async function translateSelection(tab, fallbackText, frameId) {
   if (!text.trim()) return;
   // 原文は session の保存場所に一度だけ置き、訳の画面が読んだら消す (ディスクに残さない)
   const id = crypto.randomUUID();
-  await chrome.storage.session.set({ [`selection:${id}`]: text });
+  await chrome.storage.session.set({ [`selection:${id}`]: {
+    text, safe: picked?.safe === true, incognito: Boolean(tab?.incognito || chrome.extension?.inIncognitoContext),
+  } });
   const src = chrome.runtime.getURL(`popup.html#${id}`);
   if (tab?.id !== undefined) {
     try {

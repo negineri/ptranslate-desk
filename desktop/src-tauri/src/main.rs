@@ -13,9 +13,16 @@ mod resident;
 mod settings;
 #[cfg(feature = "smoke-test")]
 mod smoke;
+mod translation;
 mod updates;
 #[cfg(target_os = "windows")]
 mod windows;
+mod worker_agent;
+mod worker_power;
+mod worker_registration;
+mod worker_relay;
+mod worker_sandbox;
+mod worker_supervisor;
 
 #[cfg(feature = "smoke-test")]
 #[tauri::command]
@@ -63,6 +70,12 @@ impl Request {
 }
 
 impl Session {
+    fn has_pending_translation(&self) -> bool {
+        self.requests
+            .values()
+            .any(|request| request.translation && !request.task.inner().is_finished())
+    }
+
     fn cancel_matching(&mut self, matches: impl Fn(&Request) -> bool) {
         let ids: Vec<_> = self
             .requests
@@ -186,6 +199,19 @@ async fn login(app: AppHandle) -> Result<auth::LoginReport, String> {
 }
 
 #[tauri::command]
+async fn login_anonymous(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("匿名利用はメインウィンドウの設定で開始してください".into());
+    }
+    let auth = app.state::<Backend>().auth();
+    let result = auth.login_anonymous().await;
+    if Arc::ptr_eq(&auth, &app.state::<Backend>().auth()) {
+        publish_auth(&app, result.as_ref().err().cloned());
+    }
+    result
+}
+
+#[tauri::command]
 fn cancel_login(app: AppHandle) {
     app.state::<Backend>().auth().cancel_login();
 }
@@ -221,6 +247,66 @@ fn stop_request(app: AppHandle, window: WebviewWindow, id: String) {
             request.cancel();
         }
     }
+}
+
+async fn read_translation_config(mut response: reqwest::Response) -> Result<Value, ()> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
+        if body.len() + chunk.len() > 64 * 1024 {
+            return Err(());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice::<Value>(&body)
+        .ok()
+        .filter(Value::is_object)
+        .ok_or(())
+}
+
+fn translation_body(server: &str, config: &Value, mut body: Value) -> Option<Value> {
+    let fields = body.as_object_mut()?;
+    if fields.remove("desktop_server")?.as_str()? != server {
+        return None;
+    }
+    if config["pool"]["kind"] == "volunteer" {
+        let version = config["pool"]["consent_version"]
+            .as_u64()
+            .filter(|v| *v > 0)?;
+        if fields.get("consent").and_then(Value::as_u64) != Some(version) {
+            return None;
+        }
+    } else {
+        fields.remove("consent");
+    }
+    Some(body)
+}
+
+fn json_response(stream: &Channel<Message>, status: u16, body: &Value) -> Result<(), ()> {
+    stream.send(Message::Start { status }).map_err(|_| ())?;
+    stream
+        .send(Message::Bytes {
+            bytes: serde_json::to_vec(body).map_err(|_| ())?,
+        })
+        .map_err(|_| ())
+}
+
+async fn login_required(
+    app: &AppHandle,
+    auth: &Arc<auth::Auth>,
+    stream: &Channel<Message>,
+    status: u16,
+) -> Result<(), ()> {
+    let _ = stream.send(Message::LoginRequired { status });
+    let _ = auth.invalidate().await;
+    if Arc::ptr_eq(auth, &app.state::<Backend>().auth()) {
+        publish_auth(
+            app,
+            Some(format!(
+                "サーバーが {status} を返しました。ログインし直してください"
+            )),
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -279,8 +365,37 @@ fn start_request(
             if use_local {
                 return local::request(&app, &route, body.as_ref(), &stream).await;
             }
-            let mut response = match auth.send(method, path, body.as_ref()).await {
-                Ok(response) => response,
+            // config と翻訳を同じ認証・接続先に固定する。
+            let send =
+                async {
+                    let config = auth.send(Method::GET, "/api/config", None).await?;
+                    if !config.status().is_success() {
+                        return Ok::<_, String>(Some(config));
+                    }
+                    let mut config = read_translation_config(config)
+                        .await
+                        .map_err(|_| "翻訳の設定を読み込めませんでした".to_string())?;
+                    if !translation {
+                        config["desktop_server"] = Value::String(auth.server().into());
+                        json_response(&stream, 200, &config).map_err(|_| String::new())?;
+                        return Ok(None);
+                    }
+                    let Some(body) =
+                        body.and_then(|body| translation_body(auth.server(), &config, body))
+                    else {
+                        json_response(&stream, 409, &serde_json::json!({
+                        "error": "翻訳先または同意の版が変わりました。もう一度翻訳してください"
+                    })).map_err(|_| String::new())?;
+                        return Ok(None);
+                    };
+                    auth.send(method, path, Some(&body)).await.map(Some)
+                };
+            let mut response = match send.await {
+                Ok(Some(response)) => response,
+                Ok(None) => return Ok(()),
+                Err(error) if error == auth::ANONYMOUS_RENEWED => {
+                    return json_response(&stream, 409, &serde_json::json!({ "error": error }));
+                }
                 Err(_) if !auth.is_authenticated() => {
                     let _ = stream.send(Message::LoginRequired { status: 401 });
                     if Arc::ptr_eq(&auth, &app.state::<Backend>().auth()) {
@@ -290,20 +405,41 @@ fn start_request(
                 }
                 Err(_) => return Err(()),
             };
+            if translation && response.status() == 403 {
+                // 同意の版が確認直後に変わった場合は、ログイン状態を維持する。
+                let is_json = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.starts_with("application/json"));
+                if is_json {
+                    let error = read_translation_config(response).await?;
+                    if error["code"] == "consent_required" {
+                        return json_response(
+                            &stream,
+                            409,
+                            &serde_json::json!({
+                                "error": "同意の版が変わりました。もう一度翻訳してください"
+                            }),
+                        );
+                    }
+                    if auth.is_anonymous() {
+                        return json_response(&stream, 403, &error);
+                    }
+                    return login_required(&app, &auth, &stream, 403).await;
+                }
+            }
             if response.status() == 401 || response.status() == 403 {
-                let status = response.status().as_u16();
-                // nginx の 403 HTML は読まず、状態の番号だけを渡す。
-                let _ = stream.send(Message::LoginRequired { status });
-                let _ = auth.invalidate().await;
-                if Arc::ptr_eq(&auth, &app.state::<Backend>().auth()) {
-                    publish_auth(
-                        &app,
-                        Some(format!(
-                            "サーバーが {status} を返しました。ログインし直してください"
-                        )),
+                if auth.is_anonymous() {
+                    return json_response(
+                        &stream,
+                        502,
+                        &serde_json::json!({
+                            "error": "匿名では翻訳サーバーに接続できませんでした"
+                        }),
                     );
                 }
-                return Ok(());
+                return login_required(&app, &auth, &stream, response.status().as_u16()).await;
             }
             stream
                 .send(Message::Start {
@@ -340,6 +476,10 @@ fn start_request(
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--worker-agent")) {
+        worker_agent::entry();
+        return;
+    }
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     if chrome_bridge::host_entry() {
         return;
@@ -375,6 +515,8 @@ fn main() {
         .manage(chrome_bridge::Status::default())
         .manage(resident::Resident::default())
         .manage(updates::Updates::default())
+        .manage(worker_registration::RegistrationGate::default())
+        .manage(worker_supervisor::Lifecycle::default())
         .setup(move |app| {
             app.manage(local::Local::load(app.handle())?);
             let connection = connection::load(app.handle())?;
@@ -417,7 +559,14 @@ fn main() {
             });
             // IPCを受け付ける画面は、状態と常駐機能の初期化が終わってから作る。
             for config in &app.config().app.windows {
-                tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+                let builder = tauri::WebviewWindowBuilder::from_config(app, config)?;
+                #[cfg(feature = "smoke-test")]
+                let builder = if std::env::var_os("PTRANSLATE_SMOKE_CONFIG").is_some() {
+                    builder.incognito(true)
+                } else {
+                    builder
+                };
+                builder.build()?;
             }
             if app.config().identifier.ends_with(".local-prototype") {
                 if let Some(window) = app.get_webview_window("main") {
@@ -460,6 +609,7 @@ fn main() {
     #[cfg(not(feature = "smoke-test"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         login,
+        login_anonymous,
         logout,
         restore_session,
         restore_server_session,
@@ -481,6 +631,13 @@ fn main() {
         cancel_login,
         start_request,
         stop_request,
+        worker_supervisor::worker_activity,
+        worker_registration::worker_registration_status,
+        worker_registration::set_worker_participation,
+        worker_registration::register_worker,
+        worker_registration::renew_worker,
+        worker_registration::revoke_worker,
+        worker_registration::forget_worker_registration,
         connection::load_connection,
         connection::save_connection,
         settings::load_settings,
@@ -502,6 +659,7 @@ fn main() {
         .manage(smoke::Smoke::default())
         .invoke_handler(tauri::generate_handler![
             login,
+            login_anonymous,
             logout,
             restore_session,
             restore_server_session,
@@ -523,6 +681,13 @@ fn main() {
             cancel_login,
             start_request,
             stop_request,
+            worker_supervisor::worker_activity,
+            worker_registration::worker_registration_status,
+            worker_registration::set_worker_participation,
+            worker_registration::register_worker,
+            worker_registration::renew_worker,
+            worker_registration::revoke_worker,
+            worker_registration::forget_worker_registration,
             connection::load_connection,
             connection::save_connection,
             settings::load_settings,
@@ -584,6 +749,22 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("翻訳アプリを起動できませんでした");
     app.run(|_app, _event| {
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = &_event {
+            let (first, finished) = _app
+                .state::<worker_supervisor::Lifecycle>()
+                .begin_shutdown();
+            if finished.is_some() && *code != Some(tauri::RESTART_EXIT_CODE) {
+                api.prevent_exit();
+                if first {
+                    let app = _app.clone();
+                    let code = code.unwrap_or(0);
+                    tauri::async_runtime::spawn(async move {
+                        worker_supervisor::Lifecycle::wait_for_exit(finished).await;
+                        app.exit(code);
+                    });
+                }
+            }
+        }
         if let tauri::RunEvent::Exit = _event {
             _app.state::<local::Local>().stop();
         }
@@ -592,4 +773,69 @@ fn main() {
             resident::show_main(_app);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn only_pending_translation_requests_pause_worker_admission() {
+        let mut session = Session::default();
+        let request = |translation, task| Request {
+            owner: "main".into(),
+            translation,
+            local: false,
+            task,
+            stream: Channel::new(|_| Ok(())),
+        };
+        session.requests.insert(
+            "config".into(),
+            request(false, tauri::async_runtime::spawn(std::future::pending())),
+        );
+        assert!(!session.has_pending_translation());
+        let (finish, done) = tokio::sync::oneshot::channel();
+        session.requests.insert(
+            "translation".into(),
+            request(
+                true,
+                tauri::async_runtime::spawn(async move {
+                    let _ = done.await;
+                }),
+            ),
+        );
+        assert!(session.has_pending_translation());
+        finish.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while session.has_pending_translation() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        session.cancel_matching(|_| true);
+    }
+
+    #[test]
+    fn volunteer_translation_requires_the_current_origin_and_version() {
+        let server = "https://translate.example.com";
+        let config = json!({"pool": {"kind": "volunteer", "consent_version": 2}});
+        for body in [
+            json!({"desktop_server": "https://other.example.com", "consent": 2}),
+            json!({"desktop_server": server, "consent": 1}),
+            json!({"desktop_server": server}),
+        ] {
+            assert!(translation_body(server, &config, body).is_none());
+        }
+        let body = json!({"desktop_server": server, "consent": 2, "text": "Hello"});
+        assert_eq!(
+            translation_body(server, &config, body.clone()),
+            Some(json!({"consent": 2, "text": "Hello"}))
+        );
+        assert_eq!(
+            translation_body(server, &json!({}), body),
+            Some(json!({"text": "Hello"}))
+        );
+    }
 }

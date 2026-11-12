@@ -13,8 +13,8 @@ panel.innerHTML = `<summary>サーバー翻訳の設定</summary>
   <form id="connection-form">
     <label for="server-url">サーバーURL</label>
     <input id="server-url" type="url" required placeholder="https://translate.example.com" autocomplete="off" spellcheck="false">
-    <label for="discovery-url">OIDC discovery URL</label>
-    <input id="discovery-url" type="url" required placeholder="https://auth.example.com/application/o/translator-desktop/.well-known/openid-configuration" autocomplete="off" spellcheck="false">
+    <label for="discovery-url">OIDC discovery URL (匿名利用だけなら省略可)</label>
+    <input id="discovery-url" type="url" placeholder="https://auth.example.com/application/o/translator-desktop/.well-known/openid-configuration" autocomplete="off" spellcheck="false">
     <label for="client-id">client ID（公開クライアント）</label>
     <input id="client-id" type="text" required maxlength="256" autocomplete="off" spellcheck="false">
     <p class="hint">接続先を変更すると現在の接続先からログアウトします。適用後、新しい接続先でログインしてください。</p>
