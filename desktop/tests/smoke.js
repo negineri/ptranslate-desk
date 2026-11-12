@@ -2,20 +2,22 @@
   let step = "ログイン";
   const $ = (id) => document.getElementById(id);
   const wait = async (check, timeoutMessage = () => "タイムアウト") => {
-    const end = Date.now() + 15000;
+    // CI の遅い実行環境でも待てる長さにする。通常は数百ミリ秒で進む。
+    const end = Date.now() + 30000;
     while (!await check()) {
       if (Date.now() > end) throw new Error(timeoutMessage());
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   };
   try {
-    step = "初回ウィザード";
+    step = "初回ウィザードの表示";
     await wait(() => $("setup-wizard") && $("wizard-next").disabled);
     const wizard = $("setup-wizard");
     const currentStep = () => wizard.querySelector("[data-step]:not([hidden])")?.dataset.step;
     if (!$("settings-page").inert || currentStep() !== "usage") throw new Error("初回画面");
     const localChoice = wizard.querySelector('[data-profile="both"]');
     if (!localChoice.disabled) {
+      step = "ウィザードのローカル翻訳の案内";
       localChoice.click();
       $("wizard-next").click();
       await wait(() => currentStep() === "license");
@@ -28,26 +30,32 @@
       $("wizard-back").click();
       $("wizard-back").click();
     }
+    step = "ウィザードのライセンスの確認";
     wizard.querySelector('[data-profile="server"]').click();
     $("wizard-next").click();
     await wait(() => currentStep() === "license");
     if (!$("wizard-license-agree").checked) $("wizard-license-agree").click();
+    step = "ウィザードの接続先";
     $("wizard-next").click();
     await wait(() => currentStep() === "connection");
     $("server-url").value = "https://wizard.example.com";
     $("discovery-url").value = "https://auth.example.com/.well-known/openid-configuration";
     $("wizard-next").click();
     await wait(() => currentStep() === "login");
+    step = "ウィザードのログイン";
     $("wizard-login").click();
     await wait(() => !$("wizard-next").disabled);
+    step = "ウィザードのショートカット";
     $("wizard-next").click();
     await wait(() => currentStep() === "shortcut");
     if (!wizard.contains($("shortcut")) || $("shortcut").value !== "double-copy") throw new Error("ウィザードのショートカット設定");
+    step = "ウィザードの完了";
     $("wizard-next").click();
     await wait(() => currentStep() === "done");
     $("wizard-next").click();
     await wait(() => !$("setup-wizard") && $("desktop-settings") && !document.querySelector("#translation-page section").inert);
     if (await window.__TAURI__.core.invoke("setup_state") !== "done") throw new Error("初期設定完了の保存");
+    step = "設定からのウィザードの再表示";
     $("settings-tab").click();
     $("desktop-settings").open = false;
     if (!$("start-setup").closest(".settings-heading") || !$("start-setup").getClientRects().length) throw new Error("設定見出しの初期設定ボタン");

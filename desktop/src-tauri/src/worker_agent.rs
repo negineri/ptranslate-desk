@@ -206,6 +206,8 @@ impl Agent {
         if let Some(certificate) = certificate {
             client = client.add_root_certificate(certificate);
         }
+        // エンジン用の接続を分けるのは Linux だけ。
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut engine_client = None;
         match (config.relay_port, config.relay_secret.as_deref()) {
             (Some(port), Some(secret)) if !unix_relay && port != 0 && !secret.is_empty() => {
