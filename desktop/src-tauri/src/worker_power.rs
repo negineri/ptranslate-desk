@@ -71,7 +71,40 @@ pub(crate) fn external_power() -> Option<bool> {
         .and_then(|source| mac_power_source(source.to_bytes()))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+pub(crate) fn external_power() -> Option<bool> {
+    linux_power(std::path::Path::new("/sys/class/power_supply"))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_power(root: &std::path::Path) -> Option<bool> {
+    let mut offline = false;
+    let mut unknown = false;
+    for entry in std::fs::read_dir(root).ok()? {
+        let path = entry.ok()?.path();
+        let kind = std::fs::read_to_string(path.join("type")).ok()?;
+        if matches!(kind.trim(), "Battery" | "UPS") {
+            continue;
+        }
+        // 周辺機器のバッテリーや給電先を、PC の電源として扱わない。
+        let scope = std::fs::read_to_string(path.join("scope")).ok();
+        let scope = scope.as_deref().map(str::trim);
+        if scope == Some("Device") || (kind.trim() != "Mains" && scope != Some("System")) {
+            continue;
+        }
+        match std::fs::read_to_string(path.join("online"))
+            .as_deref()
+            .map(str::trim)
+        {
+            Ok("1") => return Some(true),
+            Ok("0") => offline = true,
+            _ => unknown = true,
+        }
+    }
+    (offline && !unknown).then_some(false)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub(crate) fn external_power() -> Option<bool> {
     None
 }
@@ -79,6 +112,21 @@ pub(crate) fn external_power() -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_requires_a_system_supply_online() {
+        let root = tempfile::tempdir().unwrap();
+        let supply = root.path().join("AC");
+        std::fs::create_dir(&supply).unwrap();
+        std::fs::write(supply.join("type"), "Mains\n").unwrap();
+        assert_eq!(linux_power(root.path()), None);
+        std::fs::write(supply.join("online"), "0\n").unwrap();
+        assert_eq!(linux_power(root.path()), Some(false));
+        std::fs::write(supply.join("online"), "1\n").unwrap();
+        assert_eq!(linux_power(root.path()), Some(true));
+        std::fs::write(supply.join("scope"), "Device\n").unwrap();
+        assert_eq!(linux_power(root.path()), None);
+    }
 
     #[test]
     fn only_confirmed_ac_power_allows_a_new_job() {

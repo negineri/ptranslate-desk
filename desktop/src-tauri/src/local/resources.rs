@@ -15,14 +15,20 @@ const ENGINE_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/downloa
 const ENGINE_SHA: &str = "e5baad4fd328f22fd19b291ba0841515923f97aa20228af5b49152ec27116703";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const ENGINE_BYTES: u64 = 11_882_142;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+const ENGINE_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-ubuntu-x64.tar.gz";
+#[cfg(target_os = "linux")]
+const ENGINE_SHA: &str = "bb800fbd5e905fb8b9887c9a6cb0ab4f14c7267c5f99302874521e7558b0613f";
+#[cfg(target_os = "linux")]
+const ENGINE_BYTES: u64 = 22_331_121;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const ENGINE_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-vulkan-x64.zip";
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const ENGINE_SHA: &str = "db9ab31997e93bf713d3dfec6eb1cf1b5a6a5f2940a3d4d111ad0ffab54c87d5";
 const MODEL_URL: &str = "https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF/resolve/d44589ecd5287cd64452e9cd1e2cfdad904fe216/plamo-3-translate-2b-Q4_K_M.gguf";
 pub(super) const MODEL_SHA: &str =
     "2189a8a0b4b359f59443ec36cfb9c9c3f603a678c00dbcee8598b3f7ea7c12fb";
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const ENGINE_BYTES: u64 = 36_865_203;
 const MODEL_BYTES: u64 = 1_807_202_144;
 
@@ -57,7 +63,10 @@ pub(super) fn supported() -> bool {
         }) && cfg!(any(target_arch = "aarch64", target_arch = "x86_64"))
     }
     #[cfg(not(target_os = "macos"))]
-    cfg!(all(target_os = "windows", target_arch = "x86_64"))
+    cfg!(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))
 }
 #[cfg(target_os = "macos")]
 fn macos_version_supported(version: &str) -> bool {
@@ -217,7 +226,7 @@ async fn fetch(
         .map_err(|_| "ファイルを配置できませんでした")?;
     report(channel, "download", item, total, total)
 }
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(any(not(any(target_os = "macos", target_os = "linux")), test))]
 fn extract_zip(archive: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
     let file = fs::File::open(archive).map_err(|_| "推論エンジンを読み込めませんでした")?;
     let mut zip = zip::ZipArchive::new(file).map_err(|_| "推論エンジンのzipが不正です")?;
@@ -257,15 +266,15 @@ fn extract_zip(archive: &std::path::Path, destination: &std::path::Path) -> Resu
     Ok(())
 }
 fn extract(archive: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     return extract_zip(archive, destination);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let file = fs::File::open(archive).map_err(|_| "推論エンジンを読み込めませんでした")?;
         extract_tar(flate2::read::GzDecoder::new(file), destination)
     }
 }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn extract_tar(reader: impl Read, destination: &std::path::Path) -> Result<(), String> {
     let mut archive = tar::Archive::new(reader);
     let mut size = 0u64;
@@ -357,7 +366,7 @@ pub async fn download_local_resources(
     }
     if !supported() {
         return Err(
-            "ローカル翻訳の導入はWindows x64とmacOS 13.3以降（Apple Silicon・Intel）に対応しています".into(),
+            "ローカル翻訳の導入はWindows x64、macOS 13.3以降、Ubuntu x64に対応しています".into(),
         );
     }
     let local = app.state::<Local>();
@@ -391,6 +400,8 @@ pub async fn download_local_resources(
         .map_err(|_| "ダウンロードの準備に失敗しました")?;
     let archive = home.join(if cfg!(target_os = "macos") {
         "llama-b11804-macos.tar.gz"
+    } else if cfg!(target_os = "linux") {
+        "llama-b11804-ubuntu.tar.gz"
     } else {
         "llama-b11804-vulkan.zip"
     });
@@ -526,9 +537,9 @@ mod tests {
             0
         );
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
-    fn macos_archive_rejects_escaping_links() {
+    fn tar_archive_rejects_escaping_links() {
         for target in ["../outside", "/tmp/outside"] {
             let mut builder = tar::Builder::new(Vec::new());
             let mut header = tar::Header::new_gnu();

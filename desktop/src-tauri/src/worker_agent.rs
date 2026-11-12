@@ -86,6 +86,7 @@ struct PingReply {
 
 struct Agent {
     client: Client,
+    engine_client: Option<Client>,
     broker: Url,
     config: Bootstrap,
 }
@@ -168,7 +169,12 @@ async fn json_body<T: DeserializeOwned>(mut response: Response) -> Result<T> {
 }
 
 impl Agent {
+    #[cfg(any(not(target_os = "linux"), test))]
     fn new(config: Bootstrap) -> Result<Self> {
+        Self::with_transport(config, false)
+    }
+
+    fn with_transport(config: Bootstrap, unix_relay: bool) -> Result<Self> {
         let broker = broker_origin(&config.broker)?;
         if !config
             .worker_secret
@@ -181,17 +187,27 @@ impl Agent {
         {
             return Err(());
         }
-        let mut client = Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(POST_TIMEOUT)
-            .read_timeout(Duration::from_secs(30));
+        let builder = || {
+            Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(POST_TIMEOUT)
+                .read_timeout(Duration::from_secs(30))
+        };
+        let mut client = builder();
+        let mut engine_client = None;
         match (config.relay_port, config.relay_secret.as_deref()) {
-            (Some(port), Some(secret)) if port != 0 && !secret.is_empty() => {
+            (Some(port), Some(secret)) if !unix_relay && port != 0 && !secret.is_empty() => {
                 let proxy = reqwest::Proxy::https(format!("http://127.0.0.1:{port}"))
                     .map_err(|_| ())?
                     .basic_auth(crate::worker_relay::PROXY_USER, secret);
                 client = client.proxy(proxy);
+            }
+            #[cfg(target_os = "linux")]
+            (None, None) if unix_relay => {
+                use crate::worker_sandbox::linux::{BROKER, ENGINE};
+                client = client.unix_socket(BROKER);
+                engine_client = Some(builder().unix_socket(ENGINE).build().map_err(|_| ())?);
             }
             (None, None) if cfg!(test) => {}
             _ => return Err(()),
@@ -199,6 +215,7 @@ impl Agent {
         let client = client.build().map_err(|_| ())?;
         Ok(Self {
             client,
+            engine_client,
             broker,
             config,
         })
@@ -282,7 +299,7 @@ impl Agent {
             "http://127.0.0.1:{}/v1/completions",
             self.config.engine_port
         );
-        let mut response = self.client.post(url)
+        let mut response = self.engine_client.as_ref().unwrap_or(&self.client).post(url)
             .bearer_auth(&self.config.engine_secret)
             .json(&json!({
                 "prompt": prompt, "max_tokens": limit, "temperature": 0, "cache_prompt": false,
@@ -415,23 +432,37 @@ pub(crate) const READY_LINE: &[u8] = b"{\"status\":\"ready\"}\n";
 pub(crate) const ASSIGNED_LINE: &[u8] = b"{\"status\":\"assigned\"}\n";
 pub(crate) const START_COMMAND: &[u8] = b"go\n";
 
+#[cfg(not(target_os = "linux"))]
 fn restricted_runtime(ports: Ports) -> Result<tokio::runtime::Runtime> {
     worker_sandbox::apply(ports)?;
+    runtime()
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|_| ())
 }
 
+#[cfg(not(target_os = "linux"))]
 fn run_from_parent(ports: Ports) -> Result<&'static str> {
     run_from_parent_using(ports, Agent::new)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn run_from_parent_using(
     ports: Ports,
     create_agent: impl FnOnce(Bootstrap) -> Result<Agent>,
 ) -> Result<&'static str> {
-    let rt = restricted_runtime(ports)?;
+    run_with_runtime(restricted_runtime(ports)?, Some(ports), create_agent)
+}
+
+fn run_with_runtime(
+    rt: tokio::runtime::Runtime,
+    ports: Option<Ports>,
+    create_agent: impl FnOnce(Bootstrap) -> Result<Agent>,
+) -> Result<&'static str> {
     {
         let mut output = io::stdout().lock();
         output.write_all(READY_LINE).map_err(|_| ())?;
@@ -448,7 +479,9 @@ fn run_from_parent_using(
     }
     let config: Bootstrap = serde_json::from_slice(&input).map_err(|_| ())?;
     drop(input);
-    if config.relay_port != Some(ports.relay) || config.engine_port != ports.engine {
+    if config.relay_port != ports.map(|ports| ports.relay)
+        || ports.is_some_and(|ports| config.engine_port != ports.engine)
+    {
         return Err(());
     }
     let agent = create_agent(config)?;
@@ -477,13 +510,127 @@ fn run_from_parent_using(
 mod real_model_probe;
 
 pub(crate) fn entry() {
+    #[cfg(not(target_os = "linux"))]
     let result = Ports::parse(std::env::args_os().skip(2)).and_then(run_from_parent);
+    #[cfg(target_os = "linux")]
+    let result = (|| {
+        if std::env::args_os().nth(2).is_some() {
+            return Err(());
+        }
+        worker_sandbox::linux::apply()?;
+        run_with_runtime(runtime()?, None, |config| {
+            Agent::with_transport(config, true)
+        })
+    })();
     status(result.unwrap_or("error"));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "bubblewrap と Landlock ABI 4 が必要"]
+    fn linux_agent_uses_only_the_two_sandbox_relays() {
+        use std::process::Stdio;
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        const PROBE: &str = "PTRANSLATE_TEST_LINUX_WORKER";
+        if std::env::var_os(PROBE).is_some() {
+            worker_sandbox::linux::apply().unwrap();
+            let rt = runtime().unwrap();
+            let config: Bootstrap = serde_json::from_reader(io::stdin().lock()).unwrap();
+            assert_eq!(
+                std::fs::File::open("/usr/lib/os-release")
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            assert_eq!(
+                std::net::TcpStream::connect(("127.0.0.1", config.engine_port))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            let agent = Agent::with_transport(config, true).ok().unwrap();
+            rt.block_on(async {
+                assert!(agent.client.get(agent.broker.clone()).send().await.is_err());
+                let response = agent
+                    .engine_client
+                    .as_ref()
+                    .unwrap()
+                    .get(format!("http://127.0.0.1:{}/", agent.config.engine_port))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.text().await.unwrap(), "mock engine");
+            });
+            return;
+        }
+
+        runtime().unwrap().block_on(async {
+            let broker = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let engine = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let broker_url =
+                Url::parse(&format!("https://{}/", broker.local_addr().unwrap())).unwrap();
+            let engine_port = engine.local_addr().unwrap().port();
+            let relays =
+                crate::worker_relay::linux::Relays::start(&broker_url, engine_port).unwrap();
+            let (broker_path, engine_path) = relays.paths();
+            let mut child = worker_sandbox::linux::command(
+                &std::env::current_exe().unwrap(),
+                &broker_path,
+                &engine_path,
+            )
+            .args([
+                "--exact",
+                "worker_agent::tests::linux_agent_uses_only_the_two_sandbox_relays",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(PROBE, "1")
+            .stdin(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+            let config = Bootstrap {
+                broker: broker_url.to_string(),
+                worker_secret: format!("ptw_{}", "a".repeat(64)),
+                model_sha256: "b".repeat(64),
+                agent_version: "0.5.0".into(),
+                engine_port,
+                engine_secret: "mock".into(),
+                relay_port: None,
+                relay_secret: None,
+            };
+            timeout(Duration::from_secs(10), async {
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(&serde_json::to_vec(&config).unwrap())
+                    .await
+                    .unwrap();
+                let serve = async {
+                    let (mut socket, _) = broker.accept().await.unwrap();
+                    assert_eq!(socket.read_u8().await.unwrap(), 0x16);
+                    drop(socket);
+                    let (mut socket, _) = engine.accept().await.unwrap();
+                    let mut request = [0; 1024];
+                    assert!(socket.read(&mut request).await.unwrap() > 0);
+                    mock_response(socket, "mock engine").await;
+                };
+                let (_, status) = tokio::join!(serve, child.wait());
+                assert!(status.unwrap().success());
+            })
+            .await
+            .unwrap();
+        });
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

@@ -243,7 +243,26 @@ Apple M2の取得済みPLaMo 3 Translate 2B Q4_K_Mで、SHA-256の一致、実�
 - モデルの削除とバージョン更新を画面から行えるようにする。
 - 長文、用語集の多い入力、GPUメモリ不足時の挙動と翻訳品質を評価する。
 - GPUが使えない端末での案内とCPUへの切り替えを改善する。
-- Linux向けの導入経路は未対応。
+- Ubuntu 24.04以降の x64 では、設定画面から検証済みの CPU 版 llama.cpp とモデルを導入できる。
+
+### Ubuntu のビルドとワーカー検証
+
+Ubuntu 24.04以降の x64 で、Tauri のビルド依存を導入してから `desktop/` で
+`npm ci` と `npm run build -- --bundles deb` を実行します。生成した `.deb` は
+`apt install ./<パッケージ名>.deb` で導入します。ワーカーには bubblewrap、Landlock ABI 4 以降、
+名前空間の作成を許す OS 設定、および Linux がシステムの外部電源を報告する端末が必要です。
+ワーカー資格と OIDC の認証情報はデスクトップセッションの Secret Service に保存します。
+大きな UID の環境でパッケージのアーカイブヘッダーを読み込めない場合は、ビルドを
+`fakeroot npm run build -- --bundles deb` で実行します。
+
+開発環境での隔離と通信は、`desktop/src-tauri/` で次のモック試験を実行して確認できます。
+
+```sh
+cargo test --locked linux_agent_uses_only_the_two_sandbox_relays -- --ignored
+```
+
+実機では、アプリでモデルを取得し、AC電源で提供先にログイン・登録して提供をオンにします。ステージングの
+検証エンジンには実機と同じモデルを設定し、合成文で試用、配信、中止、提供オフ、登録解除を確認します。
 
 ## Chrome拡張との連携
 

@@ -198,7 +198,7 @@ fn status(connection: Connection, registration: Option<&Registration>) -> Status
     Status {
         connection,
         supported,
-        can_participate: cfg!(target_os = "macos") && supported,
+        can_participate: supported && crate::worker_sandbox::supported(),
         expires_at: registration.map(|value| value.expires_at),
         terms_version: TERMS_VERSION,
         message: None,

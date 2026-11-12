@@ -101,7 +101,20 @@ fn available_host_mib() -> Result<u64, String> {
     Ok(status.ullAvailPhys / MIB)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+fn available_host_mib() -> Result<u64, String> {
+    let output = fs::read_to_string("/proc/meminfo")
+        .map_err(|_| "空きシステムメモリを確認できませんでした")?;
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("MemAvailable:"))
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|amount| amount.parse::<u64>().ok())
+        .map(|kib| kib / 1024)
+        .ok_or_else(|| "空きシステムメモリを確認できませんでした".into())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn available_host_mib() -> Result<u64, String> {
     Err("空きシステムメモリを確認できませんでした".into())
 }

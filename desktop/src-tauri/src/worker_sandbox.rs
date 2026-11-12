@@ -6,6 +6,7 @@ pub(crate) struct Ports {
     pub(crate) engine: u16,
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 impl Ports {
     pub(crate) fn new(relay: u16, engine: u16) -> Result<Self, ()> {
         if relay == 0 || engine == 0 || relay == engine {
@@ -24,7 +25,17 @@ impl Ports {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub(crate) mod linux;
+
+pub(crate) fn supported() -> bool {
+    #[cfg(target_os = "linux")]
+    return linux::supported();
+    #[cfg(not(target_os = "linux"))]
+    cfg!(target_os = "macos")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(crate) fn apply(_: Ports) -> Result<(), ()> {
     Err(())
 }

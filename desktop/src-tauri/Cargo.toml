@@ -26,10 +26,12 @@ tempfile = "3"
 zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tokio = { version = "1", features = ["time", "net", "io-util", "sync", "macros", "rt-multi-thread", "process"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "0.2"
 flate2 = "1"
 tar = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSEvent", "block2"] }

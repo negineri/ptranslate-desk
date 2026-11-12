@@ -1,32 +1,47 @@
 //! ワーカー向けのTLS中継。要求で接続先を変更できない。
+#[cfg(any(not(target_os = "linux"), test))]
 use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::Url;
-use std::{io, net::Ipv4Addr, time::Duration};
+use std::time::Duration;
+#[cfg(any(not(target_os = "linux"), test))]
+use std::{io, net::Ipv4Addr};
+#[cfg(any(not(target_os = "linux"), test))]
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
+};
+use tokio::{
+    net::TcpStream,
     task::{JoinHandle, JoinSet},
     time::timeout,
 };
+#[cfg(any(not(target_os = "linux"), test))]
 use zeroize::Zeroizing;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod linux;
+
+#[cfg(any(not(target_os = "linux"), test))]
 const MAX_HEADER: usize = 4096;
 const MAX_CONNECTIONS: usize = 4;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const PROXY_USER: &str = "worker";
 
+#[cfg(any(not(target_os = "linux"), test))]
 pub(crate) struct BrokerRelay {
     pub(crate) port: u16,
     pub(crate) secret: Zeroizing<String>,
     task: JoinHandle<()>,
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 impl Drop for BrokerRelay {
     fn drop(&mut self) {
         self.task.abort();
     }
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 impl BrokerRelay {
     pub(crate) async fn start(broker: &Url) -> Result<Self, String> {
         let host = broker.host_str().ok_or("提供先のURLが不正です")?;
@@ -76,6 +91,7 @@ impl BrokerRelay {
     }
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 async fn forward(
     mut worker: TcpStream,
     host: &str,

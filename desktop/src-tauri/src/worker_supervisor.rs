@@ -1,6 +1,7 @@
 //! 参加中に、1件ずつ処理するエージェントを起動・回収する。
 #![allow(dead_code)]
 use crate::worker_agent::{Bootstrap, ASSIGNED_LINE, READY_LINE, START_COMMAND};
+#[cfg(not(target_os = "linux"))]
 use crate::worker_sandbox::Ports;
 use serde::{Deserialize, Serialize};
 use std::{process::Stdio, sync::Mutex, time::Duration};
@@ -334,21 +335,35 @@ async fn run_one(
     }
     let broker =
         crate::worker_agent::broker_origin(&config.broker).map_err(|_| "提供先のURLが不正です")?;
-    let relay = crate::worker_relay::BrokerRelay::start(&broker).await?;
-    config.relay_port = Some(relay.port);
-    config.relay_secret = Some(relay.secret.as_str().to_owned());
     engine.configure(&mut config);
-    let ports =
-        Ports::new(relay.port, config.engine_port).map_err(|_| "ワーカーの接続ポートが不正です")?;
     let executable =
         std::env::current_exe().map_err(|_| "ワーカーの実行ファイルを確認できませんでした")?;
-    let mut command = Command::new(executable);
+    #[cfg(target_os = "linux")]
+    let relay = crate::worker_relay::linux::Relays::start(&broker, config.engine_port)?;
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let (broker, engine) = relay.paths();
+        let mut command = crate::worker_sandbox::linux::command(&executable, &broker, &engine);
+        command.arg("--worker-agent");
+        command
+    };
+    #[cfg(not(target_os = "linux"))]
+    let relay = crate::worker_relay::BrokerRelay::start(&broker).await?;
+    #[cfg(not(target_os = "linux"))]
+    let mut command = {
+        config.relay_port = Some(relay.port);
+        config.relay_secret = Some(relay.secret.as_str().to_owned());
+        let ports = Ports::new(relay.port, config.engine_port)
+            .map_err(|_| "ワーカーの接続ポートが不正です")?;
+        let mut command = Command::new(executable);
+        command
+            .arg("--worker-agent")
+            .arg(ports.relay.to_string())
+            .arg(ports.engine.to_string())
+            .env_clear();
+        command
+    };
     // 資格は準備完了の通知を待ってから標準入力で渡す。
-    command
-        .arg("--worker-agent")
-        .arg(ports.relay.to_string())
-        .arg(ports.engine.to_string())
-        .env_clear();
     let mut input = Zeroizing::new(
         serde_json::to_vec(&config).map_err(|_| "ワーカーの起動情報を作れませんでした")?,
     );
