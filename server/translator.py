@@ -631,7 +631,13 @@ def run_upstream_for_user(user, prompt, limit, events, cancel, pool, job):
 
 
 def upstream_stream(
-    prompt: str, limit: int, events: queue.Queue, cancel: UpstreamCancellation, upstream_url: str
+    prompt: str,
+    limit: int,
+    events: queue.Queue,
+    cancel: UpstreamCancellation,
+    upstream_url: str,
+    *,
+    cache_prompt: bool | None = None,
 ):
     """翻訳エンジンに投げ、届いた訳の断片を events に入れる。最後に ("done", 理由) か
     ("error", 文) を入れる。cancel が立ったら接続を切る (llama-server は生成を止める)。"""
@@ -645,6 +651,7 @@ def upstream_stream(
             "stop": STOP,
             "add_special_tokens": True,
             "stream": True,
+            **({"cache_prompt": cache_prompt} if cache_prompt is not None else {}),
         },
         ensure_ascii=False,
     ).encode()

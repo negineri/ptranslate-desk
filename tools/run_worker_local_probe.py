@@ -4,6 +4,7 @@
 import argparse
 import base64
 from contextlib import contextmanager, nullcontext
+from functools import partial
 import hashlib
 import http.client
 import json
@@ -15,6 +16,7 @@ import select
 import socket
 import socketserver
 import ssl
+from statistics import median
 import subprocess
 import sys
 import tempfile
@@ -25,12 +27,13 @@ import urllib.parse
 import urllib.request
 from unittest.mock import patch
 
-from bench_worker_delivery import BenchmarkBroker, BenchmarkHandler, serving, tls_contexts, tr
+from bench_worker_delivery import BenchmarkBroker, BenchmarkHandler, p95, serving, tls_contexts, tr
 from mock_worker import MockWorker
 
 ROOT = Path(__file__).resolve().parent.parent
 TEST = "worker_agent::real_model_probe::restricted_worker"
 TEXT = "Hello. This application translates text on your computer."
+BENCH_TEXT = "This is a synthetic staging translation test."
 
 
 def require(condition, message):
@@ -311,7 +314,7 @@ class Broker(BenchmarkBroker):
         self.RequestHandlerClass = Handler
 
 
-def translate(server, *, cancel=False, stop_parent=None):
+def translate(server, *, text=TEXT, cancel=False, stop_parent=None):
     connection = http.client.HTTPSConnection(
         "127.0.0.1", server.server_port, timeout=30, context=server.client_tls
     )
@@ -322,7 +325,7 @@ def translate(server, *, cancel=False, stop_parent=None):
             "/api/translate",
             json.dumps(
                 {
-                    "text": TEXT * (40 if cancel or stop_parent else 1),
+                    "text": text * (40 if cancel or stop_parent else 1),
                     "target_lang": "ja",
                     "consent": tr.CONSENT_VERSION,
                 }
@@ -370,7 +373,76 @@ def translate(server, *, cancel=False, stop_parent=None):
         connection.close()
 
 
-def probe(binary, directory, device, installation):
+def measure_empty_slots(server, hub, info, idle, binary, certificate, config, samples):
+    results = {"direct": [], "direct_uncached": [], "volunteer": []}
+    uncached = partial(tr.upstream_stream, cache_prompt=False)
+
+    def ready():
+        with hub.condition:
+            return info["id"] in hub.ready and not hub.assignments and not server.pool.waiting
+
+    with (
+        serving(Broker(server.server_tls, server.client_tls)) as direct,
+        patch.object(hub.checks, "after_delivery", return_value=False),
+    ):
+        with patch.object(tr, "POOL_KIND", "direct"):
+            direct_pool = direct.get_pool()
+
+        def direct_ready():
+            with direct_pool.condition:
+                return direct_pool.free == [1] and not direct_pool.waiting
+
+        def sample(mode):
+            wait(idle, "計測開始前に実エンジンの枠が空きません")
+            if mode != "volunteer":
+                wait(direct_ready, "直結枠が空いていません")
+                # 並行したワーカー要求がない間だけ、試験プロセスのプール種別を切り替える。
+                with (
+                    patch.object(tr, "POOL_KIND", "direct"),
+                    patch.object(tr, "upstream_stream", uncached)
+                    if mode == "direct_uncached"
+                    else nullcontext(),
+                ):
+                    return translate(direct, text=BENCH_TEXT)["first_ms"]
+
+            worker = Worker(binary, certificate, config)
+            try:
+                wait(ready, "計測開始前にワーカーが仲介で待機状態になりません")
+                require(idle() and ready(), "計測開始時にボランティア枠が空いていません")
+                first = translate(server, text=BENCH_TEXT)["first_ms"]
+                worker.finish("completed")
+                return first
+            finally:
+                worker.close()
+                wait(
+                    lambda: not hub.assignments and not hub.polling,
+                    "計測後に仲介の割り当てが残っています",
+                )
+
+        # 各条件を一度実行してから計測を始め、先に送る条件は順に変える。
+        modes = tuple(results)
+        for mode in modes:
+            sample(mode)
+        for index in range(samples):
+            first = index % len(modes)
+            for mode in modes[first:] + modes[:first]:
+                results[mode].append(sample(mode))
+    latency = {mode: p95(times) for mode, times in results.items()}
+    print(
+        json.dumps(
+            {
+                "samples_per_condition": samples,
+                **{f"{mode}_p50_ms": median(times) for mode, times in results.items()},
+                **{f"{mode}_p95_ms": value for mode, value in latency.items()},
+                "p95_delta_ms": latency["volunteer"] - latency["direct"],
+                "p95_delta_uncached_ms": latency["volunteer"] - latency["direct_uncached"],
+            }
+        ),
+        flush=True,
+    )
+
+
+def probe(binary, directory, device, installation, samples=0):
     issues = []
     linux = sys.platform == "linux"
     server_tls, client_tls = tls_contexts(directory)
@@ -547,6 +619,10 @@ def probe(binary, directory, device, installation):
                     "仲介に割り当てや待機が残っています",
                     6,
                 )
+                if samples:
+                    measure_empty_slots(
+                        server, hub, info, idle, binary, certificate, config, samples
+                    )
             print(
                 "制限付きワーカーの割り当て・実推論・逐次配信・中止・待機停止・処理枠の回収: PASS",
                 flush=True,
@@ -565,9 +641,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", choices=["MTL0", "none"])
     parser.add_argument("--installation", type=Path, help="取得済みの installation.json")
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=0,
+        help="空き枠で同じ実エンジンを使い、直結とワーカー経由を各指定件数測る",
+    )
     args = parser.parse_args()
     if sys.platform not in ("darwin", "linux"):
         parser.error("この検証はmacOSとUbuntuに対応しています")
+    if not 0 <= args.samples <= 100:
+        parser.error("--samples は 0〜100 を指定してください")
     device = args.device or ("MTL0" if sys.platform == "darwin" else "none")
     if sys.platform == "linux" and device != "none":
         parser.error("Ubuntuでは --device none を指定してください")
@@ -579,7 +663,7 @@ def main():
         args.installation or data / "com.witenp.ptranslate-desk/inference/installation.json"
     )
     with tempfile.TemporaryDirectory(prefix="ptranslate-worker-probe-") as directory:
-        probe(test_binary(), Path(directory), device, installation)
+        probe(test_binary(), Path(directory), device, installation, args.samples)
 
 
 if __name__ == "__main__":
