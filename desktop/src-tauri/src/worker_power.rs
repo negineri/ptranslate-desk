@@ -73,48 +73,46 @@ pub(crate) fn external_power() -> Option<bool> {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn external_power() -> Option<bool> {
-    static VM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    linux_power(std::path::Path::new("/sys/class/power_supply"), || {
-        *VM.get_or_init(|| {
-            std::process::Command::new("/usr/bin/systemd-detect-virt")
-                .args(["--vm", "--quiet"])
-                .status()
-                .is_ok_and(|status| status.success())
-        })
-    })
+    linux_power(std::path::Path::new("/sys/class/power_supply"))
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn linux_power(root: &std::path::Path, is_vm: impl FnOnce() -> bool) -> Option<bool> {
+fn linux_power(root: &std::path::Path) -> Option<bool> {
+    let mut battery = false;
+    let mut online = false;
     let mut offline = false;
     let mut unknown = false;
-    let mut empty = true;
     for entry in std::fs::read_dir(root).ok()? {
-        empty = false;
         let path = entry.ok()?.path();
         let kind = std::fs::read_to_string(path.join("type")).ok()?;
-        if matches!(kind.trim(), "Battery" | "UPS") {
-            continue;
-        }
-        // 周辺機器のバッテリーや給電先を、PC の電源として扱わない。
         let scope = std::fs::read_to_string(path.join("scope")).ok();
         let scope = scope.as_deref().map(str::trim);
-        if scope == Some("Device") || (kind.trim() != "Mains" && scope != Some("System")) {
+        if scope == Some("Device") {
             continue;
+        }
+        match kind.trim() {
+            "Battery" | "UPS" => {
+                battery = true;
+                continue;
+            }
+            "Mains" => {}
+            _ if scope == Some("System") => {}
+            _ => continue,
         }
         match std::fs::read_to_string(path.join("online"))
             .as_deref()
             .map(str::trim)
         {
-            Ok("1") => return Some(true),
+            Ok("1") => online = true,
             Ok("0") => offline = true,
             _ => unknown = true,
         }
     }
-    if empty && is_vm() {
-        return Some(true);
+    match (online, offline, unknown, battery) {
+        (true, _, _, _) | (false, false, false, false) => Some(true),
+        (false, true, false, _) => Some(false),
+        _ => None,
     }
-    (offline && !unknown).then_some(false)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -127,27 +125,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn linux_requires_a_system_supply_online() {
+    fn linux_reads_system_supply_even_without_a_battery() {
         let root = tempfile::tempdir().unwrap();
         let supply = root.path().join("AC");
         std::fs::create_dir(&supply).unwrap();
         std::fs::write(supply.join("type"), "Mains\n").unwrap();
-        assert_eq!(linux_power(root.path(), || false), None);
-        assert_eq!(linux_power(root.path(), || true), None);
+        assert_eq!(linux_power(root.path()), None);
+        std::fs::write(supply.join("online"), "unknown\n").unwrap();
+        assert_eq!(linux_power(root.path()), None);
         std::fs::write(supply.join("online"), "0\n").unwrap();
-        assert_eq!(linux_power(root.path(), || true), Some(false));
+        assert_eq!(linux_power(root.path()), Some(false));
         std::fs::write(supply.join("online"), "1\n").unwrap();
-        assert_eq!(linux_power(root.path(), || false), Some(true));
+        assert_eq!(linux_power(root.path()), Some(true));
         std::fs::write(supply.join("scope"), "Device\n").unwrap();
-        assert_eq!(linux_power(root.path(), || false), None);
+        assert_eq!(linux_power(root.path()), Some(true));
     }
 
     #[test]
-    fn linux_vm_without_power_devices_can_offer_work() {
+    fn linux_without_system_power_devices_can_offer_work() {
         let root = tempfile::tempdir().unwrap();
-        assert_eq!(linux_power(root.path(), || true), Some(true));
-        assert_eq!(linux_power(root.path(), || false), None);
-        assert_eq!(linux_power(&root.path().join("missing"), || true), None);
+        assert_eq!(linux_power(root.path()), Some(true));
+        assert_eq!(linux_power(&root.path().join("missing")), None);
+        let peripheral = root.path().join("mouse");
+        std::fs::create_dir(&peripheral).unwrap();
+        assert_eq!(linux_power(root.path()), None);
+        std::fs::write(peripheral.join("type"), "Battery\n").unwrap();
+        std::fs::write(peripheral.join("scope"), "Device\n").unwrap();
+        assert_eq!(linux_power(root.path()), Some(true));
+    }
+
+    #[test]
+    fn linux_battery_requires_a_system_supply_online() {
+        let root = tempfile::tempdir().unwrap();
+        let battery = root.path().join("BAT0");
+        std::fs::create_dir(&battery).unwrap();
+        std::fs::write(battery.join("type"), "Battery\n").unwrap();
+        assert_eq!(linux_power(root.path()), None);
+
+        let supply = root.path().join("AC");
+        std::fs::create_dir(&supply).unwrap();
+        std::fs::write(supply.join("type"), "Mains\n").unwrap();
+        std::fs::write(supply.join("online"), "0\n").unwrap();
+        assert_eq!(linux_power(root.path()), Some(false));
+        let usb = root.path().join("USB");
+        std::fs::create_dir(&usb).unwrap();
+        std::fs::write(usb.join("type"), "USB\n").unwrap();
+        std::fs::write(usb.join("scope"), "System\n").unwrap();
+        assert_eq!(linux_power(root.path()), None);
+        std::fs::write(supply.join("online"), "1\n").unwrap();
+        assert_eq!(linux_power(root.path()), Some(true));
+        std::fs::remove_file(usb.join("type")).unwrap();
+        assert_eq!(linux_power(root.path()), None);
+    }
+
+    #[test]
+    fn linux_ups_is_a_system_battery() {
+        let root = tempfile::tempdir().unwrap();
+        let ups = root.path().join("UPS");
+        std::fs::create_dir(&ups).unwrap();
+        std::fs::write(ups.join("type"), "UPS\n").unwrap();
+        assert_eq!(linux_power(root.path()), None);
     }
 
     #[test]

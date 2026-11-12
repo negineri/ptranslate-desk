@@ -251,12 +251,15 @@ Ubuntu 24.04以降の x64 で、Tauri のビルド依存を導入してから `d
 `npm ci` と `npm run build -- --bundles deb` を実行します。生成した `.deb` は
 `apt install ./<パッケージ名>.deb` で導入します。ワーカーには bubblewrap、Landlock ABI 4 以降、
 名前空間の作成を許す OS 設定が必要です。ワーカーは Linux が外部電源を報告する場合に新規受付を行います。
-Linux が電源デバイスを一つも報告せず、`systemd-detect-virt --vm` が VM と判定した場合も受付を許可します。
+システムの電池も外部電源も報告しない端末は外部電源として扱います。外部電源がオフラインまたは判定不能の場合は受付を見送ります。
+電池を OS に報告しないノート PC では、電池で動いていても受け付ける場合があります。
 ワーカー資格と OIDC の認証情報はデスクトップセッションの Secret Service に保存します。
 大きな UID の環境でパッケージのアーカイブヘッダーを読み込めない場合は、ビルドを
 `fakeroot npm run build -- --bundles deb` で実行します。
 
-開発環境での隔離と通信は、`desktop/src-tauri/` で次のモック試験を実行して確認できます。
+CI の `desktop-linux` では Ubuntu 24.04 で通常の Rust 試験と隔離のモック試験を実行します。
+ランナーで名前空間の作成を許可できない場合は、CI に警告を出し、通常の試験を必須とします。
+警告が出た場合は、bubblewrap と Landlock ABI 4 以降が使える開発環境の `desktop/src-tauri/` で次を実行してください。
 
 ```sh
 cargo test --locked linux_agent_uses_only_the_two_sandbox_relays -- --ignored
@@ -267,7 +270,7 @@ cargo test --locked linux_agent_uses_only_the_two_sandbox_relays -- --ignored
 
 #### Ubuntu VM での実モデル確認（2026-11-12）
 
-Ubuntu 26.04 x64 の KVM VM で、電源デバイスを報告しない状態から CPU ワーカーを起動した。
+Ubuntu 26.04 x64 の KVM VM で CPU ワーカーを起動した。システムの電池も外部電源も報告しない端末は外部電源として扱う。
 以下の試験はローカル HTTPS 仲介、bubblewrap、Landlock、本番と同じ Unix ソケット中継を使う。
 通常の保存先と別のモデル・エンジンを使う場合は `--installation` で設定ファイルを指定できる。
 
