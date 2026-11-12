@@ -3,7 +3,9 @@ import { desktopTranslationLayout } from "./translation-layout.mjs";
 
 const source = new URL("../server/static/", import.meta.url);
 const dist = new URL("./dist/", import.meta.url);
-const html = desktopTranslationLayout(await readFile(new URL("index.html", source), "utf8"));
+// Windows のチェックアウトでも複数行の置換が一致するようにする。
+const webHtml = (await readFile(new URL("index.html", source), "utf8")).replaceAll("\r\n", "\n");
+const html = desktopTranslationLayout(webHtml);
 const { productName } = JSON.parse(await readFile(new URL("./src-tauri/tauri.conf.json", import.meta.url), "utf8"));
 const consentDialog = html.match(/<dialog id="volunteer-consent"[\s\S]*?<\/dialog>/)?.[0]
   .replace("</h2>", '</h2><p id="volunteer-server" class="hint"></p>');
