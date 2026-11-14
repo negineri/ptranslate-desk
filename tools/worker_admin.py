@@ -26,7 +26,7 @@ def main(argv=None):
     commands.add_parser("list-owners", help="所有者・登録記録数・検疫と失効の状態を表示")
     for name in ("revoke-owner", "release-owner"):
         command = commands.add_parser(name)
-        command.add_argument("name")
+        command.add_argument("owner_id")
     command = commands.add_parser("revoke-worker")
     command.add_argument("worker_id")
     args = parser.parse_args(argv)
@@ -34,10 +34,10 @@ def main(argv=None):
     try:
         if not args.state_file or not Path(args.state_file).is_file():
             raise ValueError("既存の状態ファイルを指定してください")
-        if args.command in ("revoke-owner", "release-owner") and not tr.USER_RE.fullmatch(
-            args.name
+        if args.command in ("revoke-owner", "release-owner") and not tr.USER_ID_RE.fullmatch(
+            args.owner_id
         ):
-            raise ValueError("所有者名が不正です")
+            raise ValueError("所有者IDが不正です")
         if args.command == "revoke-worker" and not re.fullmatch(r"[0-9a-f]{32}", args.worker_id):
             raise ValueError("ワーカーIDが不正です")
         registry = tr.WorkerRegistry(args.state_file)
@@ -61,7 +61,7 @@ def main(argv=None):
                 )
             )
         elif args.command == "revoke-owner":
-            registry.revoke_owner(args.name)
+            registry.revoke_owner(args.owner_id)
             print(json.dumps({"updated": True}))
         elif args.command == "revoke-worker":
             if not registry.set_state(args.worker_id, "revoked"):
@@ -70,10 +70,10 @@ def main(argv=None):
         else:
             with registry.lock:
                 if not registry.db.execute(
-                    "SELECT 1 FROM owners WHERE name=?", (args.name,)
+                    "SELECT 1 FROM owners WHERE name=?", (args.owner_id,)
                 ).fetchone():
                     raise ValueError("対象が見つかりません")
-            registry.release_owner(args.name)
+            registry.release_owner(args.owner_id)
             print(json.dumps({"updated": True}))
         return 0
     except (ValueError, OSError, sqlite3.Error, tr.HttpError) as error:

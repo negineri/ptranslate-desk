@@ -61,8 +61,8 @@ services:
     image: ghcr.io/negineri/ptranslate-desk/server:0.3.0
     environment:
       TR_UPSTREAM_URL: http://llama-server:8080/v1/completions
-      # Pocket ID の access token にはユーザー名が入らないので、PTranslate Desk (Bearer) の利用者名は
-      # userinfo から引く。Web (Cookie) は oauth2-proxy が ID token のユーザー名を渡す
+      # Pocket ID の access token にない表示名は userinfo から取得する。
+      # Web (Cookie) では oauth2-proxy が ID token の sub と表示名を渡す。
       TR_USERINFO_URL: http://pocket-id:1411/api/oidc/userinfo
       TR_PUBLIC_SERVER_URL: https://${PT_DOMAIN}
       TR_DESKTOP_DISCOVERY_URL: https://${PT_DOMAIN}:8443/.well-known/openid-configuration
@@ -148,7 +148,11 @@ configs:
             flushInterval: 100ms
             passHostHeader: true
       injectRequestHeaders:
-        # 利用者が送った同名のヘッダーは消してから、検証したユーザー名を入れる
+        # 利用者が送った同名のヘッダーは消してから、認証済みの値を入れる
+        - name: X-Forwarded-User-Id
+          values:
+            - claimSource:
+                claim: user # OIDC の sub
         - name: X-Forwarded-User
           values:
             - claimSource:

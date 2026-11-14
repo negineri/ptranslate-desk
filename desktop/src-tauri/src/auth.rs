@@ -798,7 +798,9 @@ impl Auth {
                 request = request.bearer_auth(token.as_str());
             }
             if self.mock {
-                request = request.header("X-Forwarded-User", "mock-desktop");
+                request = request
+                    .header("X-Forwarded-User-Id", "mock-desktop")
+                    .header("X-Forwarded-User", "mock-desktop");
             }
             if let Some(body) = body {
                 request = request.json(body);

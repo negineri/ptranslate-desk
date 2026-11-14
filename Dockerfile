@@ -1,5 +1,5 @@
 # サーバー (server/translator.py) と Web の画面 (server/static/)。Python の標準ライブラリだけで動く。
-# 前段に認証プロキシを置き、X-Forwarded-User を付けて渡すこと (README.md)
+# 前段に認証プロキシを置き、X-Forwarded-User-Id と表示用の X-Forwarded-User を付けて渡すこと (README.md)
 FROM python:3.13-slim
 RUN useradd --system --uid 10001 --no-create-home translator
 WORKDIR /app

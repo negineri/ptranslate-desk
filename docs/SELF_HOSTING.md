@@ -55,8 +55,8 @@ TR_UPSTREAM_URL=http://127.0.0.1:18082/v1/completions \
 サーバー内の端末から設定とSSEの応答を確認します。
 
 ```sh
-curl --fail -H 'X-Forwarded-User: local-test' http://127.0.0.1:8002/api/config
-curl --fail --no-buffer -H 'X-Forwarded-User: local-test' \
+curl --fail -H 'X-Forwarded-User-Id: local-test' -H 'X-Forwarded-User: local-test' http://127.0.0.1:8002/api/config
+curl --fail --no-buffer -H 'X-Forwarded-User-Id: local-test' -H 'X-Forwarded-User: local-test' \
   -H 'Content-Type: application/json' \
   --data '{"text":"Hello","target_lang":"ja"}' \
   http://127.0.0.1:8002/api/translate
@@ -205,7 +205,7 @@ Pythonサービスとコンテナはどちらか一方を使います。
 | `TR_MAX_OPEN_REQUESTS` | 1000 | 開いた接続の上限。超過は503 |
 | `TR_UPSTREAM_TIMEOUT` | 600 | 翻訳エンジンとの通信タイムアウト（秒） |
 | `TR_HEARTBEAT_SECONDS` | 15 | SSEのハートビート間隔（秒） |
-| `TR_USERINFO_URL` | 空 | IdPのuserinfo。`X-Forwarded-User` が無く前段が検証したBearerだけがあるとき、ここから `preferred_username` を引く（access tokenにユーザー名が入らないIdP向け。[かんたん構築ガイド](SELF_HOSTING_COMPOSE.md)） |
+| `TR_USERINFO_URL` | 空 | IdP の userinfo。前段が検証した Bearer の ID または表示名が足りないときに `sub` と `preferred_username` を取得する |
 | `TR_USERINFO_CACHE_SECONDS` | 300 | userinfoの結果を覚えておく秒数の上限（tokenの期限が先ならそこまで） |
 | `TR_PUBLIC_SERVER_URL` | 空 | クライアント向けに表示する公開サーバーURL。空ならWebの閲覧中のオリジンを使う |
 | `TR_DESKTOP_DISCOVERY_URL` | 空 | クライアント向けに表示する外部から到達できるHTTPSのOIDC discovery URL |
@@ -418,6 +418,8 @@ server {
         proxy_pass http://127.0.0.1:4180;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-User-Id "";
+        proxy_set_header X-Forwarded-User "";
         proxy_set_header X-Auth-Request-Redirect https://translate.example.com/;
         # 認可コードを含むcallbackのクエリーをアクセスログに残さない。
         access_log off;
@@ -431,6 +433,8 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Forwarded-User-Id "";
+        proxy_set_header X-Forwarded-User "";
         proxy_set_header X-Original-URI $request_uri;
     }
 
@@ -438,6 +442,8 @@ server {
         auth_request /_auth;
         error_page 401 = @api_login_required;
         auth_request_set $api_user $upstream_http_x_auth_request_preferred_username;
+        auth_request_set $api_sub $upstream_http_x_auth_request_user;
+        proxy_set_header X-Forwarded-User-Id $api_sub;
         proxy_set_header X-Forwarded-User $api_user;
         # 元のBearerは検証済み。翻訳サーバーにはトークンを渡さない。
         proxy_set_header Authorization "";
@@ -456,6 +462,8 @@ server {
         auth_request /_auth;
         error_page 401 = /oauth2/start?rd=https://translate.example.com/;
         auth_request_set $web_user $upstream_http_x_auth_request_preferred_username;
+        auth_request_set $web_sub $upstream_http_x_auth_request_user;
+        proxy_set_header X-Forwarded-User-Id $web_sub;
         proxy_set_header X-Forwarded-User $web_user;
         proxy_set_header Authorization "";
         proxy_pass http://127.0.0.1:8002;
@@ -466,7 +474,9 @@ server {
 証明書が両ドメインをまとめた名前で発行された場合、実際の保存先は
 `sudo certbot certificates` で確認して合わせます。
 `auth_request` モジュールのあるnginxを使い、`sudo nginx -t` が通ってから再読み込みします。
-利用者から送られた `X-Forwarded-User` は必ず検証結果で上書きします。
+利用者から送られた `X-Forwarded-User-Id` と `X-Forwarded-User` は全経路で消し、OIDC 認証を通った要求だけに付け直します。
+この例では認証プロキシの `X-Auth-Request-User` が OIDC の `sub` であることが前提です。
+Authentik では Web 用と Bearer 用の両方で同じ利用者 UUID を `sub` とし、改名前後と両認証方式で値が一致することを確かめます。
 8002/8080/4180番は外部から到達できないことも確認してください。
 
 ### ワーカーAPIを有効にする場合の前段
@@ -474,13 +484,13 @@ server {
 OIDCを通さず仲介へ渡すワーカーAPIは、`/api/worker/poll`、`/api/worker/result`、
 `/api/worker/ping` の3つだけです。パスの完全一致で設定し、`/api/worker/` の前方一致で認証を外さないでください。
 nginxでは `location = /api/worker/poll`、`location = /api/worker/result`、
-`location = /api/worker/ping` の3つを用意し、それぞれに `proxy_set_header X-Forwarded-User "";` を指定します。
+`location = /api/worker/ping` の3つを用意し、それぞれに `proxy_set_header X-Forwarded-User-Id "";` と `proxy_set_header X-Forwarded-User "";` を指定します。
 クライアントが送った利用者名を仲介へ通さず、仲介はワーカーのBearer資格を検証します。
 これらの場所でも、IP・国のヘッダーを前段が検証済みの値へ上書きする設定と、SSE・キャッシュの要件を維持してください。
 nginxの `proxy_set_header` は同じ階層で指定すると上位からの継承が変わるため、必要なヘッダーを各場所で明示します。
 
 `/api/worker/register`、`/api/worker/renew`、`/api/worker/mine`、
-`DELETE /api/worker/<id>` はOIDCを通します。認証済みの要求だけに、前段が検証した `X-Forwarded-User` を付けます。
+`DELETE /api/worker/<id>` はOIDCを通します。認証済みの要求だけに、前段が検証した `sub` と表示名のヘッダーを付けます。
 匿名用APIの設定と、ワーカー管理APIの認証除外を混同しないでください。
 
 Webで匿名利用を有効にする場合は、`TR_ANON_ENABLED=1` と公開HTTPSの `TR_PUBLIC_SERVER_URL` を設定し、
@@ -502,10 +512,16 @@ Webで匿名利用を有効にする場合は、`TR_ANON_ENABLED=1` と公開HTT
 
 | `python3 tools/worker_admin.py` の後ろに付ける操作 | 動き |
 | --- | --- |
-| `list-owners` | 所有者名、登録記録数（期限切れを含む）、検疫と失効の状態をJSONで表示。成績は表示しない |
-| `revoke-owner <name>` | 所有者とその全ワーカーを失効させる |
+| `list-owners` | 所有者の OIDC `sub`、登録記録数（期限切れを含む）、検疫と失効の状態をJSONで表示。成績は表示しない |
+| `revoke-owner <owner_id>` | 所有者とその全ワーカーを失効させる |
 | `revoke-worker <worker_id>` | 1台を失効させる |
-| `release-owner <name>` | 所有者全体の検疫を解除し、各端末の試用をやり直す。失効した端末は戻さない |
+| `release-owner <owner_id>` | 所有者全体の検疫を解除し、各端末の試用をやり直す。失効した端末は戻さない |
+
+旧版のユーザー名で記録された行がある SQLite は、新版の仲介と管理 CLI では開けません。
+切り替え前に仲介を停止し、状態ファイルをバックアップしてください。試験環境で記録を破棄できる場合は別の空の状態ファイルを用意し、
+端末を再登録します。保持が必要な場合は、記録時点の所有者を IdP の履歴などで確認し、確認済みの対応表を使って
+`owners.name` と `workers.owner` を同じトランザクションで `sub` に変換します。両表の対応と失効・検疫が引き継がれることを
+確認してから、そのトランザクションで `PRAGMA user_version=1` を設定します。現在のユーザー名の一致だけで引き継がないでください。
 
 待機中のポーリングへの失効反映は、仲介の次の5秒ごとのDB再確認です。新しい要求はその場で資格を確認します。
 運営用HTTP APIはありません。ボランティア枠の利用者APIには同意の版が必要です。クライアントの同意画面と公開前の条件はボランティア仕様を参照してください。

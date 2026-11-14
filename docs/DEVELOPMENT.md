@@ -42,7 +42,7 @@ TR_UPSTREAM_URL=http://127.0.0.1:18082/v1/completions python3 -I server/translat
 さらに別の端末から、認証プロキシの代わりに開発用の利用者名を付けてAPIを呼びます。
 
 ```sh
-curl --fail -H 'X-Forwarded-User: local-test' http://127.0.0.1:8002/api/config
+curl --fail -H 'X-Forwarded-User-Id: local-test' -H 'X-Forwarded-User: local-test' http://127.0.0.1:8002/api/config
 ```
 
 両プロセスはCtrl+Cで終了します。デスクトップも含めて起動する場合は次を使います。
@@ -57,8 +57,8 @@ python3 tools/run_desktop_mock.py
 環境変数の一覧は[サーバーの環境変数](SELF_HOSTING.md#サーバーの環境変数)を参照してください。
 
 サーバー自体は認証しません。公開時は前段の認証プロキシが検証した利用者名を
-`X-Forwarded-User` で渡し、APIの待ち受けを外部に直接公開しないでください。
-`TR_USERINFO_URL` を設定した場合だけ、`X-Forwarded-User` が無いBearerのリクエストの利用者名を
+OIDC の `sub` を `X-Forwarded-User-Id` で、表示名を `X-Forwarded-User` で渡し、APIの待ち受けを外部に直接公開しないでください。
+`TR_USERINFO_URL` を設定した場合だけ、ID または表示名が無い Bearer のリクエストの `sub` と表示名を
 IdPのuserinfoから引きます（[SPEC 5章](SPEC.md#5-サーバーの-api)）。
 `/api/translate` はSSEで応答するため、nginxなどのプロキシでbufferingを無効にします。
 

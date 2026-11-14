@@ -149,6 +149,30 @@ class WorkerApiTest(unittest.TestCase):
         )
         self.assertEqual(mock.call("/api/worker/ping", {"active": []}, secret=secret)[0], 401)
 
+    def test_owner_rename_and_reused_username(self):
+        subject = "3f74d133-76e0-4f89-b919-2006805d5304"
+        other = "24e7ca0d-0070-4cf5-b26e-d05fd1658714"
+        mock = MockWorker(f"http://127.0.0.1:{self.app.server_port}")
+        path = "/api/worker/mine"
+        self.assertEqual(mock.call(path, method="GET", username="alice")[0], 401)
+        status, worker = mock.call(
+            "/api/worker/register", {"terms_version": 1}, subject, username="alice"
+        )
+        self.assertEqual(status, 200)
+        status, listing = mock.call(path, owner=subject, method="GET", username="renamed")
+        self.assertEqual(status, 200)
+        self.assertEqual(listing["workers"][0]["worker_id"], worker["worker_id"])
+        self.assertEqual(
+            mock.call(path, owner=other, method="GET", username="alice"),
+            (200, {"workers": []}),
+        )
+        self.hub.registry.revoke_owner(subject)
+        self.assertEqual(mock.call(path, owner=subject, method="GET", username="renamed")[0], 403)
+        self.assertEqual(mock.call(path, owner=other, method="GET", username="alice")[0], 200)
+        self.assertEqual(
+            mock.call(path, owner=other, method="GET", secret=worker["secret"])[0], 401
+        )
+
     def test_revocation_wakes_waiting_poll_within_one_second(self):
         self.hub.poll_seconds = 10
         for owner_revocation, owner in ((False, "revoke-worker"), (True, "revoke-owner")):

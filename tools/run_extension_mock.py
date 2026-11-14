@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Chrome 拡張の開発用に、モック・翻訳サーバー・認証プロキシの代わりをまとめて起動する。
 
-認証プロキシの代わりは 127.0.0.1 だけで待ち受け、開発用の利用者名を X-Forwarded-User に付けて
+認証プロキシの代わりは 127.0.0.1 だけで待ち受け、開発用の利用者 ID と表示名を付けて
 翻訳サーバーへ中継する。拡張の設定のサーバーURLには表示された URL を入れる。開発の端末でだけ使う。
 """
 
@@ -54,9 +54,12 @@ class DevProxy(BaseHTTPRequestHandler):
         headers = {
             k: v
             for k, v in self.headers.items()
-            if k.lower() not in HOP_BY_HOP | {"host", "x-forwarded-user", "content-length"}
+            if k.lower()
+            not in HOP_BY_HOP
+            | {"host", "x-forwarded-user", "x-forwarded-user-id", "content-length"}
         }
         # 本物の認証プロキシが検証した利用者名の代わり
+        headers["X-Forwarded-User-Id"] = DEV_USER
         headers["X-Forwarded-User"] = DEV_USER
         conn = http.client.HTTPConnection("127.0.0.1", SERVER_PORT, timeout=600)
         try:

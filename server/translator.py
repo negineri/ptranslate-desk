@@ -8,11 +8,11 @@
   動かす llama-server の /v1/completions) にストリーミングで投げ、届いた分を Server-Sent Events で返す。
   PLaMo は指示に従わない翻訳専用のモデルなので、プロンプトに指示の文を入れない
 - 待っている間も 15 秒ごとにコメント行を送る (Cloudflare は 100 秒応答の無い接続を切る)
-- 利用者は前段の認証プロキシ (oauth2-proxy など) が付ける X-Forwarded-User で区別する。
+- 利用者は前段の認証プロキシ (oauth2-proxy など) が付ける X-Forwarded-User-Id (OIDC sub) で区別する。
   OIDC の認証は前段で行う。匿名を有効にした場合は仲介が署名した資格を検証する。
   待ち受けは前段からしか届かない場所 (127.0.0.1 など) にする。
-  TR_USERINFO_URL を設定したときは、X-Forwarded-User が無く前段が検証した Bearer だけがあれば、
-  IdP の userinfo から preferred_username を引く (access token にユーザー名が入らない IdP 向け)
+  TR_USERINFO_URL を設定したときは、X-Forwarded-User-Id が無く前段が検証した Bearer だけがあれば、
+  IdP の userinfo から sub と preferred_username を引く (access token にユーザー名が入らない IdP 向け)
   原文と訳はログにも残さない
 
 Python の標準ライブラリだけを使う。
@@ -102,7 +102,7 @@ MAX_ACTIVE_PER_USER = env_int("TR_MAX_ACTIVE_PER_USER", 2)
 UPSTREAM_TIMEOUT = env_int("TR_UPSTREAM_TIMEOUT", 600)
 # 待っている間に送るコメント行の間隔 (Cloudflare は 100 秒応答の無い接続を切る)
 HEARTBEAT_SECONDS = env_int("TR_HEARTBEAT_SECONDS", 15)
-# IdP の userinfo (OIDC)。前段が X-Forwarded-User を付けず Bearer だけを通したとき、ここで利用者名を引く。
+# IdP の userinfo (OIDC)。前段が検証した Bearer で、足りない sub と表示名を補う。
 # Pocket ID のように access token にユーザー名が入らない IdP 向け。空なら使わない
 USERINFO_URL = os.environ.get("TR_USERINFO_URL", "")
 # userinfo の結果を覚えておく秒数の上限 (token の期限が先に来ればそこまで)
@@ -171,7 +171,7 @@ LANGUAGES = [
 LANGUAGE_CODES = {code for code, _ in LANGUAGES}
 FORMS = {"plain", "polite"}  # 訳す先が日本語のときの文体 (だ・である / です・ます)
 
-USER_RE = re.compile(r"^[a-z_][a-z0-9_.-]{0,63}$")
+USER_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,255}")
 # PFML3 の区切りのトークン。利用者の文に含まれていたら断る (プロンプトの形が崩れる)
 RESERVED = "<|plamo:"
 
@@ -184,7 +184,7 @@ active_lock = threading.Lock()
 active: dict[str, int] = {}
 page_active: dict[str, int] = {}
 userinfo_lock = threading.Lock()
-userinfo_cache: dict[str, tuple[str, float]] = {}  # token の SHA-256 → (利用者名, 期限 (monotonic))
+userinfo_cache: dict[str, tuple[tuple[str, str], float]] = {}
 
 
 class HttpError(Exception):
@@ -242,7 +242,7 @@ def verify_anonymous(token):
     expected = hmac.new(TOKEN_KEY, payload.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected) or int(payload.split(".")[1]) <= time.time():
         raise HttpError(401, "匿名の資格が無効です。取り直してください")
-    return "anonymous:" + payload.split(".")[0][4:]  # 登録済みの利用者名と衝突させない。
+    return "anonymous:" + payload.split(".")[0][4:]  # 登録済みの sub と衝突させない。
 
 
 def token_expiry(token: str) -> float | None:
@@ -255,8 +255,12 @@ def token_expiry(token: str) -> float | None:
         return None
 
 
-def user_from_userinfo(token: str) -> str:
-    """Bearer の token で IdP の userinfo を呼び、preferred_username を返す。結果はしばらく覚える。"""
+def display_name(value):
+    return value if isinstance(value, str) and 0 < len(value) <= 255 and value.isprintable() else ""
+
+
+def user_from_userinfo(token: str) -> tuple[str, str]:
+    """Bearer の token で IdP の userinfo を呼び、sub と表示名を返す。結果はしばらく覚える。"""
     key = hashlib.sha256(token.encode()).hexdigest()
     now = time.monotonic()
     with userinfo_lock:
@@ -282,11 +286,14 @@ def user_from_userinfo(token: str) -> str:
     if resp.status != 200:
         raise HttpError(401, "ログインしていません")
     try:
-        user = json.loads(body).get("preferred_username") or ""
+        claims = json.loads(body)
+        subject = claims.get("sub")
+        name = claims.get("preferred_username")
     except (ValueError, AttributeError):
-        user = ""
-    if not isinstance(user, str) or not USER_RE.match(user):
+        subject = name = None
+    if not isinstance(subject, str) or not USER_ID_RE.fullmatch(subject):
         raise HttpError(401, "ログインしていません")
+    user = subject, display_name(name)
     ttl = USERINFO_CACHE_SECONDS
     exp = token_expiry(token)
     if exp is not None:
@@ -852,17 +859,26 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # アクセスログは nginx が取る
         pass
 
-    def user(self) -> str:
-        user = self.headers.get("X-Forwarded-User", "")
+    def forwarded_subject(self) -> str | None:
+        values = self.headers.get_all("X-Forwarded-User-Id", [])
+        if not values:
+            return None
+        if len(values) != 1 or not USER_ID_RE.fullmatch(values[0]):
+            raise HttpError(401, "ログインしていません")
+        return values[0]
+
+    def user(self) -> tuple[str, str]:
+        subject = self.forwarded_subject()
         self.tier = "registered"
         scheme, _, token = self.headers.get("Authorization", "").partition(" ")
         token = token.strip()
         if scheme.lower() == "bearer" and token.startswith("ptw_"):
             raise HttpError(401, "ワーカーの資格では利用できません")
-        if not user and scheme.lower() == "bearer" and token.startswith("pta_"):
+        anonymous_bearer = scheme.lower() == "bearer" and token.startswith("pta_")
+        if subject is None and anonymous_bearer:
             self.tier = "anonymous"
-            return verify_anonymous(token)
-        if not user and not self.headers.get("Authorization") and self.headers.get("Cookie"):
+            return verify_anonymous(token), ""
+        if subject is None and not self.headers.get("Authorization") and self.headers.get("Cookie"):
             cookies = SimpleCookie()
             try:
                 cookies.load(self.headers["Cookie"])
@@ -871,13 +887,22 @@ class Handler(BaseHTTPRequestHandler):
             if "__Host-pta" in cookies:
                 self.check_origin()
                 self.tier = "anonymous"
-                return verify_anonymous(cookies["__Host-pta"].value)
-        if not user and USERINFO_URL:
-            if scheme.lower() == "bearer" and token.strip():
-                return user_from_userinfo(token.strip())
-        if not USER_RE.match(user):
+                return verify_anonymous(cookies["__Host-pta"].value), ""
+        name = display_name(self.headers.get("X-Forwarded-User"))
+        if (
+            USERINFO_URL
+            and scheme.lower() == "bearer"
+            and token
+            and not anonymous_bearer
+            and (subject is None or not name)
+        ):
+            verified_subject, name = user_from_userinfo(token)
+            if subject is not None and subject != verified_subject:
+                raise HttpError(401, "ログインしていません")
+            return verified_subject, name
+        if subject is None:
             raise HttpError(401, "ログインしていません")
-        return user
+        return subject, name
 
     def check_origin(self):
         origin = self.headers.get("Origin")
@@ -994,12 +1019,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.worker_api(method, path)
             if method == "POST" and path == "/api/anonymous":
                 return self.issue_anonymous()
-            user = self.user()
+            user, name = self.user()
             if method == "GET" and path == "/api/config":
                 return self.send_json(
                     200,
                     {
-                        "user": "" if self.tier == "anonymous" else user,
+                        "user": name,
                         "pool": (
                             {"kind": "volunteer", "consent_version": CONSENT_VERSION}
                             if POOL_KIND == "volunteer"
@@ -1099,8 +1124,11 @@ class Handler(BaseHTTPRequestHandler):
                 result = hub.ping(secret, body)
             return self.send_json(200, result)
         # 管理APIは前段が検証したOIDCのヘッダーだけを受ける。
-        owner = self.headers.get("X-Forwarded-User", "")
-        if not USER_RE.fullmatch(owner):
+        owner = self.forwarded_subject()
+        scheme, _, token = self.headers.get("Authorization", "").partition(" ")
+        if owner is None or (
+            scheme.lower() == "bearer" and token.strip().startswith(("pta_", "ptw_"))
+        ):
             raise HttpError(401, "アカウントへのログインが必要です")
         if method == "POST" and path == "/api/worker/register":
             body = self.read_json_body(max_bytes=65536)
@@ -1276,8 +1304,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 # 原文と訳は残さない (長さと言語だけ)
                 log.info(
-                    "user=%s %s->%s chars=%d out=%d glossary=%d history=%d finish=%s seconds=%.1f",
-                    "anonymous" if tier == "anonymous" else user,
+                    "tier=%s %s->%s chars=%d out=%d glossary=%d history=%d finish=%s seconds=%.1f",
+                    tier,
                     req["source"] or "auto",
                     req["target"],
                     len(req["text"]),
@@ -1317,13 +1345,32 @@ class WorkerRegistry:
         self.lock = threading.RLock()
         self.per_owner = per_owner
         self.revocation_callback = None
+        try:
+            self.initialize()
+        except Exception:
+            self.db.close()
+            raise
+
+    def initialize(self):
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS owners (name TEXT PRIMARY KEY, terms INTEGER, agreed TEXT, revoked INTEGER NOT NULL DEFAULT 0)"
             )
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, owner TEXT NOT NULL, digest TEXT UNIQUE NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL)"
             )
+            version = self.db.execute("PRAGMA user_version").fetchone()[0]
+            if version == 0:
+                if self.db.execute(
+                    "SELECT 1 FROM owners UNION ALL SELECT 1 FROM workers LIMIT 1"
+                ).fetchone():
+                    raise ValueError(
+                        "ユーザー名で保存されたワーカー状態です。OIDC sub への移行が必要です"
+                    )
+                self.db.execute("PRAGMA user_version=1")
+            elif version != 1:
+                raise ValueError("ワーカー状態の版に対応していません")
             if "quarantined" not in {
                 row[1] for row in self.db.execute("PRAGMA table_info(owners)")
             }:
