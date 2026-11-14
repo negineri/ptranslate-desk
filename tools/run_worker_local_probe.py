@@ -332,7 +332,7 @@ def translate(server, *, text=TEXT, cancel=False, stop_parent=None):
             ),
             {
                 "Content-Type": "application/json",
-                "X-Forwarded-User": "probe-reader",
+                "X-Forwarded-User-Id": "probe-reader",
                 "X-Test-Country": "JP",
                 "X-Test-IP": "198.51.100.1",
             },

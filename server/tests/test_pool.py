@@ -207,7 +207,7 @@ class PoolApiTest(unittest.TestCase):
                 "POST",
                 "/api/translate",
                 json.dumps(body),
-                {"X-Forwarded-User": "alice", "Content-Type": "application/json"},
+                {"X-Forwarded-User-Id": "alice", "Content-Type": "application/json"},
             )
             return conn.getresponse()
 
@@ -253,7 +253,7 @@ class PoolApiTest(unittest.TestCase):
                 "POST",
                 "/api/translate",
                 json.dumps({"text": "test", "target_lang": "ja", "purpose": purpose}),
-                {"X-Forwarded-User": user, "Content-Type": "application/json"},
+                {"X-Forwarded-User-Id": user, "Content-Type": "application/json"},
             )
             return conn.getresponse()
 

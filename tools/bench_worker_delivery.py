@@ -238,7 +238,7 @@ def first_fragment(server, index=0):
             json.dumps({**INPUT, "consent": tr.CONSENT_VERSION}),
             {
                 "Content-Type": "application/json",
-                "X-Forwarded-User": f"bench-reader-{index}",
+                "X-Forwarded-User-Id": f"bench-reader-{index}",
                 "X-Test-Country": "JP",
                 "X-Test-IP": "198.51.100.1",
             },

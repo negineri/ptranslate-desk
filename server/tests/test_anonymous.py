@@ -132,7 +132,7 @@ class AnonymousTest(unittest.TestCase):
         response, data = self.call(
             "GET",
             "/api/config",
-            headers={"Authorization": f"Bearer {token}", "X-Forwarded-User": "alice"},
+            headers={"Authorization": f"Bearer {token}", "X-Forwarded-User-Id": "alice"},
         )
         self.assertEqual(json.loads(data)["tier"], "registered")
 
@@ -212,11 +212,26 @@ class AnonymousTest(unittest.TestCase):
             "POST",
             "/api/translate",
             {"text": "test", "target_lang": "ja"},
-            {"X-Forwarded-User": "new-user"},
+            {"X-Forwarded-User-Id": "new-user"},
         )
         self.assertEqual(response.status, 200)
         self.assertIn(b'"done": true', data)
         self.assertIn("new-user", self.app.character_limits_registered.entries)
+
+    def test_registered_limits_follow_subject_across_rename(self):
+        subject = "3f74d133-76e0-4f89-b919-2006805d5304"
+        other = "24e7ca0d-0070-4cf5-b26e-d05fd1658714"
+        self.app.character_limits_registered.charge(subject, 600000, 600000)
+        for user_id, name, expected in ((subject, "new-name", 429), (other, "old-name", 200)):
+            headers = {"X-Forwarded-User-Id": user_id, "X-Forwarded-User": name}
+            response, data = self.call("GET", "/api/config", headers=headers)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(data)["user"], name)
+            self.assertNotIn(user_id.encode(), data)
+            response, _ = self.call(
+                "POST", "/api/translate", {"text": "test", "target_lang": "ja"}, headers
+            )
+            self.assertEqual(response.status, expected)
 
     def test_internal_error_logs_type_and_safe_path_only(self):
         with (
@@ -284,7 +299,7 @@ class AnonymousTest(unittest.TestCase):
 
     def test_bad_origin_configuration_and_identity_namespace(self):
         token = self.issue()
-        self.assertFalse(tr.USER_RE.fullmatch(tr.verify_anonymous(token)))
+        self.assertFalse(tr.USER_ID_RE.fullmatch(tr.verify_anonymous(token)))
         del self.app.pool  # 起動時と同じく、設定を未検証の状態で確かめる。
         for url in (
             "http://translate.example.com",

@@ -171,6 +171,21 @@ class WorkerHealthTest(unittest.TestCase):
         self.addCleanup(self.registry.close)
         self.assertTrue(self.registry.authenticate(data["secret"])["owner_quarantined"])
 
+    def test_legacy_ownership_is_not_implicitly_inherited(self):
+        path = Path(self.directory.name) / "legacy-owned.sqlite"
+        with closing(tr.sqlite3.connect(path)) as legacy, legacy:
+            legacy.execute(
+                "CREATE TABLE owners (name TEXT PRIMARY KEY, terms INTEGER, agreed TEXT, revoked INTEGER NOT NULL DEFAULT 0)"
+            )
+            legacy.execute("INSERT INTO owners(name, revoked) VALUES ('alice', 1)")
+        with self.assertRaisesRegex(ValueError, "OIDC sub"):
+            tr.WorkerRegistry(path)
+        with closing(tr.sqlite3.connect(path)) as legacy:
+            self.assertEqual(
+                legacy.execute("SELECT name,revoked FROM owners").fetchall(), [("alice", 1)]
+            )
+            self.assertEqual(legacy.execute("PRAGMA user_version").fetchone(), (0,))
+
 
 class CanaryApiTest(unittest.TestCase):
     def setUp(self):

@@ -42,7 +42,7 @@ class VolunteerTest(unittest.TestCase):
             json.dumps(body) if body is not None else None,
             {
                 "Content-Type": "application/json",
-                "X-Forwarded-User": "test-reader",
+                "X-Forwarded-User-Id": "test-reader",
                 "X-Test-Country": "JP",
                 "X-Test-IP": "198.51.100.11",
             },

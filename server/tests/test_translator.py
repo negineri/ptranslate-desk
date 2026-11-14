@@ -154,6 +154,7 @@ class ServerTest(unittest.TestCase):
         conn = http.client.HTTPConnection("127.0.0.1", self.app.server_address[1], timeout=30)
         headers = {"Content-Type": ctype}
         if user:
+            headers["X-Forwarded-User-Id"] = user
             headers["X-Forwarded-User"] = user
         conn.request(
             method,
@@ -426,7 +427,9 @@ class UserinfoTest(unittest.TestCase):
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
                 calls.append(token)
                 user = users.get(token) or ("dave" if token.startswith("expired.") else None)
-                body = json.dumps({"sub": "x", "preferred_username": user}).encode()
+                body = json.dumps(
+                    {"sub": None if token == "bad-name" else "x", "preferred_username": user}
+                ).encode()
                 self.send_response(200 if user else 401)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -472,15 +475,28 @@ class UserinfoTest(unittest.TestCase):
         self.assertEqual(self.calls, [self.good, "opaque"])
 
     def test_user_header_wins_and_bad_tokens_are_rejected(self):
-        status, body = self.config({"X-Forwarded-User": "alice", "Authorization": "Bearer opaque"})
-        self.assertEqual((status, body.get("user")), (200, "alice"))
+        status, body = self.config(
+            {
+                "X-Forwarded-User-Id": "3f74d133-76e0-4f89-b919-2006805d5304",
+                "X-Forwarded-User": "Alice",
+                "Authorization": "Bearer opaque",
+            }
+        )
+        self.assertEqual((status, body.get("user")), (200, "Alice"))
         self.assertEqual(self.calls, [])
         self.assertEqual(self.config({"Authorization": "Bearer unknown"})[0], 401)
         self.assertEqual(self.config({"Authorization": "Bearer bad-name"})[0], 401)
+        self.assertEqual(self.config({"X-Forwarded-User": "alice"})[0], 401)
         self.assertEqual(self.config({"Authorization": "Basic opaque"})[0], 401)
-        # 不正な X-Forwarded-User は userinfo に頼らず断る
-        status, _ = self.config({"X-Forwarded-User": "Bad User", "Authorization": "Bearer opaque"})
+        # 不正な sub は userinfo に頼らず断る
+        status, _ = self.config({"X-Forwarded-User-Id": "Bad ID", "Authorization": "Bearer opaque"})
         self.assertEqual(status, 401)
+
+    def test_userinfo_display_name_requires_matching_forwarded_subject(self):
+        headers = {"X-Forwarded-User-Id": "x", "Authorization": "Bearer opaque"}
+        status, body = self.config(headers)
+        self.assertEqual((status, body.get("user")), (200, "carol"))
+        self.assertEqual(self.config({**headers, "X-Forwarded-User-Id": "other"})[0], 401)
 
     def test_expired_tokens_are_not_cached_and_userinfo_is_off_by_default(self):
         token = "expired." + jwt(time.time() - 10).split(".", 1)[1]

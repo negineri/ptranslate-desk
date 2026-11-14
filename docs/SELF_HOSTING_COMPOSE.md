@@ -125,7 +125,7 @@ Macもtailnetに入っている必要があります。ログインするとブ�
 
 Pocket IDの違いで、次の点がAuthentikの構成と変わります。
 
-- Pocket IDのaccess tokenにはユーザー名が入らないので、サーバーがIdPのuserinfoから利用者名を引きます
+- Pocket IDのaccess tokenにはユーザー名が入らないので、サーバーがIdPのuserinfoから `sub` と表示名を取得します
   （compose.ymlの `TR_USERINFO_URL`）
 - Pocket IDにはrefresh tokenを無効にするURL（revoke）がありません。ログアウトは端末から消すだけで、
   サーバー側のrefresh tokenは有効期限（30日）まで残ります。端末をなくしたときは、本人がPocket IDの
@@ -216,7 +216,7 @@ GGUFを手でダウンロードしてボリュームに置き、`-m` で指定�
 | `https://<PT_DOMAIN>/` が開けない | 端末がtailnetに入っているか、`PT_DOMAIN` が `tailscale status` の名前と同じか、HTTPS Certificatesが有効か |
 | ログイン後に「不明なエラーが発生しました」 | 利用者がグループ `translate-users` に入っているか |
 | oauth2-proxyが再起動を繰り返す | `.env` の `WEB_CLIENT_SECRET` が空でないか（`docker compose run --rm setup` を先に流す） |
-| デスクトップで「ログインしていません」 | サーバーのイメージがv0.3.0以降か（`TR_USERINFO_URL` に対応）、利用者名が英小文字か |
+| デスクトップで「ログインしていません」 | サーバーのイメージがv0.3.0以降か（`TR_USERINFO_URL` に対応）、前段から `sub` が届くか |
 | 訳が遅い・止まる | `docker compose logs llama-server`、メモリの空き、`LLAMA_PARALLEL` を下げる |
 
 ## 選ばなかった方法

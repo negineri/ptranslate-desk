@@ -75,7 +75,8 @@ def main() -> int:
                 raise RuntimeError("翻訳サーバーを起動できませんでした")
             try:
                 request = urllib.request.Request(
-                    "http://127.0.0.1:8002/api/config", headers={"X-Forwarded-User": "mock-desktop"}
+                    "http://127.0.0.1:8002/api/config",
+                    headers={"X-Forwarded-User-Id": "mock-desktop"},
                 )
                 with opener.open(request, timeout=1) as response:
                     if response.status == 200:

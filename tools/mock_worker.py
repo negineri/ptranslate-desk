@@ -45,15 +45,17 @@ class MockWorker:
             self.connection.close()
             self.connection = None
 
-    def call(self, path, body=None, owner=None, method="POST", secret=None):
+    def call(self, path, body=None, owner=None, method="POST", secret=None, username=None):
         headers = {
             "Content-Type": "application/json",
             "X-Test-Country": self.country,
             "X-Test-IP": self.network,
         }
         if owner:
-            headers["X-Forwarded-User"] = owner
-        if secret is not None or self.secret:
+            headers["X-Forwarded-User-Id"] = owner
+        if username is not None:
+            headers["X-Forwarded-User"] = username
+        if secret is not None or (owner is None and self.secret):
             headers["Authorization"] = "Bearer " + (self.secret if secret is None else secret)
         conn = self.connection or self.open_connection()
         try:
