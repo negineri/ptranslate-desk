@@ -93,7 +93,8 @@ def main() -> int:
                 env["PTRANSLATE_SMOKE_CONFIG"] = config
             app = subprocess.Popen([str(binary)], cwd=ROOT, env=env)
             try:
-                result = app.wait(timeout=60 if args.smoke_test else None)
+                # 画面の試験は 1 つの待ちに最大 30 秒かける。通常は 20 秒ほどで終わる。
+                result = app.wait(timeout=180 if args.smoke_test else None)
                 if args.smoke_test and result == 0:
                     if (Path(config) / "inference").exists():
                         raise RuntimeError("確認のキャンセル後にモデルの取得が始まっています")
