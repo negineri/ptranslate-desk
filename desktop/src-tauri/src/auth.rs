@@ -1,6 +1,6 @@
 //! 公開クライアントの PKCE 認証。資格情報を画面・ファイル・ログへ渡さない。
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use reqwest::{Client, Method, Response, Url};
+use reqwest::{Client, Method, Response, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -284,7 +284,18 @@ impl Auth {
             .await
             .map_err(|_| "ログインサーバーに接続できませんでした")?;
         if !response.status().is_success() {
-            return Err(LOGIN_REQUIRED.into());
+            if response.status() == StatusCode::BAD_REQUEST
+                && response
+                    .json::<Value>()
+                    .await
+                    .ok()
+                    .and_then(|body| body.get("error").and_then(Value::as_str).map(str::to_owned))
+                    .as_deref()
+                    == Some("invalid_grant")
+            {
+                return Err(LOGIN_REQUIRED.into());
+            }
+            return Err("ログインサーバーが認証を受け付けませんでした".into());
         }
         let reply: TokenReply = response
             .json()
@@ -356,6 +367,21 @@ impl Auth {
             return Err("ログインを中止しました".into());
         }
         self.install(credentials, reply, Some(&previous))
+    }
+
+    pub(crate) async fn refresh_worker_access(&self) -> Result<Option<Secret>, String> {
+        let mut credentials = self.credentials.lock().await;
+        match self.refresh_locked(&mut credentials).await {
+            Ok(()) if self.session_only() => {
+                Err("提供先の更新用の資格を保存できませんでした".into())
+            }
+            Ok(()) => Ok(credentials
+                .access
+                .as_ref()
+                .map(|access| access.value.clone())),
+            Err(error) if error == LOGIN_REQUIRED => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn forget(&self, credentials: &mut Credentials) -> Result<(), String> {

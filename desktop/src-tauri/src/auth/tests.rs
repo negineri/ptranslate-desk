@@ -37,6 +37,7 @@ struct Model {
     always_401: bool,
     html_403: bool,
     reject_refresh: bool,
+    unavailable_refresh: bool,
     bad_request: bool,
     no_revocation: bool,
 }
@@ -83,6 +84,7 @@ impl Fixture {
             always_401: false,
             html_403: false,
             reject_refresh: false,
+            unavailable_refresh: false,
             bad_request: false,
             no_revocation: false,
         }));
@@ -191,7 +193,9 @@ impl Fixture {
                                         .get("code_verifier")
                                         .is_some_and(|value| challenge(value) == model.challenge)
                             };
-                            if valid {
+                            if refresh && model.unavailable_refresh {
+                                (503, "text/plain", String::new(), String::new())
+                            } else if valid {
                                 model.access = jwt();
                                 model.refresh = random_secret().unwrap();
                                 (200, "application/json", json!({"access_token": model.access.as_str(),
@@ -672,4 +676,28 @@ async fn expired_anonymous_credential_is_renewed_before_first_translation() {
     let model = fixture.state.lock().unwrap();
     assert_eq!(model.anonymous_issues, 1);
     assert_eq!(model.anonymous_translations, 1);
+}
+
+#[tokio::test]
+async fn worker_refresh_keeps_credentials_during_an_idp_outage() {
+    let fixture = Fixture::new().await;
+    let auth = fixture.auth();
+    fixture.login(&auth).await;
+    let previous = fixture.vault.load().unwrap().unwrap();
+    fixture.state.lock().unwrap().unavailable_refresh = true;
+    assert!(auth.refresh_worker_access().await.is_err());
+    assert_eq!(
+        fixture.vault.load().unwrap().unwrap().as_str(),
+        previous.as_str()
+    );
+
+    fixture.state.lock().unwrap().unavailable_refresh = false;
+    assert!(auth.refresh_worker_access().await.unwrap().is_some());
+    assert_ne!(
+        fixture.vault.load().unwrap().unwrap().as_str(),
+        previous.as_str()
+    );
+
+    fixture.state.lock().unwrap().reject_refresh = true;
+    assert!(auth.refresh_worker_access().await.unwrap().is_none());
 }

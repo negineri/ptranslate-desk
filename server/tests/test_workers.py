@@ -149,6 +149,40 @@ class WorkerApiTest(unittest.TestCase):
         )
         self.assertEqual(mock.call("/api/worker/ping", {"active": []}, secret=secret)[0], 401)
 
+    def test_worker_expiry_is_capped_by_trusted_authorization(self):
+        def call(route, payload, expiration=None):
+            conn = http.client.HTTPConnection("127.0.0.1", self.app.server_port, timeout=3)
+            try:
+                headers = {
+                    "Content-Type": "application/json",
+                    "X-Forwarded-User-Id": "alice",
+                    "X-Test-Country": "JP",
+                }
+                if expiration is not None:
+                    headers["X-Test-Authorization-Expiry"] = str(expiration)
+                conn.request("POST", route, json.dumps(payload), headers)
+                response = conn.getresponse()
+                return response.status, json.load(response)
+            finally:
+                conn.close()
+
+        now = int(time.time())
+        with patch.multiple(
+            tr, WORKER_TTL=30 * 86400, WORKER_AUTH_EXPIRY_HEADER="X-Test-Authorization-Expiry"
+        ):
+            with patch.object(tr.time, "time", return_value=now):
+                self.assertEqual(call("/api/worker/register", {"terms_version": 1})[0], 403)
+                self.assertEqual(call("/api/worker/register", {"terms_version": 1}, now)[0], 403)
+                code, worker = call("/api/worker/register", {"terms_version": 1}, now + 3600)
+                self.assertEqual((code, worker["expires_in"]), (200, 3600))
+                code, renewal = call(
+                    "/api/worker/renew", {"worker_id": worker["worker_id"]}, now + 90 * 86400
+                )
+                self.assertEqual((code, renewal["expires_in"]), (200, 30 * 86400))
+            with patch.object(tr.time, "time", return_value=now + 30 * 86400):
+                with self.assertRaises(tr.HttpError):
+                    self.hub.registry.authenticate(worker["secret"])
+
     def test_owner_rename_and_reused_username(self):
         subject = "3f74d133-76e0-4f89-b919-2006805d5304"
         other = "24e7ca0d-0070-4cf5-b26e-d05fd1658714"
