@@ -645,6 +645,35 @@ python3 tools/volunteer_worker.py --state ~/.local/state/ptranslate-worker run \
 一時的な障害では有効期限内に再試行する。認可の失効・期限切れを IdP が返したら受付を停止し、再認可を案内する。
 Linux の `run` は SIGTERM を受けて処理を停止する。監視サービスから起動する場合は、既存の状態を使って同じ `run` を実行する。
 
+#### 別の Linux サーバーで推論する
+
+ワーカーの CLI から、専用の単体モデルを動かす `llama-server` の HTTPS オリジンを指定できる。
+推論用の API キーはファイルに置く。`--engine-url` を使う場合はワーカー側にモデルファイルを置く必要はない。
+
+```sh
+python3 tools/volunteer_worker.py --state ~/.local/state/ptranslate-worker run \
+  --binary /usr/bin/ptranslate-desk --engine-url https://gpu.example.com \
+  --engine-key-file /path/to/engine-key
+```
+
+- 推論側は既定で llama.cpp `b11804`（コミット `c7fc5094179bf8a9c73c18593db714f8da41a402`）と承認済みの
+  `plamo-3-translate-2b-Q4_K_M.gguf` を使う。1枠あたりのコンテキストを32768以上にする
+  （1枠なら `--parallel 1 --ctx-size 32768`）。
+- パッチ済みのビルドを使う場合は、`--engine-url` とあわせて `--allow-engine-revision-mismatch` を指定すると、
+  リビジョンの不一致を許可する。ビルド情報の取得、モデル名・SHA-256・コンテキスト長の照合、および仲介の検疫は引き続き行う。
+- CLI は受付前に `GET /props` のビルド情報・モデルファイル名・コンテキスト長を照合する。さらに、推論側の
+  HTTPS リバースプロキシは、起動に使った GGUF から `sha256sum` などで事前に求めた小文字64桁の
+  SHA-256 を `X-PTranslate-Model-SHA256` ヘッダーとして `GET /props` と
+  `POST /v1/completions` の両方の成功応答に付ける。同名の上流ヘッダーは置き換える。
+  両方の経路は同じ固定の `llama-server` へ送る。モデル更新時はワーカーを止めてから、
+  推論サーバーとヘッダーを更新する。
+- 受付前の照合に失敗した間はジョブを取りに行かない。照合時に設定の不一致が分かった場合は終了する。
+  配信を中継するときもダイジェストを確認し、不一致の応答を捨てて次の受付を停止する。
+- SHA-256 は推論サーバーの運営者が提示した値であり、CLI がリモートのファイルを直接測定するわけではない。
+  自分が管理する推論先を使い、モデルファイルとプロキシ設定を固定する。検疫の判定は通常どおり仲介が行う。
+- 推論先にも利用者の原文と訳が渡る。国内に置き、推論サーバーと前段で原文・訳を記録せず、
+  ストリーミング応答をバッファリングしない。接続先の証明書は CLI の実行環境で検証できるようにする。
+
 ## 12. ログと保存
 
 ### 12.1 残さないもの

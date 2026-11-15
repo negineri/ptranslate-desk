@@ -2,6 +2,9 @@
 
 import contextlib
 import io
+import http.client
+import json
+from email.message import Message
 import sys
 import tempfile
 import unittest
@@ -99,3 +102,111 @@ class WorkerCliTest(unittest.TestCase):
             with self.assertRaises(cli.Failure):
                 cli.begin_configuration("https://translate.example.com")
             self.assertEqual(mock.call_count, 2)
+
+    def test_remote_metadata_requires_the_release_model_digest_and_context(self):
+        engine = cli.RemoteEngine("https://gpu.example.com", "engine-key")
+        good = {
+            "build_info": "b11804-c7fc50941",
+            "model_path": f"/models/{cli.MODEL_FILE}",
+            "default_generation_settings": {"n_ctx": 32768},
+        }
+        failures = [
+            ({**good, "build_info": "b11804-abcdef0"}, cli.MODEL_SHA),
+            ({**good, "build_info": "b12000-c7fc50941"}, cli.MODEL_SHA),
+            ({**good, "model_path": "/models/other.gguf"}, cli.MODEL_SHA),
+            ({**good, "default_generation_settings": {"n_ctx": 8192}}, cli.MODEL_SHA),
+            (good, None),
+            (good, "a" * 64),
+        ]
+        for props, digest in failures:
+            with patch.object(
+                engine, "open", return_value=remote_response(json.dumps(props).encode(), digest)
+            ):
+                with self.assertRaises(cli.EngineMismatch):
+                    engine.verify()
+        with patch.object(
+            engine, "open", return_value=remote_response(json.dumps(good).encode(), cli.MODEL_SHA)
+        ):
+            engine.verify()
+
+    def test_remote_revision_override_preserves_metadata_and_model_checks(self):
+        engine = cli.RemoteEngine(
+            "https://gpu.example.com", "engine-key", allow_revision_mismatch=True
+        )
+        props = {
+            "build_info": "b11804-abcdef0",
+            "model_path": f"/models/{cli.MODEL_FILE}",
+            "default_generation_settings": {"n_ctx": 32768},
+        }
+        for override, digest, valid in (
+            ({}, cli.MODEL_SHA, True),
+            ({}, None, False),
+            ({"build_info": ""}, cli.MODEL_SHA, False),
+            ({"model_path": "/models/other.gguf"}, cli.MODEL_SHA, False),
+            ({"default_generation_settings": {"n_ctx": 8192}}, cli.MODEL_SHA, False),
+        ):
+            response = remote_response(json.dumps({**props, **override}).encode(), digest)
+            with patch.object(engine, "open", return_value=response):
+                if valid:
+                    engine.verify()
+                else:
+                    with self.assertRaises(cli.EngineMismatch):
+                        engine.verify()
+
+    def test_remote_relay_accepts_only_completion_and_checks_response_digest(self):
+        engine = cli.RemoteEngine("https://gpu.example.com", "engine-key")
+        sse = b'data: {"choices":[]}\n\ndata: [DONE]\n\n'
+        with engine.relay() as (port, key):
+
+            def complete(route, secret):
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+                try:
+                    connection.request("POST", route, b"{}", {"Authorization": f"Bearer {secret}"})
+                    response = connection.getresponse()
+                    return response.status, response.read()
+                finally:
+                    connection.close()
+
+            with patch.object(
+                engine, "open", return_value=remote_response(sse, cli.MODEL_SHA)
+            ) as remote:
+                self.assertEqual(complete("/props", key)[0], 404)
+                self.assertEqual(complete("/v1/completions", "wrong-key")[0], 401)
+                remote.assert_not_called()
+                self.assertEqual(complete("/v1/completions", key), (200, sse))
+                remote.assert_called_once_with("/v1/completions", b"{}", timeout=30)
+            with patch.object(engine, "open", return_value=remote_response(sse, None)):
+                self.assertEqual(complete("/v1/completions", key)[0], 502)
+            with self.assertRaises(cli.EngineMismatch):
+                engine.verify()
+
+    def test_remote_mismatch_prevents_participation_before_contacting_broker(self):
+        args = type(
+            "Args",
+            (),
+            {
+                "engine_url": "https://gpu.example.com",
+                "model": None,
+                "allow_engine_revision_mismatch": False,
+            },
+        )()
+        with tempfile.TemporaryDirectory() as directory:
+            args.engine_key_file = Path(directory) / "key"
+            args.engine_key_file.write_text("test-engine-token")
+            with (
+                patch.object(cli.RemoteEngine, "verify", side_effect=cli.EngineMismatch("model")),
+                patch.object(cli, "participate") as participate,
+            ):
+                with self.assertRaises(cli.EngineMismatch):
+                    cli.run(args, None, {"refresh_token": "test-refresh"})
+                participate.assert_not_called()
+
+
+def remote_response(data, digest):
+    response = io.BytesIO(data)
+    response.headers = Message()
+    response.headers["Content-Type"] = "text/event-stream"
+    if digest is not None:
+        response.headers[cli.MODEL_DIGEST_HEADER] = digest
+    response.status = 200
+    return response
