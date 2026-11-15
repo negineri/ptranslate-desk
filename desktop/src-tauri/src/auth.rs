@@ -906,7 +906,8 @@ pub(crate) fn open_browser(url: &Url) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(url.as_str()).spawn();
     #[cfg(target_os = "linux")]
-    let result = std::process::Command::new("xdg-open")
+    // AppImage の同梱ライブラリをブラウザーに読ませない。
+    let result = crate::host_env::use_host_env(&mut std::process::Command::new("xdg-open"))
         .arg(url.as_str())
         .spawn();
     #[cfg(target_os = "windows")]
