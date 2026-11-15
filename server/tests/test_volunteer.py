@@ -33,7 +33,7 @@ class VolunteerTest(unittest.TestCase):
         self.pool = self.helper.app.get_pool()
         self.checks.start()
 
-    def request(self, body=None, method="POST", path="/api/translate"):
+    def request(self, body=None, method="POST", path="/api/translate", headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.helper.app.server_port, timeout=5)
         self.addCleanup(conn.close)
         conn.request(
@@ -45,6 +45,7 @@ class VolunteerTest(unittest.TestCase):
                 "X-Forwarded-User-Id": "test-reader",
                 "X-Test-Country": "JP",
                 "X-Test-IP": "198.51.100.11",
+                **(headers or {}),
             },
         )
         return conn, conn.getresponse()
@@ -120,6 +121,16 @@ class VolunteerTest(unittest.TestCase):
         state = self.helper.state.read_bytes()
         for value in ("test-reader", text, "192.0.2", mock.secret):
             self.assertNotIn(value.encode(), state)
+        summary = self.helper.hub.registry.account("owner-a")["total"]
+        self.assertEqual(
+            summary,
+            {
+                "jobs": 1,
+                "days": 1,
+                "input_tokens": tr.estimate_tokens(assignment["input"]["text"]),
+                "output_tokens": tr.estimate_tokens(text),
+            },
+        )
 
     def test_changed_url_is_quarantined_by_reference_audit(self):
         mock, worker = self.qualified("owner-a", "192.0.2.1")
@@ -139,6 +150,7 @@ class VolunteerTest(unittest.TestCase):
                 lambda: self.helper.hub.registry.info(worker["id"])["state"] == "quarantine"
             )
         self.assertEqual(self.fixture.stats["requests"], 1)
+        self.assertEqual(self.helper.hub.registry.account("owner-a")["total"]["jobs"], 0)
 
     def test_matching_reference_passes_even_with_few_japanese_characters(self):
         source = (
@@ -193,6 +205,7 @@ class VolunteerTest(unittest.TestCase):
         self.helper.wait(lambda: not self.helper.hub.assignments)
         aid = assignment["assignment_id"]
         self.assertEqual(mock.call("/api/worker/ping", {"active": [aid]})[1], {"stop": [aid]})
+        self.assertEqual(self.helper.hub.registry.account("owner-a")["total"]["jobs"], 0)
 
     def test_retry_uses_another_worker_and_reports_failure_after_text(self):
         pair = [
@@ -215,6 +228,8 @@ class VolunteerTest(unittest.TestCase):
         pair[second][0].result(aid, 1, error="engine")
         self.assertIn(b'"code": "worker_failed"', response.read())
         self.assertEqual(sum(bucket.total() for bucket in self.pool.assignment_minutes.values()), 2)
+        for _, worker in pair:
+            self.assertEqual(self.helper.hub.registry.account(worker["owner"])["total"]["jobs"], 0)
 
     def test_spread_uses_network_and_owner_as_one_group(self):
         now = time.monotonic()

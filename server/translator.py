@@ -48,7 +48,9 @@ from pathlib import Path
 from dataclasses import dataclass
 from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
+from html import escape
 
 
 def env_int(name: str, default: int) -> int:
@@ -79,6 +81,10 @@ AGING_SECONDS = env_int("TR_AGING_SECONDS", 30)
 MAX_QUEUE = env_int("TR_MAX_QUEUE", 256)
 MAX_OPEN_REQUESTS = env_int("TR_MAX_OPEN_REQUESTS", 1000)
 STATE_FILE = os.environ.get("TR_STATE_FILE", "")
+ACCOUNT_SIGNUP_URL = os.environ.get("TR_ACCOUNT_SIGNUP_URL", "")
+ACCOUNT_LINKS = os.environ.get("TR_ACCOUNT_LINKS", "{}")
+ACCOUNT_DELETE_KEY = os.environ.get("TR_ACCOUNT_DELETE_KEY", "")
+CONTRIBUTION_DAILY_LIMIT = env_int("TR_CONTRIBUTION_DAILY_LIMIT", 50000)
 WORKERS_PER_OWNER = env_int("TR_WORKERS_PER_OWNER", 2)
 WORKER_MODEL_SHA256 = os.environ.get("TR_WORKER_MODEL_SHA256", "")
 MIN_AGENT_VERSION = os.environ.get("TR_MIN_AGENT_VERSION", "")
@@ -257,6 +263,38 @@ def token_expiry(token: str) -> float | None:
 
 def display_name(value):
     return value if isinstance(value, str) and 0 < len(value) <= 255 and value.isprintable() else ""
+
+
+def account_url(value):
+    if not isinstance(value, str) or any(
+        char.isspace() or not char.isprintable() for char in value
+    ):
+        raise ValueError("アカウント操作にはHTTPSのURLを指定してください")
+    url = urllib.parse.urlsplit(value)
+    if (
+        url.scheme != "https"
+        or not url.hostname
+        or url.username is not None
+        or url.password is not None
+        or "\\" in url.netloc
+    ):
+        raise ValueError("アカウント操作にはHTTPSのURLを指定してください")
+    return value
+
+
+def account_links():
+    links = json.loads(ACCOUNT_LINKS)
+    if not isinstance(links, dict) or any(not display_name(label) for label in links):
+        raise ValueError("TR_ACCOUNT_LINKS には表示名とURLのJSONオブジェクトを指定してください")
+    return {label: account_url(url) for label, url in links.items()}
+
+
+def contribution_date(offset=0):
+    return datetime.fromtimestamp(time.time(), timezone.utc).date() + timedelta(days=offset)
+
+
+def estimate_tokens(text):
+    return (sum(1 if char.isascii() else 2 for char in text) + 3) // 4
 
 
 def user_from_userinfo(token: str) -> tuple[str, str]:
@@ -810,6 +848,13 @@ class TranslationHTTPServer(ThreadingHTTPServer):
                 if min(QUEUE_TIMEOUT, AGING_SECONDS, MAX_QUEUE) <= 0:
                     raise ValueError("待ち行列の設定は正の整数にしてください")
                 if POOL_KIND == "volunteer":
+                    if ACCOUNT_SIGNUP_URL:
+                        account_url(ACCOUNT_SIGNUP_URL)
+                    account_links()
+                    if ACCOUNT_DELETE_KEY and len(ACCOUNT_DELETE_KEY.encode()) < 32:
+                        raise ValueError("退会通知の鍵には32バイト以上を指定してください")
+                    if CONTRIBUTION_DAILY_LIMIT <= 0:
+                        raise ValueError("貢献量の日次上限は正の整数にしてください")
                     if not (
                         STATE_FILE
                         and CANARY_FILE
@@ -1013,6 +1058,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_static("logo.png", "image/png")
             if method == "GET" and path == "/favicon.ico":
                 return self.serve_static("favicon.ico", "image/vnd.microsoft.icon")
+            if path in (
+                "/account",
+                "/ranking",
+                "/account.css",
+                "/account.mjs",
+                "/api/account",
+                "/api/account/ranking",
+                "/api/account/delete",
+            ):
+                return self.account_api(method, path)
             if not path.startswith("/api/"):
                 raise HttpError(404, "Not found")
             if path.startswith("/api/worker/"):
@@ -1072,6 +1127,13 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/worker/poll",
                     "/api/worker/result",
                     "/api/worker/ping",
+                    "/account",
+                    "/ranking",
+                    "/account.mjs",
+                    "/account.css",
+                    "/api/account",
+                    "/api/account/ranking",
+                    "/api/account/delete",
                 )
                 else "<unknown>"
             )
@@ -1089,6 +1151,90 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self.dispatch("DELETE")
+
+    def account_user(self):
+        subject = self.forwarded_subject()
+        scheme, _, token = self.headers.get("Authorization", "").partition(" ")
+        if subject is None or (
+            scheme.lower() == "bearer" and token.strip().startswith(("pta_", "ptw_"))
+        ):
+            raise HttpError(401, "アカウントへのログインが必要です")
+        return subject
+
+    def account_api(self, method, path):
+        if POOL_KIND != "volunteer":
+            raise HttpError(404, "Not found")
+        if path == "/api/account/delete":
+            if method != "POST" or not ACCOUNT_DELETE_KEY:
+                raise HttpError(404, "Not found")
+            key = self.headers.get("Authorization", "").encode()
+            if not hmac.compare_digest(key, b"Bearer " + ACCOUNT_DELETE_KEY.encode()):
+                raise HttpError(401, "退会通知の資格が無効です")
+            body = self.read_json_body(max_bytes=2048)
+            subject = body.get("sub")
+            if (
+                set(body) != {"sub"}
+                or not isinstance(subject, str)
+                or not USER_ID_RE.fullmatch(subject)
+            ):
+                raise HttpError(400, "所有者のIDを指定してください")
+            hub = self.server.get_workers()
+            with hub.condition:
+                hub.registry.delete_account(subject)
+            return self.send_json(200, {"deleted": True})
+        if method == "GET" and path == "/account.mjs":
+            return self.serve_static("account.mjs", "text/javascript; charset=utf-8")
+        if method == "GET" and path == "/account.css":
+            return self.serve_static("account.css", "text/css; charset=utf-8")
+        owner = self.account_user()
+        if method == "GET" and path in ("/account", "/ranking"):
+            return self.serve_static(f"{path[1:]}.html", "text/html; charset=utf-8")
+        hub = self.server.get_workers()
+        registry = hub.registry
+        if method == "POST" and path == "/api/account":
+            self.check_origin()
+            body = self.read_json_body(max_bytes=2048)
+            if set(body) != {"mode", "nickname"}:
+                raise HttpError(400, "ランキングへの掲載設定を指定してください")
+            mode, nickname = body["mode"], body["nickname"]
+            if mode == "username":
+                name = display_name(self.headers.get("X-Forwarded-User"))
+            elif mode == "nickname" and isinstance(nickname, str) and len(nickname.strip()) <= 40:
+                name = display_name(nickname.strip())
+            elif mode == "hidden":
+                name = ""
+            else:
+                raise HttpError(400, "ランキングへの掲載設定が不正です")
+            if mode != "hidden" and not name:
+                raise HttpError(400, "表示名を指定してください")
+            registry.set_listing(owner, mode, name)
+            return self.send_json(200, {"mode": mode, "name": name})
+        if method == "GET" and path == "/api/account":
+            data = registry.account(owner)
+            data["workers"] = self.list_workers(hub, owner)
+            data["links"] = account_links()
+            data["username"] = display_name(self.headers.get("X-Forwarded-User"))
+            return self.send_json(200, data)
+        if method == "GET" and path == "/api/account/ranking":
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query, keep_blank_values=True
+            )
+            period, *extra = query.get("period", [contribution_date().isoformat()[:7]])
+            if extra or (period != "all" and not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", period)):
+                raise HttpError(400, "期間が不正です")
+            return self.send_json(200, {"period": period, "entries": registry.ranking(period)})
+        raise HttpError(404, "Not found")
+
+    def list_workers(self, hub, owner):
+        listing = hub.registry.mine(owner)
+        if hub.checks is not None:
+            for record in listing:
+                try:
+                    if hub.checks.health.eligible(hub.registry.info(record["worker_id"])):
+                        record["state"] = "ready"
+                except HttpError:
+                    pass
+        return listing
 
     def worker_api(self, method, path):
         hub = self.server.get_workers()
@@ -1124,12 +1270,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = hub.ping(secret, body)
             return self.send_json(200, result)
         # 管理APIは前段が検証したOIDCのヘッダーだけを受ける。
-        owner = self.forwarded_subject()
-        scheme, _, token = self.headers.get("Authorization", "").partition(" ")
-        if owner is None or (
-            scheme.lower() == "bearer" and token.strip().startswith(("pta_", "ptw_"))
-        ):
-            raise HttpError(401, "アカウントへのログインが必要です")
+        owner = self.account_user()
         if method == "POST" and path == "/api/worker/register":
             body = self.read_json_body(max_bytes=65536)
             if set(body) != {"terms_version"}:
@@ -1141,15 +1282,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise HttpError(400, "ワーカーを指定してください")
             return self.send_json(200, hub.registry.renew(owner, body["worker_id"]))
         if method == "GET" and path == "/api/worker/mine":
-            listing = hub.registry.mine(owner)
-            if hub.checks is not None:
-                for record in listing:
-                    try:
-                        if hub.checks.health.eligible(hub.registry.info(record["worker_id"])):
-                            record["state"] = "ready"
-                    except HttpError:
-                        pass
-            return self.send_json(200, {"workers": listing})
+            return self.send_json(200, {"workers": self.list_workers(hub, owner)})
         if method == "DELETE" and re.fullmatch(r"/api/worker/[0-9a-f]{32}", path):
             hub.registry.delete(owner, path.rsplit("/", 1)[1])
             return self.send_json(200, {"deleted": True})
@@ -1161,6 +1294,12 @@ class Handler(BaseHTTPRequestHandler):
             body = body.replace(
                 b'data-web-anonymous="disabled"', b'data-web-anonymous="enabled"', 1
             )
+        if filename == "index.html" and POOL_KIND == "volunteer":
+            links = '<a href="/account">マイページ</a> <a href="/ranking">ランキング</a>'
+            if ACCOUNT_SIGNUP_URL:
+                signup = escape(account_url(ACCOUNT_SIGNUP_URL), quote=True)
+                links = f'<a href="{signup}">新規登録</a> {links}'
+            body = body.replace(b"<!-- volunteer-account-links -->", links.encode(), 1)
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -1283,7 +1422,7 @@ class Handler(BaseHTTPRequestHandler):
                     finish = value
                     self.sse({"done": True, "finish": value})
                     if volunteer and assigned and value == "stop":
-                        pool.after_delivery(assigned[-1], req, "".join(translated), job.user)
+                        pool.after_delivery(assigned[-1], req, "".join(translated), job)
                     break
                 else:
                     self.sse(
@@ -1342,9 +1481,11 @@ class WorkerRegistry:
         finally:
             os.close(fd)
         self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db.execute("PRAGMA secure_delete=ON")
         self.lock = threading.RLock()
         self.per_owner = per_owner
         self.revocation_callback = None
+        self.contribution_requests = Counter()
         try:
             self.initialize()
         except Exception:
@@ -1382,6 +1523,250 @@ class WorkerRegistry:
                 self.db.execute(
                     "ALTER TABLE owners ADD COLUMN generation INTEGER NOT NULL DEFAULT 0"
                 )
+            self.db.execute(
+                """CREATE TABLE IF NOT EXISTS contribution (
+                    owner TEXT NOT NULL, period TEXT NOT NULL,
+                    jobs INTEGER NOT NULL DEFAULT 0, input INTEGER NOT NULL DEFAULT 0,
+                    output INTEGER NOT NULL DEFAULT 0, days INTEGER NOT NULL DEFAULT 0,
+                    bad_jobs INTEGER NOT NULL DEFAULT 0, bad_input INTEGER NOT NULL DEFAULT 0,
+                    bad_output INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (owner, period))"""
+            )
+            self.db.execute(
+                """CREATE TABLE IF NOT EXISTS contribution_recent (
+                    owner TEXT NOT NULL, worker TEXT NOT NULL, day TEXT NOT NULL,
+                    jobs INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL,
+                    PRIMARY KEY (owner, worker, day))"""
+            )
+            self.db.execute(
+                """CREATE TABLE IF NOT EXISTS contribution_failures (
+                    owner TEXT NOT NULL, worker TEXT NOT NULL, day TEXT NOT NULL,
+                    PRIMARY KEY (owner, worker))"""
+            )
+            self.db.execute(
+                """CREATE TABLE IF NOT EXISTS ranking_profiles (
+                    owner TEXT PRIMARY KEY, mode TEXT NOT NULL, name TEXT NOT NULL)"""
+            )
+            today = contribution_date()
+            self.compact_contribution(today)
+            self.contribution_day = today
+
+    def maintain_contribution(self, day):
+        # 呼び出し元はロックを保持する。
+        if self.contribution_day != day:
+            with self.db:
+                self.compact_contribution(day)
+            self.contribution_requests.clear()
+            self.contribution_day = day
+
+    def compact_contribution(self, today):
+        cutoff_month = today.year * 12 + today.month - 1 - 13
+        cutoff = f"{cutoff_month // 12:04d}-{cutoff_month % 12 + 1:02d}"
+        self.db.execute(
+            """INSERT INTO contribution
+                SELECT owner, substr(period,1,7), sum(jobs), sum(input), sum(output),
+                    sum(jobs>0), sum(bad_jobs), sum(bad_input), sum(bad_output)
+                FROM contribution WHERE length(period)=10 AND substr(period,1,7)<?
+                GROUP BY owner, substr(period,1,7)
+                ON CONFLICT(owner,period) DO UPDATE SET jobs=jobs+excluded.jobs,
+                    input=input+excluded.input, output=output+excluded.output,
+                    days=days+excluded.days, bad_jobs=bad_jobs+excluded.bad_jobs,
+                    bad_input=bad_input+excluded.bad_input, bad_output=bad_output+excluded.bad_output""",
+            (cutoff,),
+        )
+        self.db.execute(
+            "DELETE FROM contribution WHERE length(period)=10 AND substr(period,1,7)<?", (cutoff,)
+        )
+        yesterday = (today - timedelta(days=1)).isoformat()
+        self.db.execute("DELETE FROM contribution_recent WHERE day<?", (yesterday,))
+        self.db.execute("DELETE FROM contribution_failures WHERE day<?", (yesterday,))
+
+    def record_contribution(self, worker, job, source, translated):
+        owner = worker["owner"]
+        if job.tier == "anonymous":
+            if not job.network or not worker["network"] or job.network == worker["network"]:
+                return
+            requester = ("anonymous", job.network)
+        else:
+            if owner == job.user:
+                return
+            requester = ("registered", job.user)
+        count_in, count_out = estimate_tokens(source), estimate_tokens(translated)
+        key = (owner, requester)
+        with self.lock:
+            try:
+                current = self.info(worker["id"])
+            except HttpError:
+                return
+            if (
+                current["state"] != "probation"
+                or current["owner_quarantined"]
+                or current["owner_generation"] != worker["owner_generation"]
+            ):
+                return
+            today = contribution_date()
+            day = today.isoformat()
+            self.maintain_contribution(today)
+            if self.contribution_requests[
+                key
+            ] + count_in + count_out > CONTRIBUTION_DAILY_LIMIT or (
+                key not in self.contribution_requests and len(self.contribution_requests) >= 100000
+            ):
+                return
+            with self.db:
+                self.db.execute(
+                    """INSERT INTO contribution(owner,period,jobs,input,output) VALUES(?,?,1,?,?)
+                        ON CONFLICT(owner,period) DO UPDATE SET jobs=jobs+1,
+                            input=input+excluded.input, output=output+excluded.output""",
+                    (owner, day, count_in, count_out),
+                )
+                self.db.execute(
+                    """INSERT INTO contribution_recent VALUES(?,?,?,1,?,?)
+                        ON CONFLICT(owner,worker,day) DO UPDATE SET jobs=jobs+1,
+                            input=input+excluded.input, output=output+excluded.output""",
+                    (owner, worker["id"], day, count_in, count_out),
+                )
+            self.contribution_requests[key] += count_in + count_out
+
+    def invalidate_contribution(self, owner, since, worker=None):
+        since = max(since, contribution_date(-1).isoformat())
+        predicate = "owner=? AND day>=?"
+        params = (owner, since)
+        if worker is not None:
+            predicate += " AND worker=?"
+            params += (worker,)
+        for day, jobs, count_in, count_out in self.db.execute(
+            f"""SELECT day,sum(jobs),sum(input),sum(output) FROM contribution_recent
+                WHERE {predicate} GROUP BY day""",
+            params,
+        ):
+            self.db.execute(
+                """UPDATE contribution SET jobs=jobs-?, input=input-?, output=output-?,
+                    bad_jobs=bad_jobs+?, bad_input=bad_input+?, bad_output=bad_output+?
+                    WHERE owner=? AND period=?""",
+                (jobs, count_in, count_out, jobs, count_in, count_out, owner, day),
+            )
+        self.db.execute(f"DELETE FROM contribution_recent WHERE {predicate}", params)
+
+    def quality_failure(self, worker, owner_since=None):
+        with self.lock, self.db:
+            wid, owner = worker["id"], worker["owner"]
+            try:
+                current = self.info(wid)
+            except HttpError:
+                return
+            if current["owner_generation"] != worker["owner_generation"]:
+                return
+            previous = self.db.execute(
+                "SELECT day FROM contribution_failures WHERE owner=? AND worker=?", (owner, wid)
+            ).fetchone()
+            today = contribution_date().isoformat()
+            self.db.execute(
+                """INSERT INTO contribution_failures VALUES(?,?,?)
+                    ON CONFLICT(owner,worker) DO UPDATE SET day=excluded.day""",
+                (owner, wid, today),
+            )
+            if owner_since is not None:
+                self.db.execute("UPDATE owners SET quarantined=1 WHERE name=?", (owner,))
+                self.db.execute(
+                    "UPDATE workers SET state='quarantine' WHERE owner=? AND state!='revoked'",
+                    (owner,),
+                )
+                self.invalidate_contribution(owner, owner_since)
+            else:
+                self.db.execute("UPDATE workers SET state='quarantine' WHERE id=?", (wid,))
+                self.invalidate_contribution(
+                    owner, previous[0] if previous else contribution_date(-1).isoformat(), wid
+                )
+
+    @staticmethod
+    def contribution_summary(row):
+        return dict(zip(("jobs", "input_tokens", "output_tokens", "days"), row))
+
+    def account(self, owner):
+        with self.lock:
+            self.check_owner(owner)
+            self.maintain_contribution(contribution_date())
+            terms = self.db.execute(
+                "SELECT terms,agreed FROM owners WHERE name=? AND terms IS NOT NULL", (owner,)
+            ).fetchone()
+            profile = self.db.execute(
+                "SELECT mode,name FROM ranking_profiles WHERE owner=?", (owner,)
+            ).fetchone()
+            monthly = [
+                {"month": row[0], **self.contribution_summary(row[1:])}
+                for row in self.db.execute(
+                    """SELECT substr(period,1,7), sum(jobs), sum(input), sum(output),
+                        sum(CASE WHEN length(period)=10 THEN jobs>0 ELSE days END)
+                        FROM contribution WHERE owner=? GROUP BY substr(period,1,7)
+                        ORDER BY substr(period,1,7) DESC""",
+                    (owner,),
+                )
+            ]
+            total = {
+                key: sum(month[key] for month in monthly)
+                for key in self.contribution_summary((0, 0, 0, 0))
+            }
+            return {
+                "terms": {"version": terms[0], "agreed": terms[1]} if terms else None,
+                "listing": {"mode": profile[0], "name": profile[1]}
+                if profile
+                else {"mode": "hidden", "name": ""},
+                "monthly": monthly,
+                "total": total,
+            }
+
+    def set_listing(self, owner, mode, name):
+        with self.lock, self.db:
+            self.check_owner(owner)
+            if mode == "hidden":
+                self.db.execute("DELETE FROM ranking_profiles WHERE owner=?", (owner,))
+            else:
+                self.db.execute(
+                    """INSERT INTO ranking_profiles VALUES(?,?,?)
+                        ON CONFLICT(owner) DO UPDATE SET mode=excluded.mode,name=excluded.name""",
+                    (owner, mode, name),
+                )
+
+    def ranking(self, period):
+        with self.lock:
+            self.maintain_contribution(contribution_date())
+            return [
+                {"name": name, "tokens": tokens, "days": days}
+                for name, tokens, days in self.db.execute(
+                    """SELECT p.name, sum(c.input+c.output),
+                        sum(CASE WHEN length(c.period)=10 THEN c.jobs>0 ELSE c.days END)
+                        FROM ranking_profiles p JOIN contribution c ON c.owner=p.owner
+                        LEFT JOIN owners o ON o.name=p.owner
+                        WHERE coalesce(o.revoked,0)=0 AND (?='all' OR substr(c.period,1,7)=?)
+                        GROUP BY p.owner HAVING sum(c.jobs)>0
+                        ORDER BY sum(c.input+c.output) DESC, 3 DESC, p.name, p.owner""",
+                    (period, period),
+                )
+            ]
+
+    def delete_account(self, owner):
+        with self.lock:
+            with self.db:
+                workers = self.db.execute(
+                    "SELECT id FROM workers WHERE owner=?", (owner,)
+                ).fetchall()
+                self.db.execute("DELETE FROM workers WHERE owner=?", (owner,))
+                self.db.execute("DELETE FROM owners WHERE name=? AND revoked=0", (owner,))
+                self.db.execute(
+                    "UPDATE owners SET terms=NULL,agreed=NULL,quarantined=0,generation=0 WHERE name=?",
+                    (owner,),
+                )
+                self.db.execute("DELETE FROM contribution WHERE owner=?", (owner,))
+                self.db.execute("DELETE FROM contribution_recent WHERE owner=?", (owner,))
+                self.db.execute("DELETE FROM contribution_failures WHERE owner=?", (owner,))
+                self.db.execute("DELETE FROM ranking_profiles WHERE owner=?", (owner,))
+            for key in list(self.contribution_requests):
+                recipient, requester = key
+                if owner == recipient or requester == ("registered", owner):
+                    del self.contribution_requests[key]
+        if self.revocation_callback:
+            for (worker_id,) in workers:
+                self.revocation_callback(worker_id=worker_id)
 
     def register(self, owner, terms):
         if type(terms) is not int or terms != WORKER_TERMS_VERSION:
@@ -1518,8 +1903,6 @@ class WorkerRegistry:
         with self.lock, self.db:
             self.owned(owner, worker_id)
             self.db.execute("DELETE FROM workers WHERE id=?", (worker_id,))
-            if not self.db.execute("SELECT 1 FROM workers WHERE owner=?", (owner,)).fetchone():
-                self.db.execute("DELETE FROM owners WHERE name=? AND revoked=0", (owner,))
         if self.revocation_callback:
             self.revocation_callback(worker_id=worker_id)
 
@@ -2082,14 +2465,18 @@ class WorkerHealth:
                     failures.popleft()
                 failures.append(now)
                 self.qualified.discard(wid)
-                self.registry.set_state(wid, "quarantine", generation)
+                owner_since = None
                 if len(failures) >= 3:
-                    self.registry.quarantine_owner(owner, generation)
+                    first_failure = time.time() - (now - failures[0])
+                    owner_since = (
+                        datetime.fromtimestamp(first_failure, timezone.utc).date().isoformat()
+                    )
                     self.qualified.difference_update(
                         worker_id
                         for worker_id, record in self.workers.items()
                         if record["owner"] == owner
                     )
+                self.registry.quality_failure(worker, owner_since)
             elif (
                 passed is None
                 and len(stats["recent"]) >= 10
@@ -2613,7 +3000,7 @@ class VolunteerPool(DirectPool):
             stats["assigned"] += 1
             stats["wait_ms"] += int((now - job.created) * 1000)
         self.held[wid] = job
-        assigned.append(worker)
+        assigned.append({**worker, "network": network})
         return selected
 
     def translate(self, job, req, events, cancel, assigned):
@@ -2647,9 +3034,13 @@ class VolunteerPool(DirectPool):
         except (HttpError, sqlite3.Error):
             pass
 
-    def after_delivery(self, worker, req, translated, user):
+    def after_delivery(self, worker, req, translated, job):
         try:
-            self.hub.checks.after_delivery(worker, req, translated, user=user)
+            self.hub.registry.record_contribution(worker, job, req["text"], translated)
+        except sqlite3.Error as error:
+            log.error("volunteer contribution failed: %s", type(error).__name__)
+        try:
+            self.hub.checks.after_delivery(worker, req, translated, user=job.user)
         except Exception as error:
             log.error("volunteer delivery check failed: %s", type(error).__name__)
 
@@ -2664,6 +3055,12 @@ class VolunteerPool(DirectPool):
 
     def report_loop(self):
         while not self.closed.wait(60):
+            registry = self.hub.registry
+            try:
+                with registry.lock:
+                    registry.maintain_contribution(contribution_date())
+            except sqlite3.Error as error:
+                log.error("volunteer contribution maintenance failed: %s", type(error).__name__)
             self.report()
 
     def report(self):

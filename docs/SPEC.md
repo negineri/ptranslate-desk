@@ -300,7 +300,7 @@ POSIXでは親ディレクトリは0700、ファイルは所有者本人の0600�
 自動では失効しない。所有者全体の検疫は運営が `tools/worker_admin.py release-owner <owner_id>` で解除し、全端末の試用をやり直す。
 状態の世代をSQLiteで進め、解除前の連続合格数や不合格の窓を引き継がない。
 検疫中でも運営の判断を待つ所有者には新しい確認用ジョブを渡さない。端末の失効を検査結果で取り消すことはない。
-旧状態ファイルには所有者の検疫フラグと状態の世代を追加し、原文・訳・基準・成績は保存しない。
+旧状態ファイルには所有者の検疫フラグと状態の世代を追加する。原文・訳・基準・合否率などの成績は保存しない。
 
 配信完了後の内部処理は、合格済みワーカーについて独立に乱数を引く。確認用ジョブは
 `TR_CANARY_RATE`（既定0.05）で予約し、そのワーカーの次のポーリングへ通常と同じ形式で渡す。
@@ -424,6 +424,21 @@ POSIXでは親ディレクトリは0700、ファイルは所有者本人の0600�
 上流のTCP/TLS接続の時限は最大5秒、確立後の読み取り時限は `TR_UPSTREAM_TIMEOUT` とする。
 利用者の同時実行枠は上流通信の終了処理が完了してから返す。中止直後に枠が残る場合は429になる。
 サーバーが接続を閉じた後、実際の推論を止める処理は翻訳エンジン側の切断検知に従う。
+
+### 5.5 マイページとランキング
+
+ボランティア枠だけで提供する。前段が検証した OIDC `sub` を `X-Forwarded-User-Id` で渡す。
+`GET /account` と `GET /ranking` はログイン済みのブラウザー向けの画面。
+
+| API | 要求と応答 |
+| --- | --- |
+| `GET /api/account` | 本人のデータ。 `workers` は `GET /api/worker/mine` と同じ。 `terms` は `{version, agreed}` または `null`、`agreed` は UTC の YYYY-MM-DD。 `total` と `monthly` の各要素は `jobs`・`input_tokens`・`output_tokens`・`days` を返し、月別には `month` (YYYY-MM) も返す。 `listing` は `{mode, name}`、`username` は前段の表示名、`links` は運営設定の操作名と HTTPS URL の組。 |
+| `POST /api/account` | JSONの `{mode, nickname}` で掲載を変更。 `mode` は `hidden` (既定)、`username`、`nickname`。ニックネームは前後の空白を除いて1〜40文字。ユーザー名は保存時に前段から届いた値を使う。応答は `{mode, name}`。 `Origin` が `TR_PUBLIC_SERVER_URL` と一致することが必要。 |
+| `GET /api/account/ranking?period=YYYY-MM` | `{period, entries}`。期間は UTC の年月、または累計の `all`。省略時は当月。掲載に同意し、その期間に有効な配信がある参加者の `{name, tokens, days}` をトークン数、参加日数の降順で返す。 |
+| `POST /api/account/delete` | 運営の退会通知。JSONの `{sub}` と `Authorization: Bearer <TR_ACCOUNT_DELETE_KEY>` を受け、対象が既に削除済みでも `{"deleted":true}` を返す。未設定なら404。 |
+
+貢献量の計算、保存期間、削除とプロキシの設定は
+[ボランティア枠の仕様](VOLUNTEER_TRANSLATION.md#123-貢献量ランキングと退会)を参照。
 
 ## 6. 認証
 
