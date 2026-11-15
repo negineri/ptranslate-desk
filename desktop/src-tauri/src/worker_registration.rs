@@ -13,12 +13,12 @@ use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use zeroize::{Zeroize, Zeroizing};
 
 const TERMS_VERSION: u32 = 1;
 const MAX_REPLY: usize = 16 * 1024;
-const MAX_TTL: u64 = 7 * 86400;
+const MAX_TTL: u64 = 30 * 86400;
 
 #[derive(Default)]
 pub struct RegistrationGate(tokio::sync::Mutex<()>);
@@ -140,7 +140,7 @@ fn write_credential(entry: &dyn Vault, registration: &Registration) -> Result<()
     entry.save(&value)
 }
 
-fn now_seconds() -> Result<u64, String> {
+pub(crate) fn now_seconds() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|now| now.as_secs())
@@ -213,16 +213,16 @@ pub async fn set_worker_participation(
     enabled: bool,
 ) -> Result<Status, String> {
     require_main(&window)?;
-    let state = app.state::<RegistrationGate>();
-    let _gate = state
-        .0
-        .try_lock()
-        .map_err(|_| "ワーカーの設定を処理中です")?;
     if !enabled {
         app.state::<crate::worker_supervisor::Lifecycle>()
             .stop_participation()
             .await;
     }
+    let state = app.state::<RegistrationGate>();
+    let _gate = state
+        .0
+        .try_lock()
+        .map_err(|_| "ワーカーの設定を処理中です")?;
     let connection = load(&app)?;
     let registration = if connection.server_url.is_empty() {
         None
@@ -235,13 +235,11 @@ pub async fn set_worker_participation(
             return Err("この端末では翻訳の処理を提供できません".into());
         }
         let mut registration = registration.ok_or("先に提供先に登録してください")?;
-        if registration.expires_at <= now_seconds()? {
-            return Err("ワーカーの資格を更新してください".into());
-        }
         let version = &app.package_info().version;
         let agent_version = format!("{}.{}.{}", version.major, version.minor, version.patch);
         crate::worker_supervisor::start_participation(
             app.clone(),
+            registration.expires_at,
             crate::worker_agent::Bootstrap {
                 broker: connection.server_url,
                 worker_secret: std::mem::take(&mut registration.secret),
@@ -255,6 +253,54 @@ pub async fn set_worker_participation(
         )?;
     }
     Ok(result)
+}
+
+pub(crate) enum AutoRenewal {
+    Renewed { expires_at: u64, retry_after: u64 },
+    Busy,
+    Reauthorize,
+    Rejected,
+}
+
+pub(crate) async fn auto_renew(app: &AppHandle, broker: &str) -> Result<AutoRenewal, String> {
+    let gate = app.state::<RegistrationGate>();
+    let Ok(_gate) = gate.0.try_lock() else {
+        return Ok(AutoRenewal::Busy);
+    };
+    let connection = load(app)?;
+    if connection.server_url != broker {
+        return Ok(AutoRenewal::Rejected);
+    }
+    let entry = vault(&connection);
+    let Some(mut registration) = credential(&entry)? else {
+        return Ok(AutoRenewal::Rejected);
+    };
+    let client = &app.state::<Backend>().client;
+    let auth = Auth::for_worker(client.clone(), connection);
+    let Some(token) = auth.refresh_worker_access().await? else {
+        return Ok(AutoRenewal::Reauthorize);
+    };
+    let response = client
+        .post(format!("{broker}/api/worker/renew"))
+        .timeout(std::time::Duration::from_secs(15))
+        .bearer_auth(token.as_str())
+        .json(&json!({"worker_id": registration.worker_id}))
+        .send()
+        .await
+        .map_err(|_| "提供先に接続できませんでした")?;
+    match response.status().as_u16() {
+        401 => return Ok(AutoRenewal::Reauthorize),
+        403 | 404 => return Ok(AutoRenewal::Rejected),
+        _ => {}
+    }
+    let renewal: Renewal = reply(response).await?;
+    registration.expires_at = expiry(renewal.expires_in)?;
+    write_credential(&entry, &registration)?;
+    let _ = app.emit_to("main", "worker-expiry", registration.expires_at);
+    Ok(AutoRenewal::Renewed {
+        expires_at: registration.expires_at,
+        retry_after: (renewal.expires_in / 2).clamp(1, 86400),
+    })
 }
 
 #[tauri::command]

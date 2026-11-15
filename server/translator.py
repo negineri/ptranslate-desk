@@ -1095,6 +1095,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self.dispatch("DELETE")
 
+    def worker_auth_expiry(self):
+        if not WORKER_AUTH_EXPIRY_HEADER:
+            return None
+        values = self.headers.get_all(WORKER_AUTH_EXPIRY_HEADER, [])
+        if len(values) != 1 or not re.fullmatch(r"[0-9]{1,12}", values[0]):
+            raise HttpError(403, "提供の認可期限を確認できません")
+        return int(values[0])
+
     def worker_api(self, method, path):
         hub = self.server.get_workers()
         if method == "POST" and path in (
@@ -1139,12 +1147,16 @@ class Handler(BaseHTTPRequestHandler):
             body = self.read_json_body(max_bytes=65536)
             if set(body) != {"terms_version"}:
                 raise HttpError(400, "参加の規約の版を指定してください")
-            return self.send_json(200, hub.registry.register(owner, body["terms_version"]))
+            return self.send_json(
+                200, hub.registry.register(owner, body["terms_version"], self.worker_auth_expiry())
+            )
         if method == "POST" and path == "/api/worker/renew":
             body = self.read_json_body(max_bytes=65536)
             if set(body) != {"worker_id"} or not isinstance(body["worker_id"], str):
                 raise HttpError(400, "ワーカーを指定してください")
-            return self.send_json(200, hub.registry.renew(owner, body["worker_id"]))
+            return self.send_json(
+                200, hub.registry.renew(owner, body["worker_id"], self.worker_auth_expiry())
+            )
         if method == "GET" and path == "/api/worker/mine":
             listing = hub.registry.mine(owner)
             if hub.checks is not None:
@@ -1322,7 +1334,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
 
-WORKER_TTL = 7 * 86400
+WORKER_TTL = env_int("TR_WORKER_TTL_DAYS", 7) * 86400
+WORKER_AUTH_EXPIRY_HEADER = os.environ.get("TR_WORKER_AUTH_EXPIRY_HEADER", "")
+if not 86400 <= WORKER_TTL <= 30 * 86400:
+    raise ValueError("TR_WORKER_TTL_DAYS は1〜30にしてください")
 WORKER_TERMS_VERSION = 1
 
 
@@ -1388,11 +1403,22 @@ class WorkerRegistry:
                     "ALTER TABLE owners ADD COLUMN generation INTEGER NOT NULL DEFAULT 0"
                 )
 
-    def register(self, owner, terms):
+    @staticmethod
+    def worker_expiry(auth_expiry):
+        now = int(time.time())
+        expiry = now + WORKER_TTL
+        if auth_expiry is not None:
+            expiry = min(expiry, auth_expiry)
+        if expiry <= now:
+            raise HttpError(403, "提供の認可が期限切れです")
+        return expiry, expiry - now
+
+    def register(self, owner, terms, auth_expiry=None):
         if type(terms) is not int or terms != WORKER_TERMS_VERSION:
             raise HttpError(400, "参加の規約への同意が必要です")
         with self.lock, self.db:
             self.check_owner(owner)
+            expiry, ttl = self.worker_expiry(auth_expiry)
             self.db.execute(
                 "DELETE FROM workers WHERE owner=? AND expires<=? AND state!='revoked'",
                 (owner, time.time()),
@@ -1418,11 +1444,11 @@ class WorkerRegistry:
                     worker_id,
                     owner,
                     hashlib.sha256(secret.encode()).hexdigest(),
-                    int(time.time()) + WORKER_TTL,
+                    expiry,
                     "quarantine" if held and held[0] else "probation",
                 ),
             )
-            return {"worker_id": worker_id, "secret": secret, "expires_in": WORKER_TTL}
+            return {"worker_id": worker_id, "secret": secret, "expires_in": ttl}
 
     def check_owner(self, owner):
         row = self.db.execute("SELECT revoked FROM owners WHERE name=?", (owner,)).fetchone()
@@ -1498,15 +1524,16 @@ class WorkerRegistry:
             raise HttpError(404, "ワーカーが見つかりません")
         return row[0]
 
-    def renew(self, owner, worker_id):
+    def renew(self, owner, worker_id, auth_expiry=None):
         with self.lock, self.db:
             if self.owned(owner, worker_id) == "revoked":
                 raise HttpError(403, "このワーカーは失効しています")
+            expiry, ttl = self.worker_expiry(auth_expiry)
             self.db.execute(
                 "UPDATE workers SET expires=? WHERE id=?",
-                (int(time.time()) + WORKER_TTL, worker_id),
+                (expiry, worker_id),
             )
-        return {"expires_in": WORKER_TTL}
+        return {"expires_in": ttl}
 
     def mine(self, owner):
         with self.lock:

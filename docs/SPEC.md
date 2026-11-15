@@ -237,7 +237,7 @@ IPは `TR_CLIENT_IP_HEADER` の値だけから取り、IPv4 /24・IPv6 /48にま
 | API | 認証・動き |
 | --- | --- |
 | `POST /api/worker/register` | 前段のOIDCヘッダー必須。`{"terms_version":1}` を送り、`worker_id`・`secret`・`expires_in:604800` を返す。秘密は一度だけ返す |
-| `POST /api/worker/renew` | 所有者のOIDC必須。`{"worker_id":"..."}` を送り、有効期限を現在から7日後へ延長。秘密は変えず再送しない |
+| `POST /api/worker/renew` | 所有者のOIDC必須。`{"worker_id":"..."}` を送り、有効期限を現在からサーバー設定の日数後へ更新。秘密は変えず再送しない |
 | `GET /api/worker/mine` | 所有者のOIDC必須。`{"workers":[{"worker_id":"...","state":"probation","expires_at":1234567890}]}` を返す |
 | `DELETE /api/worker/<worker_id>` | 所有者のOIDC必須。登録を削除し `{"deleted":true}`。最後の端末の削除時は同意の記録も削除する |
 | `POST /api/worker/poll` | ワーカーのBearer資格必須。`agent_version` と `model`（モデルのSHA-256）を確認し、最大25秒待つ。空なら204。検疫中の空応答には `X-PTranslate-Worker-State: quarantine` を付ける。同時ポーリングと実行中の再ポーリングは409 |
@@ -267,6 +267,11 @@ POSIXでは親ディレクトリは0700、ファイルは所有者本人の0600�
 `X-Forwarded-User-Id` と `X-Forwarded-User` を消す。登録・更新・一覧・解除はOIDCを通す（構成例は SELF_HOSTING.md）。
 ワーカー向けPOSTはJSON・本文64KiBまで。割り当てを持つワーカーの不正な本文は、その割り当ても失敗にする。
 全APIに国の制限を適用する。CORSやOPTIONSへの対応は追加しない。
+
+ワーカーの登録と更新は実際の有効秒数を `expires_in` で返す。
+`TR_WORKER_TTL_DAYS` は1〜30日、既定7日。前段が IdP の認可終了時刻を取得できる場合、
+`TR_WORKER_AUTH_EXPIRY_HEADER` に指定したヘッダーの UNIX 秒と設定上の期限のうち早い方を使う。
+この設定を有効にすると、時刻が欠落、不正、期限切れの場合は403。前段はクライアント由来の同名ヘッダーを除去する。
 
 ### 5.1.3 確認用ジョブと検疫
 

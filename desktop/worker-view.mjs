@@ -24,7 +24,7 @@ panel.innerHTML = `<summary>翻訳の処理を提供する</summary>
     </div>
     <fieldset id="worker-forget-confirmation" hidden>
       <legend>端末の資格を削除</legend>
-      <p class="hint">提供先の登録は期限 (最長 7 日) が切れるまで残ります。</p>
+      <p class="hint">提供先の登録は現在の資格の期限が切れるまで残ります。</p>
       <label><input type="checkbox" id="worker-forget-agree"> 確認して、この端末からだけ削除する</label>
       <button type="button" id="worker-forget-commit">削除する</button>
       <button type="button" id="worker-forget-cancel">キャンセル</button>
@@ -50,13 +50,14 @@ const participationToggle = participation.querySelector("input");
 const phaseLabels = {
   idle: "停止中", starting: "準備中", waiting: "待機中",
   working: "処理中", paused: "一時停止中", quarantined: "検疫中", error: "処理を続けられませんでした",
+  reauthorize: "提供先への再ログインが必要です。「資格を更新」を押してください",
 };
 let activity;
 
 function renderParticipation() {
   participation.hidden = state?.expires_at == null || !state?.can_participate;
   participationToggle.checked = !!activity?.enabled;
-  participationToggle.disabled = busy || !activity || (!activity.enabled && state?.expires_at <= Date.now() / 1000);
+  participationToggle.disabled = busy || !activity;
 }
 
 function renderActivity(next) {
@@ -76,6 +77,12 @@ let busy = false;
 void listen("worker-activity", ({ payload }) => renderActivity(payload)).then(async () => {
   const snapshot = await invoke("worker_activity");
   if (!activity) renderActivity(snapshot);
+}).catch(() => {});
+void listen("worker-expiry", ({ payload }) => {
+  if (state?.expires_at != null) {
+    state.expires_at = payload;
+    render();
+  }
 }).catch(() => {});
 
 function render() {

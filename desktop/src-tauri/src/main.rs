@@ -20,6 +20,8 @@ mod updates;
 #[cfg(target_os = "windows")]
 mod windows;
 mod worker_agent;
+#[cfg(target_os = "linux")]
+mod worker_headless;
 mod worker_power;
 mod worker_registration;
 mod worker_relay;
@@ -478,6 +480,14 @@ fn start_request(
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--worker-once")) {
+        if let Err(error) = worker_headless::entry() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--worker-agent")) {
         worker_agent::entry();
         return;

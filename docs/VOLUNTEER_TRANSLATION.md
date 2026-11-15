@@ -337,7 +337,7 @@ OPTIONSには対応せずCORSヘッダーも返さないため、ほかのWebサ
 | API | 認証 | 動き |
 | --- | --- | --- |
 | `POST /api/worker/register` | OIDC (`X-Forwarded-User-Id`) | 本文は `{"terms_version": 1}`。応答は `{"worker_id": "...", "secret": "ptw_...", "expires_in": 604800}`。秘密は 1 度だけ返す |
-| `POST /api/worker/renew` | OIDC と、本文の `worker_id` | ワーカーの資格の期限を 7 日延ばす。アカウントが無効になれば延ばせず、資格は期限で切れる |
+| `POST /api/worker/renew` | OIDC と、本文の `worker_id` | ワーカー資格の期限を現在から設定日数後に更新し、実際の有効秒数を返す。IdP の認可期限を前段が渡せる場合はその時刻まで |
 | `DELETE /api/worker/<worker_id>` | OIDC (所有者本人) | 登録を解除し、資格を失効させる |
 | `GET /api/worker/mine` | OIDC | 自分のワーカーの一覧と状態 (待機、検疫、失効) |
 
@@ -350,6 +350,16 @@ OPTIONSには対応せずCORSヘッダーも返さないため、ほかのWebサ
 - ワーカーの資格は利用者の資格と別のもの。ワーカーの資格で `POST /api/translate` は呼べず、利用者の資格で
   ワーカーの API (9 章) は呼べない
 - 運営は、ワーカー 1 台、または所有者のすべてのワーカーを失効できる。失効は次のポーリングと結果の POST から効く
+
+登録と更新には所有者の OIDC 認証が必要。発行時の有効日数は `TR_WORKER_TTL_DAYS` で設定し、既定は7日、上限は30日。
+前段が信頼できる OAuth 認可終了時刻を取得できる場合は、その UNIX 秒を `TR_WORKER_AUTH_EXPIRY_HEADER` のヘッダーで渡す。
+この場合は認可終了時刻より後には延長しない。時刻を提供できない構成では、仲介の期限と IdP の期限は別に進む。
+
+長期運用では Authentik のボランティア向け OAuth provider で `offline_access` を有効にし、refresh token の初期有効期間を
+90日とする。ローテーションと上限は IdP のポリシーに従う。ブラウザーのログイン Cookie の期限は参照しない。
+退会・運営停止後の旧 access token の拒否と、仲介でのワーカー失効を確認できた構成から30日に延長する。
+認証プロキシは期限ヘッダーを外部入力から取り除き、設定する場合は検証済みの認可の時刻で置き換える。
+JWT の短期 access token 自体の `exp` を長期の更新認可期限として使わない。
 
 ### 8.3 試用
 
@@ -522,7 +532,7 @@ OSの資格情報ストアに接続先ごとに分けて保存する。画面へ
 仲介での登録後に資格を保存できなければ、登録の取り消しを試みる。
 解除時に仲介が200・403・404を返した場合は端末の資格を削除し、403・404では提供先で既に無効になっていたことを表示する。
 通信失敗や他の応答では資格を保持し、「この端末からだけ削除する」を表示する。
-この操作は「提供先の登録は期限 (最長 7 日) が切れるまで残ります」と確認してから行い、仲介の削除APIを呼ばない。
+この操作では現在の資格が期限切れになるまで登録が残ることを確認し、仲介の削除APIを呼ばない。
 いずれの解除でも提供先のOIDCからログアウトし、`worker-login-` のrefresh tokenを削除する。
 IdPにrevocation endpointがあれば失効も試み、失効の確認に失敗した場合は画面に結果を表示する。
 
@@ -609,6 +619,31 @@ macOS と対応する Ubuntu x64 では参加設定から監督処理を起動�
 - 画面に、待機中・処理中・一時停止・検疫中と、処理した数を出す。「登録を解除」でワーカーの資格を失効させる (8.2)
 - アプリの終了や更新後の再起動では、ワーカーの新規起動を止め、実行中の割り当てにエラーを返すよう子に通知する。
   親は子の回収を待ってからエンジンを止める
+
+### Linux サーバーでの無人提供
+
+Linux でビルドした `ptranslate-desk` と Python 3.11 以降を使う。ワーカー子プロセスにはデスクトップと同じ
+bubblewrap と Landlock (ABI 4 以降) の制限がかかる。推論エンジンは別のサービスとして、承認済みモデルと API キーを使い、
+`127.0.0.1` だけで待ち受ける。推論エンジンが実際に読み込むモデルを `--model` で指定する。
+実行ユーザー専用の状態ディレクトリには refresh token とワーカー資格を保存する (ディレクトリ0700、ファイル0600)。
+
+提供先は `GET /api/client-config` で公開クライアントの設定を返す。Authentik ではそのクライアントの Device Code・
+Refresh Token grant と `offline_access` スコープ、ブランドの Device Code Flow を有効にする。
+規約を読んで同意した所有者が以下を実行し、別の端末のブラウザーで表示されたコードを認可する。
+再認可するときは常駐プロセスを停止して同じ手順を実行する。
+
+```sh
+python3 tools/volunteer_worker.py --state ~/.local/state/ptranslate-worker \
+  authorize https://translate.example.com --accept-terms
+python3 tools/volunteer_worker.py --state ~/.local/state/ptranslate-worker run \
+  --binary /usr/bin/ptranslate-desk --model /path/to/model.gguf \
+  --engine-port 18080 --engine-key-file /path/to/engine-key
+```
+
+デスクトップと Linux の常駐プロセスは、提供開始時と提供中に約1日おきに refresh token で access token を取り直し、
+所有者の認証でワーカー資格を更新する。有効期間が2日未満なら、期間の半分を目安に早めに更新する。
+一時的な障害では有効期限内に再試行する。認可の失効・期限切れを IdP が返したら受付を停止し、再認可を案内する。
+Linux の `run` は SIGTERM を受けて処理を停止する。監視サービスから起動する場合は、既存の状態を使って同じ `run` を実行する。
 
 ## 12. ログと保存
 
@@ -946,6 +981,8 @@ Ubuntu VM で `python3 tools/run_worker_local_probe.py --device none --samples 3
 | `TR_ANON_SHARE` | 0.5 | 匿名の層が同時に使える枠の割合 |
 | `TR_TOKEN_KEY` | (匿名の層では必須) | 匿名の資格の HMAC の鍵。32 バイト以上 |
 | `TR_STATE_FILE` | 空 | 永続の保存 (SQLite) の場所。ワーカーの登録にだけ使う。空ならワーカーAPIは404 |
+| `TR_WORKER_TTL_DAYS` | 7 | 登録・更新時のワーカー資格の有効日数 (1〜30) |
+| `TR_WORKER_AUTH_EXPIRY_HEADER` | 空 | 前段が検証した OAuth 認可の終了時刻 (UNIX秒) を渡すヘッダー。設定時は必須 |
 | `TR_WORKER_MODEL_SHA256` | 空 | ワーカーに申告させる承認済みモデルのSHA-256。登録・通信を有効にする場合は必須 |
 | `TR_COUNTRY_HEADER` / `TR_ALLOWED_COUNTRIES` | 空 / 空 | 前段が付ける国のヘッダーと、受ける国。空なら国で断らない |
 | `TR_QUEUE_TIMEOUT` | 120 | 待ち行列で待つ上限 (秒) |

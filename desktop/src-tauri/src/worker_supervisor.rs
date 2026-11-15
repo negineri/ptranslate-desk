@@ -22,7 +22,7 @@ const MAX_LINE: usize = 64;
 const INITIAL_RETRY: Duration = Duration::from_secs(5);
 const MAX_RETRY: Duration = Duration::from_secs(300);
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Status {
     Working,
@@ -65,6 +65,7 @@ enum Phase {
     Paused,
     Quarantined,
     Error,
+    Reauthorize,
 }
 
 #[derive(Clone, Copy, Default, Serialize)]
@@ -225,7 +226,11 @@ fn publish(app: &AppHandle, activity: &Activity) {
     let _ = app.emit_to("main", "worker-activity", activity);
 }
 
-pub(crate) fn start_participation(app: AppHandle, config: Bootstrap) -> Result<(), String> {
+pub(crate) fn start_participation(
+    app: AppHandle,
+    mut expires_at: u64,
+    config: Bootstrap,
+) -> Result<(), String> {
     let (stop, mut stopped) = oneshot::channel();
     let (done, finished) = watch::channel(());
     let lifecycle = app.state::<Lifecycle>();
@@ -253,18 +258,47 @@ pub(crate) fn start_participation(app: AppHandle, config: Bootstrap) -> Result<(
             publish(&app, &state.activity);
         };
         let mut retry = INITIAL_RETRY;
-        let failed = loop {
+        let mut next_renewal = 0;
+        let phase = loop {
+            if !matches!(stopped.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+                break Phase::Idle;
+            }
+            let Ok(now) = crate::worker_registration::now_seconds() else {
+                break Phase::Error;
+            };
+            if now >= next_renewal || now >= expires_at {
+                use crate::worker_registration::AutoRenewal;
+                match crate::worker_registration::auto_renew(&app, &config.broker).await {
+                    Ok(AutoRenewal::Renewed {
+                        expires_at: expiry,
+                        retry_after,
+                    }) => {
+                        expires_at = expiry;
+                        next_renewal = now + retry_after;
+                    }
+                    Ok(AutoRenewal::Reauthorize) => break Phase::Reauthorize,
+                    Ok(AutoRenewal::Rejected) => break Phase::Error,
+                    Ok(AutoRenewal::Busy) | Err(_) if now < expires_at => {
+                        next_renewal = (now + 60).min(expires_at);
+                    }
+                    Ok(AutoRenewal::Busy) => {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        continue;
+                    }
+                    Err(_) => break Phase::Error,
+                }
+            }
             let (running, stop) = tokio::select! {
                 biased;
-                _ = &mut stopped => break false,
+                _ = &mut stopped => break Phase::Idle,
                 run = lifecycle.begin() => match run {
                     Ok(run) => run,
-                    Err(_) => break false,
+                    Err(_) => break Phase::Idle,
                 },
             };
             // begin が停止の要求と競合しても、次の子へ資格を渡さない。
             if !matches!(stopped.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
-                break false;
+                break Phase::Idle;
             }
             let result = run_one(&app, config.clone(), stop, |phase| {
                 update(&|state| {
@@ -281,17 +315,19 @@ pub(crate) fn start_participation(app: AppHandle, config: Bootstrap) -> Result<(
                 publish(&app, &state.activity);
                 delay
             };
-            let Some(delay) = delay else { break true };
+            let Some(delay) = delay else {
+                break Phase::Error;
+            };
             tokio::select! {
                 biased;
-                _ = &mut stopped => break false,
+                _ = &mut stopped => break Phase::Idle,
                 _ = tokio::time::sleep(delay) => {}
             }
         };
         drop(config);
         let mut state = lifecycle.state.lock().unwrap();
         state.activity.enabled = false;
-        state.activity.phase = if failed { Phase::Error } else { Phase::Idle };
+        state.activity.phase = phase;
         state.participation.take();
         publish(&app, &state.activity);
         drop(done);
@@ -333,9 +369,30 @@ async fn run_one(
     if !can_wait() {
         return Ok(Status::Paused);
     }
+    engine.configure(&mut config);
+    run_configured(
+        config,
+        stop,
+        |status| match status {
+            Status::Waiting => update(Phase::Waiting),
+            Status::Working => update(Phase::Working),
+            _ => {}
+        },
+        can_wait,
+        || local.try_worker_slot(&engine),
+    )
+    .await
+}
+
+pub(crate) async fn run_configured<Permit>(
+    #[cfg_attr(target_os = "linux", allow(unused_mut))] mut config: Bootstrap,
+    stop: oneshot::Receiver<()>,
+    update: impl FnMut(Status),
+    can_wait: impl FnMut() -> bool,
+    reserve: impl FnOnce() -> Option<Permit>,
+) -> Result<Status, String> {
     let broker =
         crate::worker_agent::broker_origin(&config.broker).map_err(|_| "提供先のURLが不正です")?;
-    engine.configure(&mut config);
     let executable =
         std::env::current_exe().map_err(|_| "ワーカーの実行ファイルを確認できませんでした")?;
     #[cfg(target_os = "linux")]
@@ -379,15 +436,11 @@ async fn run_one(
             .stderr(Stdio::null()),
         input,
         stop,
-        |status| match status {
-            Status::Waiting => update(Phase::Waiting),
-            Status::Working => update(Phase::Working),
-            _ => {}
-        },
+        update,
         LIFETIME,
         STOP_GRACE,
         can_wait,
-        || local.try_worker_slot(&engine),
+        reserve,
     )
     .await
     .map_err(|_| "ワーカーの起動または処理の終了を確認できませんでした".into())
