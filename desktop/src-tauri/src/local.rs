@@ -320,9 +320,9 @@ pub(crate) async fn verify_worker_model(app: &AppHandle) -> Result<(), String> {
 }
 
 fn command(path: &PathBuf) -> Command {
-    // 書き換えるのは Windows だけ。
-    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
     let mut command = Command::new(path);
+    // AppImage の同梱ライブラリを推論エンジンに読ませない。
+    crate::host_env::use_host_env(&mut command);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
