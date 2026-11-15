@@ -60,7 +60,8 @@
   label.check { display: inline-flex; align-items: center; gap: 4px; font-size: .9rem; color: var(--muted); cursor: pointer; }
   .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
   .web-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-  .web-actions { flex-shrink: 0; }
+  .web-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+  .web-actions a { color: var(--accent); }
   @media (max-width: 480px) { .web-heading { flex-wrap: wrap; margin-bottom: 8px; } }
   dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto;
            color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
@@ -75,7 +76,7 @@
 <main>
   <header class="web-heading">
     <h1><img class="brand-mark" src="./logo.png" width="32" height="32" alt="">PTranslate</h1>
-    <div class="web-actions" data-web-only><button id="show-client-connection" disabled>クライアントの接続設定</button></div>
+    <div class="web-actions" data-web-only><!-- volunteer-account-links --><button id="show-client-connection" disabled>クライアントの接続設定</button></div>
   </header>
   <p class="sub">PLaMo 3 Translate で訳します。原文と訳はサーバーに残りません。<span id="who"></span></p>
 
