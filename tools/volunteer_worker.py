@@ -109,10 +109,11 @@ class EngineMismatch(Failure):
 
 
 class RemoteEngine:
-    def __init__(self, url, key):
+    def __init__(self, url, key, *, allow_revision_mismatch=False):
         https_url(url, origin_only=True)
         self.url = url.rstrip("/")
         self.key = key
+        self.allow_revision_mismatch = allow_revision_mismatch
         self.recheck_failed = threading.Event()
 
     def open(self, route, data=None, timeout=5):
@@ -149,8 +150,12 @@ class RemoteEngine:
         except (ValueError, OSError, http.client.HTTPException):
             raise Failure("リモート推論先の設定を取得できません") from None
         build = props.get("build_info")
-        tag, _, commit = build.partition("-") if isinstance(build, str) else ("", "", "")
-        if tag != ENGINE_TAG or len(commit) < 7 or not ENGINE_COMMIT.startswith(commit):
+        if not isinstance(build, str) or not build.strip() or not build.isprintable():
+            raise EngineMismatch("リモート推論先のllama.cppのビルド情報を確認できません")
+        tag, _, commit = build.partition("-")
+        if not self.allow_revision_mismatch and (
+            tag != ENGINE_TAG or len(commit) < 7 or not ENGINE_COMMIT.startswith(commit)
+        ):
             raise EngineMismatch(
                 f"リモート推論先のllama.cppが対応リビジョン {ENGINE_TAG} と一致しません"
             )
@@ -456,7 +461,11 @@ def run(args, path, state):
     if args.engine_url:
         if args.model is not None:
             raise Failure("--model はローカル推論先に指定してください")
-        engine = RemoteEngine(args.engine_url, engine_secret)
+        engine = RemoteEngine(
+            args.engine_url,
+            engine_secret,
+            allow_revision_mismatch=args.allow_engine_revision_mismatch,
+        )
         engine.verify()
         with engine.relay() as (port, secret):
             participate(args, path, state, port, secret, MODEL_SHA, engine.verify)
@@ -552,8 +561,15 @@ def main():
     target = service.add_mutually_exclusive_group(required=True)
     target.add_argument("--engine-port", type=int, help="ローカルの llama-server のポート")
     target.add_argument("--engine-url", help="リモートの llama-server の HTTPS オリジン")
+    service.add_argument(
+        "--allow-engine-revision-mismatch",
+        action="store_true",
+        help="リモートの llama.cpp のリビジョン不一致を許可する",
+    )
     service.add_argument("--engine-key-file", type=Path, required=True)
     args = parser.parse_args()
+    if args.command == "run" and args.allow_engine_revision_mismatch and not args.engine_url:
+        service.error("--allow-engine-revision-mismatch には --engine-url が必要です")
     try:
         with state_lock(args.state) as path:
             state = load(path)

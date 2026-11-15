@@ -656,9 +656,11 @@ python3 tools/volunteer_worker.py --state ~/.local/state/ptranslate-worker run \
   --engine-key-file /path/to/engine-key
 ```
 
-- 推論側は llama.cpp `b11804`（コミット `c7fc5094179bf8a9c73c18593db714f8da41a402`）と承認済みの
+- 推論側は既定で llama.cpp `b11804`（コミット `c7fc5094179bf8a9c73c18593db714f8da41a402`）と承認済みの
   `plamo-3-translate-2b-Q4_K_M.gguf` を使う。1枠あたりのコンテキストを32768以上にする
   （1枠なら `--parallel 1 --ctx-size 32768`）。
+- パッチ済みのビルドを使う場合は、`--engine-url` とあわせて `--allow-engine-revision-mismatch` を指定すると、
+  リビジョンの不一致を許可する。ビルド情報の取得、モデル名・SHA-256・コンテキスト長の照合、および仲介の検疫は引き続き行う。
 - CLI は受付前に `GET /props` のビルド情報・モデルファイル名・コンテキスト長を照合する。さらに、推論側の
   HTTPS リバースプロキシは、起動に使った GGUF から `sha256sum` などで事前に求めた小文字64桁の
   SHA-256 を `X-PTranslate-Model-SHA256` ヘッダーとして `GET /props` と

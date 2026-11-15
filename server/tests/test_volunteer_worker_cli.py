@@ -129,6 +129,30 @@ class WorkerCliTest(unittest.TestCase):
         ):
             engine.verify()
 
+    def test_remote_revision_override_preserves_metadata_and_model_checks(self):
+        engine = cli.RemoteEngine(
+            "https://gpu.example.com", "engine-key", allow_revision_mismatch=True
+        )
+        props = {
+            "build_info": "b11804-abcdef0",
+            "model_path": f"/models/{cli.MODEL_FILE}",
+            "default_generation_settings": {"n_ctx": 32768},
+        }
+        for override, digest, valid in (
+            ({}, cli.MODEL_SHA, True),
+            ({}, None, False),
+            ({"build_info": ""}, cli.MODEL_SHA, False),
+            ({"model_path": "/models/other.gguf"}, cli.MODEL_SHA, False),
+            ({"default_generation_settings": {"n_ctx": 8192}}, cli.MODEL_SHA, False),
+        ):
+            response = remote_response(json.dumps({**props, **override}).encode(), digest)
+            with patch.object(engine, "open", return_value=response):
+                if valid:
+                    engine.verify()
+                else:
+                    with self.assertRaises(cli.EngineMismatch):
+                        engine.verify()
+
     def test_remote_relay_accepts_only_completion_and_checks_response_digest(self):
         engine = cli.RemoteEngine("https://gpu.example.com", "engine-key")
         sse = b'data: {"choices":[]}\n\ndata: [DONE]\n\n'
@@ -157,7 +181,15 @@ class WorkerCliTest(unittest.TestCase):
                 engine.verify()
 
     def test_remote_mismatch_prevents_participation_before_contacting_broker(self):
-        args = type("Args", (), {"engine_url": "https://gpu.example.com", "model": None})()
+        args = type(
+            "Args",
+            (),
+            {
+                "engine_url": "https://gpu.example.com",
+                "model": None,
+                "allow_engine_revision_mismatch": False,
+            },
+        )()
         with tempfile.TemporaryDirectory() as directory:
             args.engine_key_file = Path(directory) / "key"
             args.engine_key_file.write_text("test-engine-token")
