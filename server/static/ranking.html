@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ランキング · PTranslate</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="stylesheet" href="/account.css">
+<script type="module" src="/account.mjs"></script>
+</head>
+<body>
+<main>
+  <nav aria-label="ページ"><a href="/">翻訳</a><a href="/account">マイページ</a></nav>
+  <h1>ランキング</h1>
+  <section>
+    <form id="ranking">
+      <label>期間 <select id="period"><option value="month">月別</option><option value="all">累計</option></select></label>
+      <label id="month-label">月 <input id="month" type="text" inputmode="numeric" pattern="[0-9]{4}-(0[1-9]|1[0-2])" placeholder="YYYY-MM" required></label>
+      <button>表示</button>
+    </form>
+    <p id="status" role="status">読み込み中…</p>
+    <div class="table" id="ranking-table" hidden>
+      <table>
+        <thead><tr><th scope="col">順位</th><th scope="col">表示名</th><th scope="col">推定トークン数</th><th scope="col">参加日数</th></tr></thead>
+        <tbody id="ranking-entries"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+</body>
+</html>
