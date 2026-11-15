@@ -6,6 +6,7 @@
 mod auth;
 mod chrome_bridge;
 mod connection;
+#[cfg(target_os = "linux")]
 mod host_env;
 mod local;
 #[cfg(target_os = "macos")]

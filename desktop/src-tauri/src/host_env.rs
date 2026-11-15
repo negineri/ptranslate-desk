@@ -1,4 +1,4 @@
-//! AppImage で起動したとき、端末のプログラムへ AppImage の環境を渡さないようにする。
+//! AppImage で起動したとき、端末のプログラムへ AppImage の環境を渡さないようにする。Linux だけで使う。
 //!
 //! AppImage の AppRun は `LD_LIBRARY_PATH` などの先頭に同梱物の場所 (`$APPDIR/usr/lib` など) を足す。
 //! 子のプロセスがそのまま引き継ぐと、端末の推論エンジンやブラウザーが同梱の古いライブラリ
