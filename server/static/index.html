@@ -131,13 +131,9 @@
 </main>
 <dialog id="client-connection-dialog" aria-labelledby="client-connection-title">
   <h2 id="client-connection-title">クライアントの接続設定</h2>
-  <p class="hint">PTranslate Deskの「設定 → 接続先の設定」に入力してください。</p>
+  <p class="hint">PTranslate Deskの「サーバー翻訳の設定」に入力してください。</p>
   <label for="client-server-url">サーバーURL</label>
   <div class="connection-value"><input id="client-server-url" type="text" readonly><button data-copy-connection="client-server-url">コピー</button></div>
-  <label for="client-discovery-url">OIDC discovery URL</label>
-  <div class="connection-value"><input id="client-discovery-url" type="text" readonly><button data-copy-connection="client-discovery-url">コピー</button></div>
-  <label for="client-client-id">client ID</label>
-  <div class="connection-value"><input id="client-client-id" type="text" readonly><button data-copy-connection="client-client-id">コピー</button></div>
   <p id="client-connection-status" class="hint" role="status"></p>
   <form method="dialog"><button>閉じる</button></form>
 </dialog>
@@ -411,8 +407,6 @@ async function init(signal) {
   if (webClient) setPool(config.pool);
   const connection = config.desktop_connection || {};
   $("client-server-url").value = connection.server_url || location.origin;
-  $("client-discovery-url").value = connection.discovery_url || "";
-  $("client-client-id").value = connection.client_id || "translator-desktop";
   for (const button of document.querySelectorAll("[data-copy-connection]")) {
     button.disabled = !$(button.dataset.copyConnection).value;
   }
@@ -456,8 +450,7 @@ els.swap.addEventListener("click", () => {
   updateCount(); updateForm(); save(); scheduleAuto();
 });
 $("show-client-connection").addEventListener("click", () => {
-  $("client-connection-status").textContent = $("client-discovery-url").value ? "" :
-    "認証先が未設定です。管理者にOIDC discovery URLを確認してください。";
+  $("client-connection-status").textContent = "";
   $("client-connection-dialog").showModal();
 });
 for (const button of document.querySelectorAll("[data-copy-connection]")) {

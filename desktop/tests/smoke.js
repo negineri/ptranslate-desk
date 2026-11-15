@@ -39,7 +39,6 @@
     $("wizard-next").click();
     await wait(() => currentStep() === "connection");
     $("server-url").value = "https://wizard.example.com";
-    $("discovery-url").value = "https://auth.example.com/.well-known/openid-configuration";
     $("wizard-next").click();
     await wait(() => currentStep() === "login");
     step = "ウィザードのログイン";
@@ -103,25 +102,23 @@
     if (!$("settings-page").contains($("connection-form"))) throw new Error("接続先の配置");
     $("translation-tab").click();
     const connection = await window.__TAURI__.core.invoke("load_connection");
-    if (connection.server_url !== "https://wizard.example.com" || connection.client_id !== "translator-desktop") throw new Error("ウィザードで設定した接続先");
+    if (connection.server_url !== "https://wizard.example.com" || connection.client_id !== "smoke-desktop" || connection.discovery_url !== "https://auth.example.com/.well-known/openid-configuration") throw new Error("ウィザードで設定した接続先");
     if ($("server-url").value !== connection.server_url) throw new Error("接続先の読み込み");
     let rejected = false;
     try {
-      await window.__TAURI__.core.invoke("save_connection", { connection: { ...connection, server_url: "http://example.com" } });
+      await window.__TAURI__.core.invoke("save_connection", { serverUrl: "http://example.com" });
     } catch { rejected = true; }
     if (!rejected) throw new Error("安全でない接続先を保存できてしまう");
     step = "接続先の適用とキャンセル";
     $("settings-tab").click();
     const editConnection = () => {
       $("server-url").value = "http://translate.example.com";
-      $("discovery-url").value = "https://auth.example.com/.well-known/openid-configuration";
       $("server-url").dispatchEvent(new Event("input", { bubbles: true }));
     };
     editConnection();
     if ($("settings-apply").hidden || getComputedStyle($("settings-apply")).position !== "fixed") throw new Error("固定の適用ダイアログ");
     $("cancel-settings").click();
-    if (!$("settings-apply").hidden || $("server-url").value !== connection.server_url ||
-        $("discovery-url").value !== connection.discovery_url) throw new Error("キャンセルで復元されない");
+    if (!$("settings-apply").hidden || $("server-url").value !== connection.server_url) throw new Error("キャンセルで復元されない");
     editConnection();
     $("apply-settings").click();
     await wait(() => $("settings-apply").textContent.includes("HTTPS") && !$("apply-settings").disabled);
@@ -131,7 +128,6 @@
     $("connection-settings").open = true;
     $("src").value = "Keep this text";
     $("server-url").value = "https://translate.example.com";
-    $("discovery-url").value = "https://auth.example.com/.well-known/openid-configuration";
     $("server-url").dispatchEvent(new Event("input", { bubbles: true }));
     $("apply-settings").click();
     await wait(async () => $("settings-apply").hidden &&

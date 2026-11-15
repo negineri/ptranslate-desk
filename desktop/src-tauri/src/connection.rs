@@ -1,9 +1,15 @@
-//! 接続先の公開設定。資格情報は含めず、変更はログアウト後の再起動で反映する。
-use reqwest::Url;
+//! 接続先の公開設定。資格情報は含まない。
+use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, io::ErrorKind, path::PathBuf};
 use tauri::{AppHandle, Manager, WebviewWindow};
+
+#[derive(Deserialize)]
+struct ClientConfig {
+    discovery_url: String,
+    client_id: String,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +30,57 @@ impl Default for Connection {
 }
 
 impl Connection {
+    pub async fn discover(client: &Client, server_url: String) -> Result<Self, String> {
+        let connection = Self {
+            server_url,
+            ..Self::default()
+        }
+        .validated()?;
+        let url = format!("{}/api/client-config", connection.server_url);
+        #[cfg(feature = "smoke-test")]
+        let url = if std::env::var_os("PTRANSLATE_SMOKE_CONFIG").is_some()
+            && matches!(
+                connection.server_url.as_str(),
+                "https://wizard.example.com" | "https://translate.example.com"
+            ) {
+            "http://127.0.0.1:8002/api/client-config".into()
+        } else {
+            url
+        };
+        let mut response = client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|_| "サーバーに接続できませんでした")?;
+        if response.status() != StatusCode::OK {
+            return Err(format!(
+                "サーバーから接続設定を取得できませんでした（HTTP {}）。サーバーURLを確認し、解決しない場合は管理者に確認してください",
+                response.status().as_u16()
+            ));
+        }
+        let invalid = "サーバーの接続設定が不正です。管理者に確認してください";
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "接続設定を読み込めませんでした")?
+        {
+            if body.len() + chunk.len() > 16 * 1024 {
+                return Err(invalid.into());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let config: ClientConfig = serde_json::from_slice(&body).map_err(|_| invalid)?;
+        Self {
+            discovery_url: config.discovery_url,
+            client_id: config.client_id,
+            ..connection
+        }
+        .validated()
+        .map_err(|_| invalid.into())
+    }
+
     pub fn validated(mut self) -> Result<Self, String> {
         self.server_url = self.server_url.trim().into();
         self.discovery_url = self.discovery_url.trim().into();
@@ -104,16 +161,16 @@ pub fn load_connection(app: AppHandle, window: WebviewWindow) -> Result<Connecti
 pub async fn save_connection(
     app: AppHandle,
     window: WebviewWindow,
-    connection: Connection,
+    server_url: String,
 ) -> Result<Connection, String> {
     require_main(&window)?;
-    let connection = connection.validated()?;
     let backend = app.state::<crate::Backend>();
     let auth = backend.auth();
     let changing = auth.begin_connection_change()?;
     if !std::sync::Arc::ptr_eq(&auth, &backend.auth()) {
         return Err("接続先が変更されました。もう一度適用してください".into());
     }
+    let connection = Connection::discover(&backend.client, server_url).await?;
     let destination = path(&app)?;
     let parent = destination.parent().ok_or("接続先設定の保存先が不正です")?;
     fs::create_dir_all(parent).map_err(|_| "接続先設定を保存できませんでした")?;

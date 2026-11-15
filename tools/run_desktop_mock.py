@@ -61,6 +61,11 @@ def main() -> int:
         TR_LISTEN_PORT="8002",
         TR_UPSTREAM_URL=f"http://127.0.0.1:{mock.server_port}/v1/completions",
     )
+    if args.smoke_test:
+        env.update(
+            TR_DESKTOP_DISCOVERY_URL="https://auth.example.com/.well-known/openid-configuration",
+            TR_DESKTOP_CLIENT_ID="smoke-desktop",
+        )
     started = time.monotonic()
     server = subprocess.Popen([sys.executable, "-I", "server/translator.py"], cwd=ROOT, env=env)
     app = None

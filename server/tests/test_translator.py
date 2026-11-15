@@ -231,6 +231,15 @@ class ServerTest(unittest.TestCase):
                     },
                 )
                 self.assertNotIn("internal.invalid", json.dumps(config))
+                conn, response = self.call("GET", "/api/client-config", user=None)
+                with response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.getheader("Cache-Control"), "private, no-store")
+                    self.assertEqual(
+                        json.loads(response.read()),
+                        {"discovery_url": discovery, "client_id": "translator-desktop"},
+                    )
+                conn.close()
 
     def test_requires_json(self):
         _, resp = self.call("POST", "/api/translate", req(), ctype="text/plain")

@@ -276,7 +276,7 @@ pub async fn worker_registration_status(
 pub async fn register_worker(
     app: AppHandle,
     window: WebviewWindow,
-    connection: Connection,
+    server_url: String,
     terms_version: u32,
 ) -> Result<Status, String> {
     require_main(&window)?;
@@ -292,7 +292,11 @@ pub async fn register_worker(
     if !previous.server_url.is_empty() && credential(&vault(&previous))?.is_some() {
         return Err("登録済みです。提供先を変えるには登録を解除してください".into());
     }
-    let connection = connection.validated()?;
+    let connection =
+        Connection::discover(&app.state::<crate::Backend>().client, server_url).await?;
+    if connection.discovery_url.is_empty() {
+        return Err("提供先にログインの設定がありません。管理者に確認してください".into());
+    }
     let entry = vault(&connection);
     if credential(&entry)?.is_some() {
         return Err("提供先に保存済みのワーカー資格があります".into());
