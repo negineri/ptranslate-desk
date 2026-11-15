@@ -2,7 +2,7 @@
 
 ## タグとバージョン
 
-`v*` のタグをpushすると、サーバーイメージ、macOS・Windowsクライアント、Chrome拡張を同じタグで配布します。
+`v*` のタグをpushすると、サーバーイメージ、macOS・Windows・Linuxクライアント、Chrome拡張を同じタグで配布します。
 配布バージョンはビルド対象のHEADに付いたgitタグから取得します。例えば `v0.2.2` ならアプリは `0.2.2` です。
 設定ファイルやnpm・Cargoのバージョンは `0.0.0-dev` のままで、リリースごとの書き換えは不要です。
 
@@ -29,7 +29,10 @@ WindowsではPythonを `python` コマンドから呼びます。
 タグでは、試験とサーバーイメージの公開が成功してから `desktop-release-build` が秘密鍵なしで配布用アプリをビルドします。
 別の新しいランナーの `desktop-release` が署名・パッケージ作成・公開を担当します。
 Windowsも `desktop-windows-release-build` で、秘密鍵なしの最適化ビルドからNSISインストーラーを作成します。
-両OSのビルドが揃ってから署名ジョブへ進みます。署名ジョブはWindowsのインストーラーを実行せず、
+Linuxは `desktop-linux-release-build` (Ubuntu 24.04) で、秘密鍵なしの最適化ビルドからdebとAppImageを作成します。
+3つのOSのビルドが揃ってから署名ジョブへ進みます。署名ジョブはdebとAppImageを展開・実行しません。
+debは名前・ar形式の先頭メンバー (`debian-binary` が `2.0`)・サイズを、AppImageは名前・ELF64・x86-64・
+AppImage type 2の印・サイズを検査してから配布名へコピーし、AppImageにだけ更新用署名を付けます。署名ジョブはWindowsのインストーラーを実行せず、
 名前・PEヘッダー・GUI形式・サイズを検査してからコピーし、更新用署名だけを付けます。
 両ジョブでタグのコミットがmainに含まれることを確認します。
 `-beta.1` などを含むタグはGitHubのprereleaseとして公開し、通常の更新対象にはしません。
@@ -44,11 +47,17 @@ macOS 13以降のApple Silicon・Intelに対応する `universal-apple-darwin` �
 - `PTranslate.Chrome_<version>.zip` と `.zip.sha256`: Chrome拡張とZIPのSHA-256
 - `_x64-setup.exe` と `.exe.sig`: Windows 10 / 11（x64）のNSISインストーラーとTauri更新署名。
   `latest.json` の `windows-x86_64` に割り当てる
+- `_amd64.AppImage` と `.AppImage.sig`: Ubuntu 24.04以降（x64）のAppImageとTauri更新署名。
+  `latest.json` の `linux-x86_64-appimage` に割り当てる。ローカル翻訳の隔離に使う `bubblewrap` は
+  AppImageに含まれないため、利用者の環境に別途インストールする
+- `_amd64.deb`: Ubuntu 24.04以降（x64）のdeb。更新署名は付けず、`latest.json` にも載せない。
+  更新は新しいdebを手動で入れ直す。debで入れたアプリにAppImageを渡さないよう、汎用の
+  `linux-x86_64` は `latest.json` に置かず、検査でも拒否する
 
 Release作成後にも `latest.json` のバージョン、HTTPS、署名、両アーキテクチャの対応を検査します。
 公開先は [GitHub Releases](https://github.com/negineri/ptranslate-desk/releases) です。
 Windowsも空白・`+`を含まない固定の配布名に揃え、URLと実際のファイル名の一致を試験します。
-Windowsの配布物や更新署名が欠けている場合は公開しません。共通の `latest.json` は1回だけ生成します。
+Windowsの配布物や更新署名、Linuxのdeb・AppImage・AppImageの更新署名が欠けている場合は公開しません。共通の `latest.json` は1回だけ生成します。
 
 ## Chrome拡張のZIP
 
