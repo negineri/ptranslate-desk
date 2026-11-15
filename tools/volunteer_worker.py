@@ -2,24 +2,36 @@
 """Linux で提供先を認可し、制限付き翻訳ワーカーを無人運用する。"""
 
 import argparse
+import contextlib
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import hmac
 import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from urllib import error, parse, request
 
+from prepare_local_engine import MODEL_SHA
+
 MAX_TTL = 30 * 86400
 DAY = 86400
+MODEL_FILE = "plamo-3-translate-2b-Q4_K_M.gguf"
+MODEL_DIGEST_HEADER = "X-PTranslate-Model-SHA256"
+ENGINE_TAG = "b11804"
+ENGINE_COMMIT = "c7fc5094179bf8a9c73c18593db714f8da41a402"
+METADATA_LIMIT = 65536
 
 
 class Failure(Exception):
@@ -69,12 +81,7 @@ def api(url, *, form=None, body=None, token=None):
         headers["Authorization"] = f"Bearer {token}"
     try:
         with HTTP.open(request.Request(url, data, headers), timeout=15) as response:
-            body_bytes = response.read(65537)
-            if len(body_bytes) > 65536:
-                raise ValueError
-            payload = json.loads(body_bytes)
-            if isinstance(payload, dict):
-                return payload
+            return json_object(response)
     except error.HTTPError as exc:
         with exc:
             try:
@@ -85,7 +92,143 @@ def api(url, *, form=None, body=None, token=None):
         raise Failure(f"HTTP {exc.code}", exc.code, code) from None
     except (ValueError, OSError, http.client.HTTPException):
         raise Failure("接続できないか応答が不正です") from None
-    raise Failure("応答が不正です")
+
+
+def json_object(response):
+    body = response.read(METADATA_LIMIT + 1)
+    if len(body) > METADATA_LIMIT:
+        raise ValueError
+    data = json.loads(body)
+    if not isinstance(data, dict):
+        raise ValueError
+    return data
+
+
+class EngineMismatch(Failure):
+    pass
+
+
+class RemoteEngine:
+    def __init__(self, url, key):
+        https_url(url, origin_only=True)
+        self.url = url.rstrip("/")
+        self.key = key
+        self.recheck_failed = threading.Event()
+
+    def open(self, route, data=None, timeout=5):
+        return HTTP.open(
+            request.Request(
+                self.url + route,
+                data=data,
+                headers={"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"},
+            ),
+            timeout=timeout,
+        )
+
+    @staticmethod
+    def check_digest(response):
+        if response.headers.get_all(MODEL_DIGEST_HEADER, []) != [MODEL_SHA]:
+            raise EngineMismatch("リモート推論先のモデルのSHA-256を確認できません")
+
+    def verify(self):
+        if self.recheck_failed.is_set():
+            raise EngineMismatch("リモート推論先の応答でモデルのSHA-256が一致しません")
+        try:
+            with self.open("/props") as response:
+                if response.status != 200:
+                    raise Failure("リモート推論先の設定を取得できません")
+                self.check_digest(response)
+                props = json_object(response)
+        except error.HTTPError as exc:
+            with exc:
+                if exc.code in (401, 403, 404):
+                    raise EngineMismatch(
+                        "リモート推論先の認証または /props を確認してください"
+                    ) from None
+            raise Failure("リモート推論先の設定を取得できません") from None
+        except (ValueError, OSError, http.client.HTTPException):
+            raise Failure("リモート推論先の設定を取得できません") from None
+        build = props.get("build_info")
+        tag, _, commit = build.partition("-") if isinstance(build, str) else ("", "", "")
+        if tag != ENGINE_TAG or len(commit) < 7 or not ENGINE_COMMIT.startswith(commit):
+            raise EngineMismatch(
+                f"リモート推論先のllama.cppが対応リビジョン {ENGINE_TAG} と一致しません"
+            )
+        model = props.get("model_path")
+        if not isinstance(model, str) or Path(model).name != MODEL_FILE:
+            raise EngineMismatch("リモート推論先が承認済みのモデルを読み込んでいません")
+        settings = props.get("default_generation_settings")
+        context_size = settings.get("n_ctx") if isinstance(settings, dict) else None
+        if type(context_size) is not int or context_size < 32768:
+            raise EngineMismatch("リモート推論先には1枠あたり32768以上のコンテキストが必要です")
+
+    @contextmanager
+    def relay(self):
+        engine = self
+        secret = secrets.token_urlsafe(32)
+
+        class Handler(BaseHTTPRequestHandler):
+            timeout = 10
+
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                if self.path != "/v1/completions":
+                    self.send_error(404)
+                    return
+                supplied = self.headers.get("Authorization", "").encode()
+                if not hmac.compare_digest(supplied, f"Bearer {secret}".encode()):
+                    self.send_error(401)
+                    return
+                lengths = self.headers.get_all("Content-Length", [])
+                if (
+                    self.headers.get("Transfer-Encoding")
+                    or len(lengths) != 1
+                    or not re.fullmatch(r"[0-9]{1,6}", lengths[0])
+                    or not 0 < int(lengths[0]) <= 256 * 1024
+                ):
+                    self.send_error(400)
+                    return
+                sent = False
+                try:
+                    count = int(lengths[0])
+                    body = self.rfile.read(count)
+                    if len(body) != count:
+                        return
+                    with engine.open(self.path, body, timeout=30) as response:
+                        engine.check_digest(response)
+                        if (
+                            response.status != 200
+                            or response.headers.get_content_type() != "text/event-stream"
+                        ):
+                            raise Failure("リモート推論先がストリームを返しませんでした")
+                        sent = True
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.end_headers()
+                        while chunk := response.read1(8192):
+                            self.wfile.write(chunk)
+                except error.HTTPError as exc:
+                    with exc, contextlib.suppress(OSError):
+                        self.send_error(502)
+                except EngineMismatch:
+                    engine.recheck_failed.set()
+                    with contextlib.suppress(OSError):
+                        self.send_error(502)
+                except (Failure, OSError, http.client.HTTPException):
+                    if not sent:
+                        with contextlib.suppress(OSError):
+                            self.send_error(502)
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                yield server.server_port, secret
+            finally:
+                server.shutdown()
+                thread.join()
 
 
 @contextmanager
@@ -307,20 +450,34 @@ def run_worker(binary, config, stopping):
 def run(args, path, state):
     if not state.get("refresh_token"):
         raise Failure("authorize で提供先を認可してください")
-    if not 1 <= args.engine_port <= 65535:
-        raise Failure("推論エンジンのポートが不正です")
-    with args.model.open("rb") as model:
-        model_hash = hashlib.file_digest(model, "sha256").hexdigest()
     engine_secret = args.engine_key_file.read_text().strip()
     if not engine_secret or len(engine_secret) > 4096:
         raise Failure("推論エンジンの資格が不正です")
+    if args.engine_url:
+        if args.model is not None:
+            raise Failure("--model はローカル推論先に指定してください")
+        engine = RemoteEngine(args.engine_url, engine_secret)
+        engine.verify()
+        with engine.relay() as (port, secret):
+            participate(args, path, state, port, secret, MODEL_SHA, engine.verify)
+    else:
+        if args.model is None:
+            raise Failure("--engine-port を使う場合は --model を指定してください")
+        if not 1 <= args.engine_port <= 65535:
+            raise Failure("推論エンジンのポートが不正です")
+        with args.model.open("rb") as model:
+            model_hash = hashlib.file_digest(model, "sha256").hexdigest()
+        participate(args, path, state, args.engine_port, engine_secret, model_hash)
+
+
+def participate(args, path, state, port, secret, model_hash, verify=None):
     config = dict(
         broker=state["broker"],
         worker_secret=state["worker_secret"],
         model_sha256=model_hash,
         agent_version="",
-        engine_port=args.engine_port,
-        engine_secret=engine_secret,
+        engine_port=port,
+        engine_secret=secret,
     )
     stopped = False
 
@@ -350,16 +507,29 @@ def run(args, path, state):
                 next_attempt = state["renew_at"]
         if stopped:
             break
-        result = run_worker(args.binary.resolve(), config, lambda: stopped)
+        try:
+            if verify is not None:
+                verify()
+        except EngineMismatch:
+            raise
+        except Failure:
+            result = "engine_unavailable"
+        else:
+            if stopped:
+                break
+            result = run_worker(args.binary.resolve(), config, lambda: stopped)
         if result == "rejected":
             raise Failure("提供先がワーカー資格を拒否しました")
         if result in ("completed", "waiting", "quarantined"):
             delay = 5
             sleep_seconds = 2 if result == "quarantined" else 0.25
         else:
-            print(
-                "ワーカーの処理を続けられませんでした。再試行します。", file=sys.stderr, flush=True
+            message = (
+                "リモート推論先の確認に失敗したため、ジョブの受付を待機します。"
+                if result == "engine_unavailable"
+                else "ワーカーの処理を続けられませんでした。再試行します。"
             )
+            print(message, file=sys.stderr, flush=True)
             sleep_seconds = delay
             delay = min(delay * 2, 300)
         until = time.monotonic() + sleep_seconds
@@ -378,8 +548,10 @@ def main():
     setup.add_argument("--accept-terms", action="store_true", required=True)
     service = commands.add_parser("run", help="提供を開始し、資格を自動更新する")
     service.add_argument("--binary", type=Path, required=True)
-    service.add_argument("--model", type=Path, required=True)
-    service.add_argument("--engine-port", type=int, required=True)
+    service.add_argument("--model", type=Path)
+    target = service.add_mutually_exclusive_group(required=True)
+    target.add_argument("--engine-port", type=int, help="ローカルの llama-server のポート")
+    target.add_argument("--engine-url", help="リモートの llama-server の HTTPS オリジン")
     service.add_argument("--engine-key-file", type=Path, required=True)
     args = parser.parse_args()
     try:
