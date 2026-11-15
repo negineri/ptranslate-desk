@@ -682,10 +682,6 @@ macOS と対応する Ubuntu x64 では参加設定から監督処理を起動�
   `<unknown>` とする。例外のメッセージとスタックトレースは出さない。
 - 仲介は前段からしか届かない場所で待ち受ける。オリジンは CDN からの接続だけを受ける
 - 前段は、クライアントが付けた `X-Forwarded-User-Id` と `X-Forwarded-User` を全経路で必ず消す。OIDC を通した要求にだけ付け直す
-- `/account`、`/ranking`、`/api/account`、`/api/account/ranking` は OIDC 認証と検証済みの `sub` を必須にする。
-  `TR_PUBLIC_SERVER_URL` には掲載の更新を受ける公開オリジンを指定する。
-  通知を使う場合は、`POST /api/account/delete` だけをパスとメソッドの完全一致で運営の通知元から仲介に渡す。
-  OIDC の利用者ヘッダーを消し、Authorization を仲介へ渡す。同じ国制限を維持し、鍵と通知本文をログに記録しない。
 - 匿名のAPI (`/api/anonymous`、匿名の資格を付けた `/api/config` と `/api/translate`) はOIDCのプロキシを通さずに仲介へ渡す。
 - Web の匿名利用を出すときは、未ログインでも翻訳画面と静的ファイルを開けるようにする。
   Web の登録済みログインのリンクは `/oauth2/start?rd=%2F` を使うため、前段でこのパスをログインの入口へ通す。
@@ -698,6 +694,10 @@ macOS と対応する Ubuntu x64 では参加設定から監督処理を起動�
   Web の Cookie と Bearer で同一の issuer・アカウントに同じ `sub` が届くことを公開前に確認する
 - クライアントの IP は、前段が付けるヘッダー (`TR_CLIENT_IP_HEADER`) からだけ読む。前段は、CDN が付けた値で
   このヘッダーを上書きし、クライアントが付けた値を通さない
+- `/account`、`/ranking`、`/api/account`、`/api/account/ranking` は OIDC 認証と検証済みの `sub` を必須にする。
+  `TR_PUBLIC_SERVER_URL` には掲載の更新を受ける公開オリジンを指定する。
+  通知を使う場合は、`POST /api/account/delete` だけをパスとメソッドの完全一致で運営の通知元から仲介に渡す。
+  OIDC の利用者ヘッダーを消し、Authorization を仲介へ渡す。同じ国制限を維持し、鍵と通知本文をログに記録しない。
 - CDN と前段は、要求と応答の本文をログ、キャッシュ、検査用の保存に残さない。応答は `Cache-Control: private, no-store`。
   SSE をためない (バッファリングを切る)
 - 提供は日本の中に限る。CDN で日本の外からの要求を断り、仲介も前段が付ける国のヘッダー (`TR_COUNTRY_HEADER`。
