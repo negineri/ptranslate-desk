@@ -14,10 +14,6 @@ panel.innerHTML = `<summary>翻訳の処理を提供する</summary>
   <form>
     <label for="worker-server-url">提供先のサーバーURL</label>
     <input id="worker-server-url" name="server_url" type="url" required autocomplete="off" spellcheck="false">
-    <label for="worker-discovery-url">提供先のOIDC discovery URL</label>
-    <input id="worker-discovery-url" name="discovery_url" type="url" required autocomplete="off" spellcheck="false">
-    <label for="worker-client-id">提供先の公開client ID</label>
-    <input id="worker-client-id" name="client_id" required maxlength="256" autocomplete="off" spellcheck="false">
     <p class="hint">日本国内から参加し、処理した内容を記録・目的外利用しないでください。エージェントを改変して内容を取り出すことも禁止します。違反時には資格を失効します。</p>
     <label><input id="worker-terms" type="checkbox" required> 参加の規約に同意する</label>
     <div>
@@ -47,7 +43,7 @@ const status = panel.querySelector("[role=status]");
 const forget = form.querySelector("#worker-forget");
 const confirmation = form.querySelector("#worker-forget-confirmation");
 const agree = form.querySelector("#worker-forget-agree");
-const fields = [...form.querySelectorAll("input[name]")];
+const serverUrlField = form.querySelector("#worker-server-url");
 const activityLine = panel.querySelector("#worker-activity");
 const participation = panel.querySelector("#worker-participation");
 const participationToggle = participation.querySelector("input");
@@ -84,9 +80,7 @@ void listen("worker-activity", ({ payload }) => renderActivity(payload)).then(as
 
 function render() {
   const registered = state?.expires_at != null;
-  for (const field of fields) {
-    field.disabled = busy || registered || !state?.supported;
-  }
+  serverUrlField.disabled = busy || registered || !state?.supported;
   terms.disabled = busy || registered || !state?.supported;
   register.disabled = busy || registered || !state?.supported;
   register.hidden = registered;
@@ -119,7 +113,7 @@ async function operate(command, args) {
   let error;
   try {
     state = await invoke(command, args);
-    for (const field of fields) field.value = state.connection[field.name];
+    serverUrlField.value = state.connection.server_url;
     terms.checked = false;
   } catch (failure) {
     error = String(failure);
@@ -134,8 +128,8 @@ async function operate(command, args) {
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   if (!state?.supported || !terms.checked || !form.reportValidity()) return;
-  const connection = Object.fromEntries(fields.map((field) => [field.name, field.value.trim()]));
-  void operate("register_worker", { connection, termsVersion: state.terms_version });
+  const serverUrl = serverUrlField.value.trim();
+  void operate("register_worker", { serverUrl, termsVersion: state.terms_version });
 });
 renew.onclick = () => operate("renew_worker");
 participationToggle.onchange = () => operate("set_worker_participation", { enabled: participationToggle.checked });

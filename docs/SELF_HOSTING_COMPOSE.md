@@ -112,14 +112,9 @@ Pocket IDの管理画面（`https://<PT_DOMAIN>:8443/`）で利用者を作り�
 
 ## 6. PTranslate Deskをつなぐ
 
-[READMEのmacOSインストール手順](../README.md#インストールmacos)でアプリを入れ、「接続先の設定」に次を入れます。
-`revocation_endpoint` を持たないIdP（Pocket ID）に対応したv0.3.0以降が必要です。
-
-| 項目 | 値 |
-| --- | --- |
-| サーバーURL | `https://<PT_DOMAIN>` |
-| OIDC discovery URL | `https://<PT_DOMAIN>:8443/.well-known/openid-configuration` |
-| client ID | `translator-desktop` |
+[READMEのmacOSインストール手順](../README.md#インストールmacos)でアプリを入れ、「サーバー翻訳の設定」に
+`https://<PT_DOMAIN>` を入力します。アプリは `GET /api/client-config` からPocket IDのdiscovery URLとclient IDを取得します。
+このAPIに対応したサーバーの版を使ってください。
 
 Macもtailnetに入っている必要があります。ログインするとブラウザーでPocket IDが開くので、パスキーでログインします。
 

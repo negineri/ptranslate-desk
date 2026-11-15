@@ -128,6 +128,7 @@ configs:
       skip_provider_button = true
       # 画面は API の 401 で読み直してログインし直す。/api/ はログイン画面へ転送せず 401 を返す
       api_routes = ["^/api/"]
+      skip_auth_routes = ['GET=^/api/client-config\z']
       # PTranslate Desk は Bearer の JWT (access token) で API を呼ぶ。署名・issuer・aud・期限を確かめる
       skip_jwt_bearer_tokens = true
       bearer_token_login_fallback = false

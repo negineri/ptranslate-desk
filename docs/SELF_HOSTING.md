@@ -208,7 +208,7 @@ Pythonサービスとコンテナはどちらか一方を使います。
 | `TR_USERINFO_URL` | 空 | IdP の userinfo。前段が検証した Bearer の ID または表示名が足りないときに `sub` と `preferred_username` を取得する |
 | `TR_USERINFO_CACHE_SECONDS` | 300 | userinfoの結果を覚えておく秒数の上限（tokenの期限が先ならそこまで） |
 | `TR_PUBLIC_SERVER_URL` | 空 | クライアント向けに表示する公開サーバーURL。空ならWebの閲覧中のオリジンを使う |
-| `TR_DESKTOP_DISCOVERY_URL` | 空 | クライアント向けに表示する外部から到達できるHTTPSのOIDC discovery URL |
+| `TR_DESKTOP_DISCOVERY_URL` | 空 | 接続設定APIが返す、外部から到達できるHTTPSのOIDC discovery URL |
 | `TR_DESKTOP_CLIENT_ID` | `translator-desktop` | デスクトップの公開クライアントのID |
 | `TR_STATIC_DIR` | `server/static/`（コンテナでは `/app/static`） | Webの静的ファイルの配置先 |
 
@@ -438,6 +438,14 @@ server {
         proxy_set_header X-Original-URI $request_uri;
     }
 
+    location = /api/client-config {
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
+        proxy_set_header X-Forwarded-User-Id "";
+        proxy_set_header X-Forwarded-User "";
+        proxy_pass http://127.0.0.1:8002/api/client-config;
+    }
+
     location /api/ {
         auth_request /_auth;
         error_page 401 = @api_login_required;
@@ -529,23 +537,17 @@ Webで匿名利用を有効にする場合は、`TR_ANON_ENABLED=1` と公開HTT
 ## 8. デスクトップの接続先を設定する
 
 [READMEのmacOSインストール手順](../README.md#インストールmacos)でアプリを入れます。
-接続先設定はv0.2.0以降で利用できます。ソースから実行する場合は
+サーバーURLだけで設定するには、接続設定APIに対応したサーバーとアプリが必要です。ソースから実行する場合は
 [ビルド手順](../desktop/README.md#mac-のアプリをビルドする)を参照してください。
 
-ログイン前から表示される「接続先の設定」に次を入力します。
-
-| 項目 | この手順の値 |
-| --- | --- |
-| サーバーURL | `https://translate.example.com` |
-| OIDC discovery URL | `https://auth.example.com/application/o/translator-desktop/.well-known/openid-configuration` |
-| client ID | `translator-desktop` |
-
+「サーバー翻訳の設定」に `https://translate.example.com` を入力し、「適用」を押します。
 サーバーURLはHTTPSのオリジン（ポート指定可）で、パス・クエリー・ユーザー情報は付けません。
-APIはこのオリジンの `/api/config` と `/api/translate` に置きます。
-認証のURLにもHTTPSが必要です。ローカルHTTPでの動作確認は1章のモック用手順を使います。
-「保存して再起動」を押して設定を反映します。
+アプリは、同じオリジンの `GET /api/client-config` から認証設定を取得します。
+サーバーの `TR_DESKTOP_DISCOVERY_URL` に外部から到達可能なHTTPSのdiscovery URL
+（例 `https://auth.example.com/application/o/translator-desktop/.well-known/openid-configuration`）を、
+`TR_DESKTOP_CLIENT_ID` に公開クライアントのIDを設定してください。
 
-再起動後にログインし、初回の同意とキーチェーンの「常に許可」を選びます。
+適用後にログインし、初回の同意とキーチェーンの「常に許可」を選びます。
 自分のAuthentikで作った利用者でログインします。
 接続先の公開情報はOS標準のアプリ設定フォルダの `connection.json` に保存します。
 macOSでは `~/Library/Application Support/com.witenp.ptranslate-desk/connection.json` です。
@@ -554,6 +556,9 @@ refresh tokenはOSの資格情報の保管だけに置き、サーバーURL・di
 設定ファイルを手で変更する場合は完全終了してから編集します。不正な設定ファイルでは起動を止めます。
 
 ## 9. 完了を確認する
+
+最初に、CookieやBearerを付けずに `curl --fail https://translate.example.com/api/client-config` を実行し、
+公開のdiscovery URLとclient IDが返ることを確認します。
 
 1. ブラウザーで `https://translate.example.com/` を開き、Authentik経由でログインして文章を翻訳します。
 2. 同じブラウザーで `https://translate.example.com/api/config` を開き、`user` に利用者名が出ることを確認します。

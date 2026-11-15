@@ -1017,6 +1017,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise HttpError(404, "Not found")
             if path.startswith("/api/worker/"):
                 return self.worker_api(method, path)
+            if method == "GET" and path == "/api/client-config":
+                return self.send_json(
+                    200, {"discovery_url": DESKTOP_DISCOVERY_URL, "client_id": DESKTOP_CLIENT_ID}
+                )
             if method == "POST" and path == "/api/anonymous":
                 return self.issue_anonymous()
             user, name = self.user()
@@ -1064,6 +1068,7 @@ class Handler(BaseHTTPRequestHandler):
                     "/logo.png",
                     "/favicon.ico",
                     "/api/anonymous",
+                    "/api/client-config",
                     "/api/config",
                     "/api/translate",
                     "/api/worker/register",

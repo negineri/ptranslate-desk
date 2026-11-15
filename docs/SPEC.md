@@ -176,11 +176,8 @@ IdP の userinfo から `sub` と表示名を得る。前段からも ID が届�
 `ja en zh-hans zh-hant ko ar az be bg bn ca ceb de es et eu fa fr gu he hi hr hu hy id it jv ka kk km lt lv ml mr
 ms my ne nl pa pl ru si sk sl sr sw ta te th tl ur uz vi`)。表示名はサーバーが返すものを使う。
 
-`desktop_connection` はWeb版の「クライアントの接続設定」ボタンで表示する公開設定。
-`TR_PUBLIC_SERVER_URL`、`TR_DESKTOP_DISCOVERY_URL`、`TR_DESKTOP_CLIENT_ID` から返す。
-URLの既定値は空欄、client IDは `translator-desktop`。Web版はサーバーURLが空欄なら閲覧中のオリジンを表示する。
-認証先が空欄のときは管理者への確認を案内し、内部のuserinfo URLや要求のヘッダーから推測しない。
-既存の `/api/config` と同じ認証を必要とし、秘密鍵やトークンは含めない。
+`desktop_connection` は公開の接続設定。Web版はそのうち `server_url` を「クライアントの接続設定」で表示し、
+空欄なら閲覧中のオリジンを表示する。このフィールドは既存クライアントとの互換性のため維持する。
 
 `concurrency` は未完了の翻訳要求数の上限を通知する。枠の予約ではない。
 サーバーは `TR_MAX_ACTIVE_PER_USER` を `max_in_flight` に返し、`scope` は `user`（同じ利用者の全クライアントで共有）とする。
@@ -316,6 +313,23 @@ POSIXでは親ディレクトリは0700、ファイルは所有者本人の0600�
 ボランティア枠のログは1分ごとの層・用途別の件数、待ち時間の合計、エラー、中止と分散状態だけを記録する。
 所有者・ネットワークの分散のために1分ごとの件数を10枠、利用者ごとの回避には直近 `TR_SPREAD_WINDOW` 件をメモリに保持する。受け入れ試験はローカルのモックを使う。
 
+### 5.1.4 `GET /api/client-config` — 未ログイン時の接続設定
+
+デスクトップが、入力されたHTTPSオリジンからログイン前に取得する。プロキシはこのGETをパスの完全一致で
+認証なしで通す。Cookie・Bearer・匿名資格は不要。応答は `Cache-Control: private, no-store`。
+
+```json
+{
+  "discovery_url": "https://auth.example.com/.well-known/openid-configuration",
+  "client_id": "translator-desktop"
+}
+```
+
+`TR_DESKTOP_DISCOVERY_URL` と `TR_DESKTOP_CLIENT_ID` の公開値を返す。
+認証先が空欄ならOIDCログインは利用できない。匿名利用の可否はサーバーの匿名資格発行設定に従う。
+client IDの既定値は `translator-desktop`。内部のuserinfo URL、秘密鍵、トークン、利用者の情報は含めない。
+クライアントはリダイレクトをたどらず、取得元のサーバーURLをそのまま翻訳先として使う。
+
 ### 5.2 `POST /api/translate`
 
 ボランティア枠では、本文の `consent` に設定APIが返した同意の版を整数で送る。
@@ -430,9 +444,10 @@ POSIXでは親ディレクトリは0700、ファイルは所有者本人の0600�
 ### 6.1 方式
 
 接続先はメインウィンドウの「サーバー翻訳の設定」で、ログイン前から変更できる。
-サーバーURL（HTTPSのオリジン）、OIDC discovery URL（HTTPS）、公開クライアントのclient IDを指定する。
-匿名利用だけならOIDC discovery URLを省略できる。
-初期値はサーバーURL・OIDC discovery URLを空欄、client IDを `translator-desktop` とする。
+利用者はサーバーURL（HTTPSのオリジン）を指定する。アプリは `GET /api/client-config` で
+OIDC discovery URLと公開クライアントのclient IDを取得・検証してから適用する。
+取得に失敗した場合は現在の設定を維持する。保存済みの設定は従来の形式のまま読み込む。
+サーバーURLの初期値は空欄。
 接続先が未設定の間は認証情報の復元や認証先への通信を行わず、ログイン時は設定を案内する。
 ユーザー情報・クエリー・フラグメントをURLに含めず、サーバーURLにはパスを付けない。
 以下の本番サービスの値は既定値であり、独自サーバーでは置き換える。
