@@ -75,7 +75,9 @@ def write_release_config(root: Path, output: Path, version: str) -> None:
     output.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
 
 
-def check_manifest(manifest: dict, version: str, require_windows: bool = False) -> None:
+def check_manifest(
+    manifest: dict, version: str, require_windows: bool = False, require_linux: bool = False
+) -> None:
     if manifest.get("version") != version:
         raise ValueError("latest.json の version がアプリと一致しません")
     platforms = manifest.get("platforms", {})
@@ -84,6 +86,11 @@ def check_manifest(manifest: dict, version: str, require_windows: bool = False) 
         raise ValueError("latest.json に Apple Silicon と Intel の両方が必要です")
     if require_windows and not isinstance(platforms.get("windows-x86_64"), dict):
         raise ValueError("latest.json に Windows x64 が必要です")
+    if require_linux and not isinstance(platforms.get("linux-x86_64-appimage"), dict):
+        raise ValueError("latest.json に Linux x64 の AppImage が必要です")
+    if "linux-x86_64" in platforms:
+        # debで入れたアプリがAppImageを受け取らないよう、汎用のLinuxの項目は使わない。
+        raise ValueError("latest.json の Linux は linux-x86_64-appimage に限ります")
     for entry in platforms.values():
         if not isinstance(entry, dict):
             raise ValueError("更新情報の形式が不正です")

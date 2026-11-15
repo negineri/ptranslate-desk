@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ビルドコードを実行せず、macOSとWindowsの配布ファイルを作成する。"""
+"""ビルドコードを実行せず、macOS・Windows・Linuxの配布ファイルを作成する。"""
 
 import argparse
 import base64
@@ -158,12 +158,91 @@ def prepare_windows(directory, source, version):
     shutil.copyfile(installer, destination)
 
 
-def sign_update(directory, version, windows=False):
+def linux_filename(version):
+    safe_version = re.sub(r"[^A-Za-z0-9_.-]", ".", version)
+    return f"PTranslate.Desk_{safe_version}_amd64.deb"
+
+
+def prepare_linux(directory, source, version):
+    # debは署名ジョブでは展開・実行しない。単一のdebだけを形式とサイズで検査して受け取る。
+    files = list(source.iterdir())
+    if len(files) != 1:
+        raise ValueError("Linux配布物はdeb 1個にしてください")
+    package = files[0]
+    if (
+        package.is_symlink()
+        or not package.is_file()
+        or package.name not in (f"PTranslate Desk_{version}_amd64.deb", linux_filename(version))
+        or not 128 <= package.stat().st_size <= 512 * 1024**2
+    ):
+        raise ValueError("Linuxのdebの名前・形式・サイズが不正です")
+    with package.open("rb") as stream:
+        header = stream.read(72)
+    # ar形式の先頭メンバーが debian-binary (2.0) であることを確認する。
+    if (
+        header[:8] != b"!<arch>\n"
+        or header[8:24].rstrip(b" ").rstrip(b"/") != b"debian-binary"
+        or header[66:68] != b"`\n"
+        or header[68:72] != b"2.0\n"
+    ):
+        raise ValueError("Debianパッケージではありません")
+    output = directory / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    destination = output / linux_filename(version)
+    if destination.exists():
+        raise ValueError("Linux配布物が既にあります")
+    shutil.copyfile(package, destination)
+
+
+def appimage_filename(version):
+    safe_version = re.sub(r"[^A-Za-z0-9_.-]", ".", version)
+    return f"PTranslate.Desk_{safe_version}_amd64.AppImage"
+
+
+def prepare_appimage(directory, source, version):
+    # AppImageは署名ジョブでは実行しない。単一のx86_64のAppImage (type 2) だけを受け取る。
+    files = list(source.iterdir())
+    if len(files) != 1:
+        raise ValueError("Linux配布物はAppImage 1個にしてください")
+    appimage = files[0]
+    if (
+        appimage.is_symlink()
+        or not appimage.is_file()
+        or appimage.name
+        not in (f"PTranslate Desk_{version}_amd64.AppImage", appimage_filename(version))
+        or not 128 <= appimage.stat().st_size <= 1024**3
+    ):
+        raise ValueError("AppImageの名前・形式・サイズが不正です")
+    with appimage.open("rb") as stream:
+        header = stream.read(20)
+    # ELF64・リトルエンディアン・x86-64で、AppImage type 2 の印 (AI\x02) があること。
+    if (
+        header[:4] != b"\x7fELF"
+        or header[4] != 2
+        or header[5] != 1
+        or header[8:11] != b"AI\x02"
+        or struct.unpack_from("<H", header, 18)[0] != 0x3E
+    ):
+        raise ValueError("x86_64のAppImageではありません")
+    output = directory / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    destination = output / appimage_filename(version)
+    if destination.exists():
+        raise ValueError("AppImage配布物が既にあります")
+    shutil.copyfile(appimage, destination)
+
+
+def sign_update(directory, version, windows=False, appimage=False):
     if not os.environ.get("TAURI_SIGNING_PRIVATE_KEY") or not os.environ.get(
         "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
     ):
         raise ValueError("更新署名用のActions secretsを設定してください")
-    filename = windows_filename(version) if windows else f"{artifact_stem(version)}.app.tar.gz"
+    if windows:
+        filename = windows_filename(version)
+    elif appimage:
+        filename = appimage_filename(version)
+    else:
+        filename = f"{artifact_stem(version)}.app.tar.gz"
     archive = directory / "output" / filename
     # アプリのpackage.jsonのscriptsやビルドフックを経由しない。
     run(
@@ -228,7 +307,7 @@ def verify_update_signature(archive, signature, public_key, version):
         raise ValueError("更新データ・版の署名がアプリの公開鍵と一致しません") from None
 
 
-def manifest(directory, tag, require_windows=False):
+def manifest(directory, tag, require_windows=False, require_linux=False):
     version = version_from_tag(tag)
     output = directory / "output"
     filename = f"{artifact_stem(version)}.app.tar.gz"
@@ -268,7 +347,20 @@ def manifest(directory, tag, require_windows=False):
             "url": f"https://github.com/negineri/ptranslate-desk/releases/download/{quote(tag, safe='')}/{quote(windows, safe='')}",
         }
         expected.update((windows, windows + ".sig"))
-    check_manifest(value, version, require_windows=require_windows)
+    if require_linux:
+        appimage = appimage_filename(version)
+        appimage_signature = (output / (appimage + ".sig")).read_text(encoding="utf-8").strip()
+        verify_update_signature(
+            output / appimage, appimage_signature, config["plugins"]["updater"]["pubkey"], version
+        )
+        # AppImageで入れたアプリだけが使う。debで入れたアプリにAppImageを渡さないよう、
+        # 汎用の linux-x86_64 には割り当てない。debは更新情報に載せず、公開ファイルにだけ加える。
+        value["platforms"]["linux-x86_64-appimage"] = {
+            "signature": appimage_signature,
+            "url": f"https://github.com/negineri/ptranslate-desk/releases/download/{quote(tag, safe='')}/{quote(appimage, safe='')}",
+        }
+        expected.update((linux_filename(version), appimage, appimage + ".sig"))
+    check_manifest(value, version, require_windows=require_windows, require_linux=require_linux)
     (output / "latest.json").write_text(
         json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -283,9 +375,12 @@ def main():
         choices=[
             "prepare",
             "prepare-windows",
+            "prepare-linux",
+            "prepare-appimage",
             "package",
             "sign-update",
             "sign-windows",
+            "sign-appimage",
             "manifest",
         ],
     )
@@ -293,22 +388,37 @@ def main():
     parser.add_argument("--tag", required=True)
     parser.add_argument("--archive", type=Path)
     parser.add_argument("--require-windows", action="store_true")
+    parser.add_argument("--require-linux", action="store_true")
     args = parser.parse_args()
     try:
         version = version_from_tag(args.tag)
-        if args.action in ("prepare", "prepare-windows"):
+        if args.action in ("prepare", "prepare-windows", "prepare-linux", "prepare-appimage"):
             if not args.archive:
                 parser.error("--archive が必要です")
             if args.action == "prepare-windows":
                 prepare_windows(args.directory, args.archive, version)
+            elif args.action == "prepare-linux":
+                prepare_linux(args.directory, args.archive, version)
+            elif args.action == "prepare-appimage":
+                prepare_appimage(args.directory, args.archive, version)
             else:
                 prepare(args.directory, args.archive, version)
         elif args.action == "package":
             package(args.directory, version)
-        elif args.action in ("sign-update", "sign-windows"):
-            sign_update(args.directory, version, windows=args.action == "sign-windows")
+        elif args.action in ("sign-update", "sign-windows", "sign-appimage"):
+            sign_update(
+                args.directory,
+                version,
+                windows=args.action == "sign-windows",
+                appimage=args.action == "sign-appimage",
+            )
         else:
-            manifest(args.directory, args.tag, require_windows=args.require_windows)
+            manifest(
+                args.directory,
+                args.tag,
+                require_windows=args.require_windows,
+                require_linux=args.require_linux,
+            )
     except (ValueError, OSError, subprocess.TimeoutExpired, zipfile.BadZipFile):
         parser.exit(1, "配布処理に失敗しました（秘密の漏出を避けるため詳細は表示しません）\n")
 

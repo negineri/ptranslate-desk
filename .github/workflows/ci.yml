@@ -300,9 +300,62 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  desktop-linux-release-build:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [desktop-linux, image]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: mainに含まれる配布タグを確認
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          python3 tools/check_release_version.py --tag "$RELEASE_TAG" --write-config desktop/src-tauri/gen/release-version.json
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: desktop/src-tauri
+          shared-key: desktop-linux
+          save-if: "false"
+      - name: Tauri のビルド依存をインストール
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - run: npm ci
+        working-directory: desktop
+      # 秘密鍵なしでビルドする。AppImageの更新用署名は別の新しいランナーで付ける。
+      # ランナーにFUSEがないため、linuxdeployは展開して実行する。
+      - run: npm run tauri -- build --ci --bundles deb,appimage --config src-tauri/gen/release-version.json --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked
+        working-directory: desktop
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-release-deb
+          path: desktop/src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-release-appimage
+          path: desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 1
+
   desktop-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [desktop-release-build, desktop-windows-release-build, chrome-extension-release-build]
+    needs: [desktop-release-build, desktop-windows-release-build, desktop-linux-release-build, chrome-extension-release-build]
     runs-on: macos-latest
     environment: release-signing
     permissions:
@@ -367,13 +420,35 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-release-deb
+          path: ${{ runner.temp }}/linux-release-input
+      - name: Linuxのdebを検査して配布名へ揃える
+        run: python3 tools/package_macos_release.py prepare-linux --directory "$RUNNER_TEMP/ptranslate-release" --archive "$RUNNER_TEMP/linux-release-input" --tag "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-release-appimage
+          path: ${{ runner.temp }}/appimage-release-input
+      - name: AppImageを検査して配布名へ揃える
+        run: python3 tools/package_macos_release.py prepare-appimage --directory "$RUNNER_TEMP/ptranslate-release" --archive "$RUNNER_TEMP/appimage-release-input" --tag "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - name: AppImageに更新用署名を付ける
+        run: python3 tools/package_macos_release.py sign-appimage --directory "$RUNNER_TEMP/ptranslate-release" --tag "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: 更新署名の検証に使うOpenSSLを選ぶ
         run: |
           updater_openssl_prefix="$(brew --prefix openssl@3)"
           test -x "$updater_openssl_prefix/bin/openssl"
           echo "$updater_openssl_prefix/bin" >> "$GITHUB_PATH"
       - name: 更新manifestを検査
-        run: python3 tools/package_macos_release.py manifest --require-windows --directory "$RUNNER_TEMP/ptranslate-release" --tag "$RELEASE_TAG"
+        run: python3 tools/package_macos_release.py manifest --require-windows --require-linux --directory "$RUNNER_TEMP/ptranslate-release" --tag "$RELEASE_TAG"
         env:
           RELEASE_TAG: ${{ github.ref_name }}
       - name: 署名用一時ファイルを削除

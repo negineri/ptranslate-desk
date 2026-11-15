@@ -21,11 +21,12 @@ Windows・macOS・Ubuntuでは初回に、このPCで翻訳する[ローカル�
 | --------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | デスクトップ版（PTranslate Desk） | macOS 13以降、Apple Silicon・Intel                              | 両CPU共通のuniversal版。選択した文章の取得にはアクセシビリティの許可が必要 |
 | Windowsデスクトップ版 | Windows 10 / 11（x64） | NSISインストーラー。コード署名なし。Ctrl+Cの連続コピーに対応 |
-| Ubuntuデスクトップ版 | Ubuntu 24.04以降（x64） | ソースから `.deb` を作成。ローカル推論はCPUに対応 |
+| Ubuntuデスクトップ版 | Ubuntu 24.04以降（x64） | GitHub Releasesの `.deb` または AppImage。ローカル推論はCPUに対応 |
 | Web版（PTranslate）               | JavaScriptとストリーミング受信（Fetch API）に対応したブラウザー | インストール不要。構築したサーバーのURLをブラウザーで開く                  |
 | Chrome拡張（PTranslate for Chrome） | Chrome 120以降、Edgeなど Chromium系のブラウザー | ページで選んだ文やページ全体を訳す。Web版のログインを使う。GitHub ReleasesのZIPを手動導入。ストア配布は未対応 |
 
-Ubuntu向けのパッケージは未配布です。ショートカットによる選択文の取得は未実装です。
+Ubuntu向けは v0.9.0-beta.3 から配布しています。自動更新はAppImageだけが対象で、`.deb` は新しい版を手動で入れ直します。
+AppImageでローカル翻訳の処理を提供する場合は、別途 `bubblewrap` をインストールしてください。ショートカットによる選択文の取得は未実装です。
 サーバー管理者がIdPで利用者と利用権限を管理します。
 
 ## インストール（Windows）

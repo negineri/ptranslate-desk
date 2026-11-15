@@ -38,6 +38,28 @@ class ReleaseVersionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "署名"):
             release.check_manifest(manifest, "1.0.0", require_windows=True)
 
+    def test_linux_manifest_requires_appimage_only_entry(self):
+        entry = {
+            "url": "https://example.invalid/update",
+            "signature": base64.b64encode(b"public-signature").decode(),
+        }
+        manifest = {
+            "version": "1.0.0",
+            "platforms": {name: entry.copy() for name in ("darwin-aarch64", "darwin-x86_64")},
+        }
+        with self.assertRaisesRegex(ValueError, "AppImage"):
+            release.check_manifest(manifest, "1.0.0", require_linux=True)
+        manifest["platforms"]["linux-x86_64-appimage"] = entry.copy()
+        release.check_manifest(manifest, "1.0.0", require_linux=True)
+        # debで入れたアプリもAppImageを受け取ってしまう汎用の項目は拒否する。
+        manifest["platforms"]["linux-x86_64"] = entry.copy()
+        with self.assertRaisesRegex(ValueError, "linux-x86_64-appimage"):
+            release.check_manifest(manifest, "1.0.0", require_linux=True)
+        del manifest["platforms"]["linux-x86_64"]
+        manifest["platforms"]["linux-x86_64-appimage"]["signature"] = ""
+        with self.assertRaisesRegex(ValueError, "署名"):
+            release.check_manifest(manifest, "1.0.0", require_linux=True)
+
     def test_universal_manifest_requires_both_platforms_and_signature(self):
         entry = {
             "url": "https://example.invalid/app.tar.gz",

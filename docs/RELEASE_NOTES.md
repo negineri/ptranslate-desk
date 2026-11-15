@@ -1,6 +1,13 @@
-v0.9.0-beta.2 は、ボランティア翻訳の試験版です。公式のボランティア枠は引き続き未公開です。
+v0.9.0-beta.3 は、ボランティア翻訳の試験版です。公式のボランティア枠は引き続き未公開です。
 
-## beta.1 からの変更
+## beta.2 からの変更
+
+- Ubuntu 24.04以降 (x64) 向けに、`.deb` と AppImage の配布を始めました。Assetsの `_amd64.deb` または `_amd64.AppImage` を使います。
+  - `.deb` は `sudo apt install ./PTranslate.Desk_<version>_amd64.deb` で導入します。自動更新には対応していません。新しい版の `.deb` を入れ直してください。
+  - AppImage は実行権限を付けて起動します。署名を検証したうえでアプリ内から更新できます。ローカル翻訳の処理を提供する場合は、別途 `bubblewrap` をインストールしてください。
+  - Linux の配布物を Release で配るのは初めてです。クリーンな端末での導入と、AppImage の更新はまだ確認していません。
+
+## beta.1 からの変更 (beta.2)
 
 - 登録済み利用者とワーカー所有者を OIDC の `sub` で識別します。改名してもワーカーの登録・参加同意・失効は同じアカウントに残ります。
 - **サーバー更新前に前段の設定が必要です。** 認証済みの `sub` を `X-Forwarded-User-Id`、表示名を `X-Forwarded-User` で渡してください。旧版のワーカー状態ファイルに記録がある場合は移行が必要です。[前段と移行の手順](https://github.com/negineri/ptranslate-desk/blob/v0.9.0-beta.2/docs/SELF_HOSTING.md)
