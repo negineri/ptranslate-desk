@@ -1,6 +1,16 @@
-v0.9.0-beta.7 は、ボランティア翻訳の試験版です。公式のボランティア枠は引き続き未公開です。
+v0.9.0-beta.8 は、ボランティア翻訳の試験版です。公式のボランティア枠は引き続き未公開です。
 
-## beta.6 からの変更
+## beta.7 からの変更
+
+### Linux サーバー向けのワーカー CLI
+
+- 単体のワーカー CLI `ptranslate-worker` を追加しました。Assets の `PTranslate.Worker_0.9.0-beta.8_linux-x64.tar.gz` に入っている実行ファイル 1 つで動きます。デスクトップアプリ、GUI のライブラリ、Python は要りません。必要なのは Linux x64 (glibc 2.35 以降) と bubblewrap です。
+- `ptranslate-worker authorize <提供先のURL> --accept-terms` で認可し、`ptranslate-worker run` で提供を始めます。推論エンジン (llama.cpp b11804、CPU) と承認済みモデルは、初回に自動で取得・検証して起動します。
+- 自分で用意した `llama-server` を使う場合は、`--engine-url` (別のサーバー) か `--engine-port` (同じサーバー) を指定します。
+- 状態ファイルは以前の Python 版 (`tools/volunteer_worker.py`) と同じ形式なので、同じ `--state` をそのまま使えます。Python 版は移行のために残していますが、今後は使わないでください。手順は[ボランティア翻訳の仕様](https://github.com/negineri/ptranslate-desk/blob/v0.9.0-beta.8/docs/VOLUNTEER_TRANSLATION.md)を参照してください。
+- 実際の仲介を相手にしたジョブの処理は、この版で初めて確かめます。
+
+## beta.6 からの変更 (beta.7)
 
 ### 1回の原文の上限とコンテキスト
 
