@@ -57,6 +57,9 @@ def test_binary():
             "--no-run",
             "--manifest-path",
             "desktop/src-tauri/Cargo.toml",
+            "-p",
+            "ptranslate-core",
+            "--lib",
             "--message-format=json",
         ],
         cwd=ROOT,
@@ -68,7 +71,7 @@ def test_binary():
     for line in build.stdout.splitlines():
         artifact = json.loads(line)
         if artifact.get("reason") == "compiler-artifact" and artifact.get("executable"):
-            if artifact["target"]["name"] == "ptranslate-desk" and artifact["profile"]["test"]:
+            if artifact["target"]["name"] == "ptranslate_core" and artifact["profile"]["test"]:
                 return artifact["executable"]
     raise RuntimeError("実モデル確認用の試験バイナリがありません")
 
@@ -76,7 +79,7 @@ def test_binary():
 @contextmanager
 def engine(device, installation):
     install = json.loads(installation.read_text())
-    source = (ROOT / "desktop/src-tauri/src/local/resources.rs").read_text()
+    source = (ROOT / "desktop/src-tauri/core/src/engine.rs").read_text()
     expected = re.search(r'MODEL_SHA: &str =\s*"([a-f0-9]{64})"', source)[1]
     with Path(install["model"]).open("rb") as model:
         model_hash = hashlib.file_digest(model, "sha256").hexdigest()

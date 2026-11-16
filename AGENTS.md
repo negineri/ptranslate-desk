@@ -9,6 +9,9 @@ Claude Code は [CLAUDE.md](CLAUDE.md) からこのファイルを読む。
   [docs/SPEC.md](docs/SPEC.md) の「5. サーバーの API」が正。変えるときは SPEC も同じ PR で直す
 - `server/static/index.html`: Web の画面 (HTML 1 枚、ビルドなし)。区切りと自動で翻訳の規則は SPEC の 4 章
 - `tools/mock_plamo.py`: 翻訳エンジンのモック。試験はこれを相手にする。本物の翻訳エンジンには試験でつながない
+- `desktop/src-tauri/`: デスクトップのアプリ (Tauri 2)。Cargo のワークスペースで、`core/` は Tauri に依存しない共通部分
+  (翻訳のプロンプト、ワーカー、サンドボックス、推論エンジンの取得)、`worker/` は Linux サーバー向けの
+  単体のワーカー CLI `ptranslate-worker`。Rust の試験は `--workspace` で回す
 - `docs/SPEC.md`: デスクトップのクライアントの仕様
 - `docs/VOLUNTEER_TRANSLATION.md`: 翻訳ワーカーのプールとボランティア枠の仕様 (未実装)。実装する前に 3 章の脅威と対策を読む
 - 本番のデプロイの設定 (nginx、oauth2-proxy、Authentik、VM) は別の非公開のリポジトリにある。ここには置かない

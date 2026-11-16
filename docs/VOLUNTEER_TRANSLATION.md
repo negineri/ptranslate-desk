@@ -637,10 +637,16 @@ macOS と対応する Ubuntu x64 では参加設定から監督処理を起動�
 
 ### Linux サーバーでの無人提供
 
-Linux でビルドした `ptranslate-desk` と Python 3.11 以降を使う。ワーカー子プロセスにはデスクトップと同じ
-bubblewrap と Landlock (ABI 4 以降) の制限がかかる。推論エンジンは別のサービスとして、承認済みモデルと API キーを使い、
-`127.0.0.1` だけで待ち受ける。推論エンジンが実際に読み込むモデルを `--model` で指定する。
-実行ユーザー専用の状態ディレクトリには refresh token とワーカー資格を保存する (ディレクトリ0700、ファイル0600)。
+単体の CLI `ptranslate-worker` を使う。Release の `PTranslate.Worker_<version>_linux-x64.tar.gz` に入っている
+実行ファイル 1 つで動き、デスクトップのアプリ、GUI のライブラリ、Python は要らない。必要なのは Linux x64
+(glibc 2.35 以降)、bubblewrap、Landlock (ABI 4 以降) で、ワーカー子プロセスにはデスクトップと同じ制限がかかる。
+コードはデスクトップと共通 (`desktop/src-tauri/core`) で、CLI は `desktop/src-tauri/worker` にある。
+
+```sh
+sha256sum -c PTranslate.Worker_<version>_linux-x64.tar.gz.sha256
+tar -xzf PTranslate.Worker_<version>_linux-x64.tar.gz
+sudo install -m 0755 ptranslate-worker /usr/local/bin/
+```
 
 提供先は `GET /api/client-config` で公開クライアントの設定を返す。Authentik ではそのクライアントの Device Code・
 Refresh Token grant と `offline_access` スコープ、ブランドの Device Code Flow を有効にする。
@@ -648,17 +654,41 @@ Refresh Token grant と `offline_access` スコープ、ブランドの Device C
 再認可するときは常駐プロセスを停止して同じ手順を実行する。
 
 ```sh
-python3 tools/volunteer_worker.py --state ~/.local/state/ptranslate-worker \
-  authorize https://translate.example.com --accept-terms
-python3 tools/volunteer_worker.py --state ~/.local/state/ptranslate-worker run \
-  --binary /usr/bin/ptranslate-desk --model /path/to/model.gguf \
-  --engine-port 18080 --engine-key-file /path/to/engine-key
+ptranslate-worker authorize https://translate.example.com --accept-terms
+ptranslate-worker run
 ```
+
+- `run` は、推論エンジン (llama.cpp `b11804` の Ubuntu x64 版、CPU) と承認済みモデルを固定の配布元から取得し、
+  サイズと SHA-256 を確かめてから、`127.0.0.1` の一時ポートと起動ごとの認証キーで起動する。取得は初回だけで、
+  約 1.8 GB。`prepare` で先に取得しておける。CPU のスレッド数は `--threads` で指定する。
+- 状態ディレクトリ (既定 `$XDG_STATE_HOME/ptranslate-worker`、なければ `~/.local/state/ptranslate-worker`) に
+  refresh token とワーカー資格を保存する (ディレクトリ 0700、ファイル 0600)。access token は保存しない。
+  推論エンジンとモデルは `--data` (既定 `$XDG_DATA_HOME/ptranslate-worker`) に置く。
+- 状態ファイルの形式は以前の Python 版 (`tools/volunteer_worker.py`) と同じで、同じ `--state` をそのまま使える。
+  Python 版は移行のために残しているが、新しく使わない。
+- 自分で起動した `llama-server` を使う場合は `--engine-port`・`--engine-key-file`・`--model` を指定する
+  (推論エンジンが実際に読み込むモデルを `--model` で指定する)。
 
 デスクトップと Linux の常駐プロセスは、提供開始時と提供中に約1日おきに refresh token で access token を取り直し、
 所有者の認証でワーカー資格を更新する。有効期間が2日未満なら、期間の半分を目安に早めに更新する。
 一時的な障害では有効期限内に再試行する。認可の失効・期限切れを IdP が返したら受付を停止し、再認可を案内する。
-Linux の `run` は SIGTERM を受けて処理を停止する。監視サービスから起動する場合は、既存の状態を使って同じ `run` を実行する。
+`run` は SIGTERM・SIGINT を受けて処理を停止し、自分で起動した推論エンジンも止める。systemd の例:
+
+```ini
+[Unit]
+Description=PTranslate worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/ptranslate-worker run
+User=ptranslate
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
+```
 
 #### 別の Linux サーバーで推論する
 
@@ -666,9 +696,7 @@ Linux の `run` は SIGTERM を受けて処理を停止する。監視サービ�
 推論用の API キーはファイルに置く。`--engine-url` を使う場合はワーカー側にモデルファイルを置く必要はない。
 
 ```sh
-python3 tools/volunteer_worker.py --state ~/.local/state/ptranslate-worker run \
-  --binary /usr/bin/ptranslate-desk --engine-url https://gpu.example.com \
-  --engine-key-file /path/to/engine-key
+ptranslate-worker run --engine-url https://gpu.example.com --engine-key-file /path/to/engine-key
 ```
 
 - 推論側は既定で llama.cpp `b11804`（コミット `c7fc5094179bf8a9c73c18593db714f8da41a402`）と承認済みの

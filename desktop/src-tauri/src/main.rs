@@ -6,8 +6,6 @@
 mod auth;
 mod chrome_bridge;
 mod connection;
-#[cfg(target_os = "linux")]
-mod host_env;
 mod local;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -15,18 +13,17 @@ mod resident;
 mod settings;
 #[cfg(feature = "smoke-test")]
 mod smoke;
-mod translation;
 mod updates;
 #[cfg(target_os = "windows")]
 mod windows;
-mod worker_agent;
 #[cfg(target_os = "linux")]
 mod worker_headless;
-mod worker_power;
 mod worker_registration;
-mod worker_relay;
-mod worker_sandbox;
 mod worker_supervisor;
+
+#[cfg(target_os = "linux")]
+use ptranslate_core::host_env;
+use ptranslate_core::{translation, worker_agent, worker_power, worker_sandbox};
 
 #[cfg(feature = "smoke-test")]
 #[tauri::command]

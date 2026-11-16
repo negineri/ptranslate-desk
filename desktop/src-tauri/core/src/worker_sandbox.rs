@@ -1,21 +1,21 @@
 //! 資格を読む前に子プロセスへ適用する OS の制限。
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Ports {
-    pub(crate) relay: u16,
-    pub(crate) engine: u16,
+pub struct Ports {
+    pub relay: u16,
+    pub engine: u16,
 }
 
 #[cfg(any(not(target_os = "linux"), test))]
 impl Ports {
-    pub(crate) fn new(relay: u16, engine: u16) -> Result<Self, ()> {
+    pub fn new(relay: u16, engine: u16) -> Result<Self, ()> {
         if relay == 0 || engine == 0 || relay == engine {
             return Err(());
         }
         Ok(Self { relay, engine })
     }
 
-    pub(crate) fn parse(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Self, ()> {
+    pub fn parse(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<Self, ()> {
         let mut port = || args.next()?.to_str()?.parse::<u16>().ok();
         let ports = Self::new(port().ok_or(())?, port().ok_or(())?)?;
         if args.next().is_some() {
@@ -26,9 +26,9 @@ impl Ports {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) mod linux;
+pub mod linux;
 
-pub(crate) fn supported() -> bool {
+pub fn supported() -> bool {
     #[cfg(target_os = "linux")]
     return linux::supported();
     #[cfg(not(target_os = "linux"))]
@@ -36,12 +36,12 @@ pub(crate) fn supported() -> bool {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub(crate) fn apply(_: Ports) -> Result<(), ()> {
+pub fn apply(_: Ports) -> Result<(), ()> {
     Err(())
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn apply(ports: Ports) -> Result<(), ()> {
+pub fn apply(ports: Ports) -> Result<(), ()> {
     use std::ffi::{c_char, c_int, CString};
 
     #[link(name = "sandbox")]

@@ -1,0 +1,30 @@
+[package]
+name = "ptranslate-core"
+version = "0.0.0-dev"
+edition = "2021"
+publish = false
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+base64 = "0.22"
+getrandom = "0.3"
+sha2 = "0.10"
+zeroize = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["time", "net", "io-util", "sync", "macros", "rt-multi-thread", "process"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+libc = "0.2"
+flate2 = "1"
+tar = "0.4"
+
+[target.'cfg(not(any(target_os = "macos", target_os = "linux")))'.dependencies]
+zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Power"] }
+
+[dev-dependencies]
+zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }

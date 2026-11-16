@@ -10,7 +10,7 @@ fn windows_ac(value: u8) -> Option<bool> {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn external_power() -> Option<bool> {
+pub fn external_power() -> Option<bool> {
     use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 
     let mut status = SYSTEM_POWER_STATUS::default();
@@ -31,7 +31,7 @@ fn mac_power_source(value: &[u8]) -> Option<bool> {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn external_power() -> Option<bool> {
+pub fn external_power() -> Option<bool> {
     use std::ffi::{c_char, c_void, CStr};
 
     #[link(name = "IOKit", kind = "framework")]
@@ -72,7 +72,7 @@ pub(crate) fn external_power() -> Option<bool> {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn external_power() -> Option<bool> {
+pub fn external_power() -> Option<bool> {
     linux_power(std::path::Path::new("/sys/class/power_supply"))
 }
 
@@ -116,7 +116,7 @@ fn linux_power(root: &std::path::Path) -> Option<bool> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-pub(crate) fn external_power() -> Option<bool> {
+pub fn external_power() -> Option<bool> {
     None
 }
 

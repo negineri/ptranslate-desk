@@ -28,15 +28,15 @@ impl From<()> for RequestError {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Bootstrap {
-    pub(crate) broker: String,
-    pub(crate) worker_secret: String,
-    pub(crate) model_sha256: String,
-    pub(crate) agent_version: String,
-    pub(crate) engine_port: u16,
-    pub(crate) engine_secret: String,
-    pub(crate) relay_port: Option<u16>,
-    pub(crate) relay_secret: Option<String>,
+pub struct Bootstrap {
+    pub broker: String,
+    pub worker_secret: String,
+    pub model_sha256: String,
+    pub agent_version: String,
+    pub engine_port: u16,
+    pub engine_secret: String,
+    pub relay_port: Option<u16>,
+    pub relay_secret: Option<String>,
 }
 
 impl Drop for Bootstrap {
@@ -106,7 +106,7 @@ fn valid_version(value: &str) -> bool {
         })
 }
 
-pub(crate) fn broker_origin(value: &str) -> Result<Url> {
+pub fn broker_origin(value: &str) -> Result<Url> {
     let url = Url::parse(value).map_err(|_| ())?;
     if url.scheme() != "https"
         || url.host_str().is_none()
@@ -440,10 +440,10 @@ fn status(value: &'static str) {
     let _ = writeln!(io::stdout(), "{{\"status\":\"{value}\"}}");
 }
 
-pub(crate) const READY_LINE: &[u8] = b"{\"status\":\"ready\"}\n";
+pub const READY_LINE: &[u8] = b"{\"status\":\"ready\"}\n";
 
-pub(crate) const ASSIGNED_LINE: &[u8] = b"{\"status\":\"assigned\"}\n";
-pub(crate) const START_COMMAND: &[u8] = b"go\n";
+pub const ASSIGNED_LINE: &[u8] = b"{\"status\":\"assigned\"}\n";
+pub const START_COMMAND: &[u8] = b"go\n";
 
 #[cfg(not(target_os = "linux"))]
 fn restricted_runtime(ports: Ports) -> Result<tokio::runtime::Runtime> {
@@ -522,7 +522,7 @@ fn run_with_runtime(
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod real_model_probe;
 
-pub(crate) fn entry() {
+pub fn entry() {
     #[cfg(not(target_os = "linux"))]
     let result = Ports::parse(std::env::args_os().skip(2)).and_then(run_from_parent);
     #[cfg(target_os = "linux")]
