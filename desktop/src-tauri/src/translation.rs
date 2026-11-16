@@ -18,8 +18,10 @@ pub(crate) fn languages() -> Value {
     serde_json::from_str(include_str!("../gen/local-languages.json"))
         .expect("生成した言語一覧が不正です")
 }
+/// 1回の原文の上限 (文字)。サーバーの TR_MAX_CHARS と区切りの CHUNK_CHARS と同じ値
+pub const MAX_CHARS: usize = 1500;
 pub fn prompt(body: &Value) -> Result<(String, usize), String> {
-    let text = field(body, "text", 4000, true)?;
+    let text = field(body, "text", MAX_CHARS, true)?;
     let target = field(body, "target_lang", 32, true)?;
     let source = field(body, "source_lang", 32, false)?;
     let valid_lang = |v: &str| {
@@ -48,9 +50,10 @@ pub fn prompt(body: &Value) -> Result<(String, usize), String> {
     if !context.trim().is_empty() {
         value += &format!("<|plamo:tag|>context<|plamo:msg|>{}", context.trim());
     }
-    for (name, max, source_limit, target_limit) in
-        [("history", 4, 4000, 12000), ("glossary", 200, 200, 200)]
-    {
+    for (name, max, source_limit, target_limit) in [
+        ("history", 4, MAX_CHARS, MAX_CHARS * 3),
+        ("glossary", 200, 200, 200),
+    ] {
         if let Some(raw) = body.get(name).filter(|v| !v.is_null()) {
             let pairs = raw.as_array().ok_or("文脈または用語集の形式が不正です")?;
             if pairs.len() > max {

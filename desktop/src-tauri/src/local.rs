@@ -1148,7 +1148,7 @@ async fn json_response(stream: &dyn Output, status: u16, data: Value) -> Result<
         .map_err(|_| ())
 }
 fn configuration(local: &Local) -> Value {
-    json!({"user":"この端末", "languages":languages(), "max_chars":4000, "max_glossary":200, "concurrency":{"max_in_flight":local.slots.limit(),"scope":"application"}})
+    json!({"user":"この端末", "languages":languages(), "max_chars":crate::translation::MAX_CHARS, "max_glossary":200, "concurrency":{"max_in_flight":local.slots.limit(),"scope":"application"}})
 }
 fn completion_request(
     client: &reqwest::Client,
