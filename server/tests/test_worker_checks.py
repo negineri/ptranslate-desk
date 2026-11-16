@@ -30,6 +30,13 @@ def run_admin(state, *args):
     )
 
 
+# 確認用ジョブは TR_CANARY_MIN_LENGTH (既定 120) 以上の原文だけを使うので、合成の文を伸ばす。
+LONG = (
+    " This padding keeps the synthetic verification text long enough to be used,"
+    " because short canaries are skipped."
+)
+
+
 def request(text="This is a synthetic translation test."):
     return tr.parse_request({"text": text, "target_lang": "en"})
 
@@ -88,6 +95,47 @@ class TranslationCheckTest(unittest.TestCase):
         )
         self.assertTrue(tr.matches_target_script("IBM", "ja"))
 
+    def test_numbers_may_come_from_source_when_reference_is_wrong(self):
+        req = tr.parse_request({"text": "16進数64桁の乱数です。", "target_lang": "en"})
+        self.assertEqual(
+            tr.check_translation(req, "A random value of 64 hex digits.", "A random 164 digits."),
+            (),
+        )
+        self.assertIn(
+            "numbers",
+            tr.check_translation(req, "A random value of 65 hex digits.", "A random 164 digits."),
+        )
+
+    def test_canary_verdict_keeps_hard_failures_and_scores_the_rest(self):
+        baseline = "The project dashboard displays all active tasks."
+        self.assertEqual(tr.canary_verdict(request(), baseline, baseline), (True, 1.0))
+        # 数字だけの違いはその場で落とさず、点を下げて窓に任せる。
+        self.assertEqual(tr.canary_verdict(request(), baseline + " 987", baseline), (True, 0.6))
+        self.assertEqual(
+            tr.canary_verdict(request(), "Completely corrupted unrelated content.", baseline),
+            (False, None),
+        )
+        self.assertEqual(
+            tr.canary_verdict(request(), baseline + " https://evil.example/", baseline),
+            (False, None),
+        )
+        # 抜き取りは長さを選べないので、類似度では落とさず、点も窓に入れない。
+        self.assertEqual(
+            tr.canary_verdict(
+                request(), "Completely corrupted unrelated content.", baseline, audit=True
+            ),
+            (True, None),
+        )
+        self.assertEqual(
+            tr.canary_verdict(request(), baseline + " https://evil.example/", baseline, audit=True),
+            (False, None),
+        )
+
+    def test_canary_length_counts_dense_scripts_twice(self):
+        self.assertEqual(tr.canary_length("ab  cd"), 5)
+        self.assertEqual(tr.canary_length("日本語のテキスト"), 16)
+        self.assertEqual(tr.canary_length("한국어"), 6)
+
 
 class WorkerHealthTest(unittest.TestCase):
     def setUp(self):
@@ -116,6 +164,33 @@ class WorkerHealthTest(unittest.TestCase):
         restarted = tr.WorkerHealth(self.registry, probation_jobs=2)
         self.assertFalse(restarted.eligible(self.registry.info(worker["id"])))
         self.assertFalse(restarted.workers)
+
+    def test_low_average_score_quarantines_even_when_each_job_passes(self):
+        data, worker = self.register()
+        health = tr.WorkerHealth(self.registry, probation_jobs=3, min_score=0.93)
+        for score in (0.95, 0.9):
+            health.record(worker, True, score=score)
+        self.assertEqual(self.registry.info(worker["id"])["state"], "probation")
+        health.record(worker, True, score=0.92)
+        self.assertEqual(self.registry.info(worker["id"])["state"], "quarantine")
+        self.assertFalse(health.eligible(self.registry.info(worker["id"])))
+        self.assertEqual(health.workers[worker["id"]]["failed"], 1)
+        # 窓はやり直しになり、新しい点だけで戻す。
+        for score in (1.0, 0.9, 0.95):
+            health.record(self.registry.info(worker["id"]), True, score=score)
+        self.assertTrue(health.eligible(self.registry.info(worker["id"])))
+        # 合格後も直近の平均で見続ける。
+        for score in (0.85, 0.85):
+            health.record(self.registry.info(worker["id"]), True, score=score)
+        self.assertEqual(self.registry.info(worker["id"])["state"], "quarantine")
+
+    def test_audit_scores_do_not_enter_window(self):
+        data, worker = self.register()
+        for _ in range(2):
+            self.health.record(worker, True, score=1.0)
+        self.health.record(worker, True, canary=False, score=0.1)
+        self.assertEqual(list(self.health.workers[worker["id"]]["scores"]), [1.0, 1.0])
+        self.assertTrue(self.health.eligible(worker))
 
     def test_three_owner_failures_hold_every_worker_until_operator_releases(self):
         first, worker = self.register()
@@ -201,7 +276,10 @@ class CanaryApiTest(unittest.TestCase):
         self.canaries.write_text(
             json.dumps(
                 [
-                    {"text": f"Synthetic verification sentence number {n}.", "target_lang": "en"}
+                    {
+                        "text": f"Synthetic verification sentence number {n}." + LONG,
+                        "target_lang": "en",
+                    }
                     for n in range(8)
                 ]
             )
@@ -275,7 +353,9 @@ class CanaryApiTest(unittest.TestCase):
     def test_exhausted_corpus_does_not_repeat_same_owner(self):
         mock, data = self.helper.worker()
         self.canaries.write_text(
-            json.dumps([{"text": "Single synthetic verification sentence.", "target_lang": "en"}])
+            json.dumps(
+                [{"text": "Single synthetic verification sentence." + LONG, "target_lang": "en"}]
+            )
         )
         self.assertTrue(self.checks.reload_if_changed())
         self.checks.start()
@@ -322,8 +402,8 @@ class CanaryApiTest(unittest.TestCase):
             )
 
     def test_reload_keeps_used_and_scores_and_logs_only_owner_count(self):
-        first = {"text": "First private synthetic sentence.", "target_lang": "en"}
-        second = {"text": "Second private synthetic sentence.", "target_lang": "en"}
+        first = {"text": "First private synthetic sentence." + LONG, "target_lang": "en"}
+        second = {"text": "Second private synthetic sentence." + LONG, "target_lang": "en"}
         self.canaries.write_text(json.dumps([first]))
         self.checks.reload_if_changed()
         self.checks.reload_interval = 0.05
@@ -463,3 +543,26 @@ class CanaryApiTest(unittest.TestCase):
         self.canaries.write_text('[{"text":"<|plamo:","target_lang":"en"}]')
         with self.assertRaises(ValueError):
             tr.CanaryChecks(self.helper.hub, [("http://localhost", 1)], self.canaries)
+        self.canaries.write_text('[{"text":"Too short.","target_lang":"en"}]')
+        with self.assertRaises(ValueError):
+            tr.CanaryChecks(self.helper.hub, [("http://localhost", 1)], self.canaries)
+
+    def test_short_canaries_are_skipped(self):
+        self.canaries.write_text(
+            json.dumps(
+                [
+                    {"text": "Too short.", "target_lang": "ja"},
+                    {"text": "短い文です。", "target_lang": "en"},
+                    {"text": "Long enough." + LONG, "target_lang": "ja"},
+                    {
+                        "text": "確認用に使えるだけの長さがある日本語の文です。" * 3,
+                        "target_lang": "en",
+                    },
+                ]
+            )
+        )
+        samples, _ = tr.CanaryChecks.load_samples(self.canaries)
+        self.assertEqual(
+            [req["text"] for _, req in samples],
+            ["Long enough." + LONG, "確認用に使えるだけの長さがある日本語の文です。" * 3],
+        )

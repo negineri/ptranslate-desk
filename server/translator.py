@@ -94,6 +94,9 @@ CANARY_RATE = os.environ.get("TR_CANARY_RATE", "0.05")
 AUDIT_RATE = os.environ.get("TR_AUDIT_RATE", "0.02")
 AUDIT_BACKLOG = os.environ.get("TR_AUDIT_BACKLOG", "50")
 PROBATION_JOBS = env_int("TR_PROBATION_JOBS", 20)
+# 確認用ジョブの直近の平均類似度の下限と、確認用に使う原文の最短の長さ (漢字・かな・ハングルは 2 と数える)
+CANARY_MIN_SCORE = os.environ.get("TR_CANARY_MIN_SCORE", "0.93")
+CANARY_MIN_LENGTH = env_int("TR_CANARY_MIN_LENGTH", 120)
 API_KEY = os.environ.get("TR_API_KEY", "")
 MODEL = os.environ.get("TR_MODEL", "plamo-3-translate")
 # 1 回 (1 区切り) の原文の上限 (文字)。PLaMo のコンテキスト (16K トークン) は原文と訳の
@@ -2388,16 +2391,34 @@ def matches_target_script(text, target):
     return matching / len(letters) >= 0.2
 
 
+def translation_similarity(translated, reference):
+    """NFKC・大小文字・空白をそろえた文字 2 つ組の Dice 係数。"""
+    output, expected = normalized_translation(translated), normalized_translation(reference)
+    if not output:
+        return 0.0
+    if output == expected:
+        return 1.0
+    a = {output[n : n + 2] for n in range(len(output) - 1)}
+    b = {expected[n : n + 2] for n in range(len(expected) - 1)}
+    return 2 * len(a & b) / (len(a) + len(b)) if a or b else 0.0
+
+
+DENSE_SCRIPTS = ("CJK", "HIRAGANA", "KATAKANA", "HANGUL")
+
+
+def canary_length(text):
+    """確認用の原文の長さ。文字の詰まった漢字・かな・ハングルは 2 と数える。"""
+    return sum(
+        2 if any(name in unicodedata.name(c, "") for name in DENSE_SCRIPTS) else 1
+        for c in " ".join(text.split())
+    )
+
+
 def check_translation(req, translated, reference):
     """内容を返さず、判定理由の固定コードだけを返す。"""
-    output, expected = normalized_translation(translated), normalized_translation(reference)
     reasons = []
-    a = {output[n : n + 2] for n in range(max(0, len(output) - 1))}
-    b = {expected[n : n + 2] for n in range(max(0, len(expected) - 1))}
-    similarity = (
-        1.0 if output == expected else (2 * len(a & b) / (len(a) + len(b)) if a or b else 0)
-    )
-    if not output or similarity < 0.6:
+    similarity = translation_similarity(translated, reference)
+    if similarity < 0.6:
         reasons.append("similarity")
     allowed = (
         req["text"]
@@ -2408,7 +2429,8 @@ def check_translation(req, translated, reference):
     )
     if not translation_links(translated) <= translation_links(allowed):
         reasons.append("links")
-    if not translation_numbers(translated) <= translation_numbers(reference):
+    # 基準の訳が誤ることもあるので、原文と用語集にある数字も許す。
+    if not translation_numbers(translated) <= translation_numbers(allowed):
         reasons.append("numbers")
     if matches_target_script(reference, req["target"]) and not matches_target_script(
         translated, req["target"]
@@ -2417,13 +2439,32 @@ def check_translation(req, translated, reference):
     return tuple(reasons)
 
 
+def canary_verdict(req, translated, reference, audit=False):
+    """(合否, 窓に入れる点) を返す。改ざんの跡がはっきりしたものだけをその場で不合格にする。
+
+    数字の違いは正しいワーカーでもモデルの誤りで起きるので、点を 0.6 に下げて窓の平均に任せる。
+    抜き取りは利用者の文で長さを選べないため、URL・メールと言語だけで判定し、点を窓に入れない。
+    """
+    reasons = check_translation(req, translated, reference)
+    hard = {"links", "language"} if audit else {"links", "language", "similarity"}
+    if hard.intersection(reasons):
+        return False, None
+    if audit:
+        return True, None
+    score = translation_similarity(translated, reference)
+    return True, min(score, 0.6) if "numbers" in reasons else score
+
+
 class WorkerHealth:
     """成績は数と時刻だけ。内容や基準の訳を保持しない。"""
 
-    def __init__(self, registry, probation_jobs=20):
+    def __init__(self, registry, probation_jobs=20, min_score=0.93):
         if probation_jobs <= 0:
             raise ValueError("TR_PROBATION_JOBS は正の整数にしてください")
+        if not 0 < min_score <= 1:
+            raise ValueError("TR_CANARY_MIN_SCORE は0より大きく1以下にしてください")
         self.registry, self.probation_jobs = registry, probation_jobs
+        self.min_score = min_score
         self.lock = threading.RLock()
         self.workers = {}
         self.owners = {}
@@ -2448,7 +2489,8 @@ class WorkerHealth:
                 and not worker.get("owner_quarantined", False)
             )
 
-    def record(self, worker, passed=None, timed_out=False, canary=True):
+    def record(self, worker, passed=None, timed_out=False, canary=True, score=None):
+        """score は確認用ジョブの類似度。省略した合格は 1.0 と数える。"""
         wid, owner = worker["id"], worker["owner"]
         with self.lock:
             stats = self.workers.setdefault(
@@ -2461,6 +2503,7 @@ class WorkerHealth:
                     "timeouts": 0,
                     "streak": 0,
                     "recent": deque(maxlen=20),
+                    "scores": deque(maxlen=self.probation_jobs),
                 },
             )
             generation = worker.get("owner_generation", 0)
@@ -2471,6 +2514,7 @@ class WorkerHealth:
             if stats.get("generation", 0) != generation:
                 stats["streak"] = 0
                 stats["recent"].clear()
+                stats["scores"].clear()
                 self.qualified.discard(wid)
             stats["generation"] = generation
             if owner in self.owners and self.owners[owner].get("generation", 0) != generation:
@@ -2480,6 +2524,14 @@ class WorkerHealth:
                 {"passed": 0, "failed": 0, "errors": 0, "timeouts": 0, "failures": deque(maxlen=3)},
             )
             owner_stats["generation"] = generation
+            if passed is True and canary:
+                stats["scores"].append(1.0 if score is None else score)
+                # 直近の平均が下限を下れば、1 件ごとの合格でも不合格として扱う。
+                if (
+                    len(stats["scores"]) >= self.probation_jobs
+                    and sum(stats["scores"]) / len(stats["scores"]) < self.min_score
+                ):
+                    passed = False
             for bucket in (stats, owner_stats):
                 bucket[
                     "passed" if passed is True else "failed" if passed is False else "errors"
@@ -2491,6 +2543,7 @@ class WorkerHealth:
             elif canary:
                 stats["streak"] += 1
             if passed is False:
+                stats["scores"].clear()
                 now = time.monotonic()
                 failures = owner_stats["failures"]
                 while failures and failures[0] <= now - 86400:
@@ -2535,6 +2588,7 @@ class WorkerHealth:
                 if stats["owner"] == owner:
                     stats["streak"] = 0
                     stats["recent"].clear()
+                    stats["scores"].clear()
                     self.qualified.discard(wid)
 
 
@@ -2589,10 +2643,16 @@ class CanaryChecks:
                 req = parse_request(body)
             except HttpError:
                 raise ValueError("確認用ジョブの入力が不正です") from None
+            if canary_length(req["text"]) < CANARY_MIN_LENGTH:
+                continue  # 短い文は正しいワーカーでも類似度が大きく揺れる。
             digest = hashlib.sha256(req["text"].encode()).hexdigest()
             if digest not in seen:
                 samples.append((digest, req))
                 seen.add(digest)
+        if not samples:
+            raise ValueError(
+                f"確認用ジョブに{CANARY_MIN_LENGTH}以上の長さの原文がありません (TR_CANARY_MIN_LENGTH)"
+            )
         return samples, CanaryChecks.file_signature(metadata)
 
     def __init__(self, hub, upstreams, canary_file, probation_jobs=20):
@@ -2603,7 +2663,7 @@ class CanaryChecks:
         self.lock = threading.RLock()
         self.hub = hub
         self.pool = DirectPool(upstreams)
-        self.health = WorkerHealth(hub.registry, probation_jobs)
+        self.health = WorkerHealth(hub.registry, probation_jobs, float(CANARY_MIN_SCORE))
         self.used = {}
         self.reserved = {}
         self.busy_workers = set()
@@ -2694,7 +2754,7 @@ class CanaryChecks:
             return
         current = self.hub.registry.info(wid)
         if current["owner_generation"] == generation:
-            passed = not check_translation(req, translated, reference)
+            passed, _ = canary_verdict(req, translated, reference, audit=True)
             self.health.record(current, passed=passed, canary=False)
 
     def needs_canary(self, worker):
@@ -2873,8 +2933,12 @@ class CanaryChecks:
                 current = self.hub.registry.info(worker["id"])
                 if current["owner_generation"] != worker["owner_generation"]:
                     return
-                verdict = not check_translation(req, "".join(text), reference) if finished else None
-                self.health.record(current, passed=verdict, timed_out=outcome == "timeout")
+                verdict, score = (
+                    canary_verdict(req, "".join(text), reference) if finished else (None, None)
+                )
+                self.health.record(
+                    current, passed=verdict, timed_out=outcome == "timeout", score=score
+                )
         except (HttpError, OSError, ValueError, sqlite3.Error):
             self.cancel.wait(1)
         except Exception as error:
