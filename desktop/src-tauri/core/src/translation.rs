@@ -14,8 +14,8 @@ fn field(body: &Value, name: &str, limit: usize, required: bool) -> Result<Strin
     }
     Ok(value)
 }
-pub(crate) fn languages() -> Value {
-    serde_json::from_str(include_str!("../gen/local-languages.json"))
+pub fn languages() -> Value {
+    serde_json::from_str(include_str!("../../gen/local-languages.json"))
         .expect("生成した言語一覧が不正です")
 }
 /// 1回の原文の上限 (文字)。サーバーの TR_MAX_CHARS と区切りの CHUNK_CHARS と同じ値
@@ -99,7 +99,7 @@ pub fn prompt(body: &Value) -> Result<(String, usize), String> {
 #[derive(Default)]
 pub struct Decoder {
     buffer: Vec<u8>,
-    pub(crate) done: bool,
+    pub done: bool,
 }
 impl Decoder {
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<Value>, String> {
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn server_prompt_fixtures() {
         let cases: Vec<Value> = serde_json::from_str(include_str!(
-            "../../../shared/local-translation-fixtures.json"
+            "../../../../shared/local-translation-fixtures.json"
         ))
         .unwrap();
         for case in cases {

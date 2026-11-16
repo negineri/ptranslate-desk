@@ -19,18 +19,18 @@ use tokio::{
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
-pub(crate) mod linux;
+pub mod linux;
 
 #[cfg(any(not(target_os = "linux"), test))]
 const MAX_HEADER: usize = 4096;
 const MAX_CONNECTIONS: usize = 4;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const PROXY_USER: &str = "worker";
+pub const PROXY_USER: &str = "worker";
 
 #[cfg(any(not(target_os = "linux"), test))]
-pub(crate) struct BrokerRelay {
-    pub(crate) port: u16,
-    pub(crate) secret: Zeroizing<String>,
+pub struct BrokerRelay {
+    pub port: u16,
+    pub secret: Zeroizing<String>,
     task: JoinHandle<()>,
 }
 
@@ -43,7 +43,7 @@ impl Drop for BrokerRelay {
 
 #[cfg(any(not(target_os = "linux"), test))]
 impl BrokerRelay {
-    pub(crate) async fn start(broker: &Url) -> Result<Self, String> {
+    pub async fn start(broker: &Url) -> Result<Self, String> {
         let host = broker.host_str().ok_or("提供先のURLが不正です")?;
         let port = broker
             .port_or_known_default()

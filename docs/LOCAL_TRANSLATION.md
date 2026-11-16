@@ -145,7 +145,7 @@ GPUの起動に失敗する場合は設定でCPUを選んでください。自�
 
 ```powershell
 python tools/run_desktop_mock.py --smoke-test
-cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
+cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --workspace
 ```
 
 実モデルの試験は明示的な手動操作としてのみ行います。取得済みモデルが必要です。
@@ -353,7 +353,7 @@ Windowsでは同じアプリの二重起動を防ぎ、URLを起動済みのア�
 中継の送信待ち行列は256メッセージまで保持し、満杯なら推論応答の読み取り側が非同期で空きを待つ。
 混雑を接続失敗として扱わず、応答を欠落させない。Chromeが接続を閉じた場合は待機も含めて中止する。
 
-中継の試験は `cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml` と、
+中継の試験は `cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --workspace` と、
 Windows・macOSで `cargo build --locked --features smoke-test --manifest-path desktop/src-tauri/Cargo.toml` の後に
 `python tools/test_chrome_bridge.py` を実行する。試験は一時的なホスト定義とモックのパイプまたはソケットを使い、中継の完了・中止を確認する。
 Windowsではパイプが占有されている場合の本体起動・失敗通知も確認する。

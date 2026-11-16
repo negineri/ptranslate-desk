@@ -33,7 +33,7 @@ const APPDIR_VALUES: &[&str] = &[
 ];
 
 /// 端末のプログラムを起動する前に、AppImage が足した環境を取り除く。AppImage 以外では何もしない。
-pub(crate) fn use_host_env(command: &mut Command) -> &mut Command {
+pub fn use_host_env(command: &mut Command) -> &mut Command {
     let appimage = std::env::var_os("APPIMAGE");
     let appdir = std::env::var_os("APPDIR");
     let (Some(_), Some(appdir)) = (appimage, appdir) else {

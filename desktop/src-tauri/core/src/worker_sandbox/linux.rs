@@ -7,8 +7,8 @@ use std::{
 };
 use tokio::process::Command;
 
-pub(crate) const BROKER: &str = "/broker.sock";
-pub(crate) const ENGINE: &str = "/engine.sock";
+pub const BROKER: &str = "/broker.sock";
+pub const ENGINE: &str = "/engine.sock";
 const BWRAP: &str = "/usr/bin/bwrap";
 
 fn abi() -> libc::c_long {
@@ -16,7 +16,7 @@ fn abi() -> libc::c_long {
     unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, 0usize, 0usize, 1u32) }
 }
 
-pub(super) fn supported() -> bool {
+pub fn supported() -> bool {
     static SUPPORTED: OnceLock<bool> = OnceLock::new();
     *SUPPORTED.get_or_init(|| {
         abi() >= 4
@@ -58,7 +58,7 @@ fn base_command() -> StdCommand {
     command
 }
 
-pub(crate) fn command(executable: &Path, broker: &Path, engine: &Path) -> Command {
+pub fn command(executable: &Path, broker: &Path, engine: &Path) -> Command {
     let mut command = base_command();
     command
         .arg("--ro-bind")
@@ -74,7 +74,7 @@ pub(crate) fn command(executable: &Path, broker: &Path, engine: &Path) -> Comman
     Command::from(command)
 }
 
-pub(crate) fn apply() -> Result<(), ()> {
+pub fn apply() -> Result<(), ()> {
     let version = abi();
     if version < 4 {
         return Err(());

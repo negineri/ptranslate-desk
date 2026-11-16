@@ -45,6 +45,7 @@ macOS 13以降のApple Silicon・Intelに対応する `universal-apple-darwin` �
 - `.app.tar.gz` と `.sig`: Tauri updaterが使うアーカイブと署名
 - `latest.json`: 同じuniversalアーカイブを `darwin-aarch64` と `darwin-x86_64` に割り当てた更新情報
 - `PTranslate.Chrome_<version>.zip` と `.zip.sha256`: Chrome拡張とZIPのSHA-256
+- `PTranslate.Worker_<version>_linux-x64.tar.gz` と `.tar.gz.sha256`: Linux サーバー向けのワーカー CLI と SHA-256
 - `_x64-setup.exe` と `.exe.sig`: Windows 10 / 11（x64）のNSISインストーラーとTauri更新署名。
   `latest.json` の `windows-x86_64` に割り当てる
 - `_amd64.AppImage` と `.AppImage.sig`: Ubuntu 24.04以降（x64）のAppImageとTauri更新署名。
@@ -58,6 +59,14 @@ Release作成後にも `latest.json` のバージョン、HTTPS、署名、両�
 公開先は [GitHub Releases](https://github.com/negineri/ptranslate-desk/releases) です。
 Windowsも空白・`+`を含まない固定の配布名に揃え、URLと実際のファイル名の一致を試験します。
 Windowsの配布物や更新署名、Linuxのdeb・AppImage・AppImageの更新署名が欠けている場合は公開しません。共通の `latest.json` は1回だけ生成します。
+
+## ワーカー CLI
+
+`worker-linux-release-build` は Linux のデスクトップ試験の成功後、mainに含まれるタグから
+`tools/package_worker_cli.py --tag "$RELEASE_TAG"` で配布物を作ります。古い glibc の Linux サーバーでも動くよう
+`ubuntu-22.04` でビルドし、`PTRANSLATE_VERSION` で配布版を埋め込みます。`--version` の表示がタグと一致しない場合や、
+tar.gz に実行ファイル 1 つ以外が入っている場合は作りません。`desktop-release` は SHA-256 と中身を再確認してから
+同じReleaseへ添付します。ワーカー CLI の成果物が欠ける場合は公開しません。
 
 ## Chrome拡張のZIP
 

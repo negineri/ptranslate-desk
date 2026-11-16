@@ -114,8 +114,8 @@ class ValidationTest(unittest.TestCase):
     def test_limits_match_client_chunks_and_engine_context(self):
         root = Path(__file__).resolve().parents[2]
         chunk = (root / "server/static/translation.mjs").read_text(encoding="utf-8")
-        desktop = (root / "desktop/src-tauri/src/translation.rs").read_text(encoding="utf-8")
-        context = (root / "desktop/src-tauri/src/local/parallel.rs").read_text(encoding="utf-8")
+        desktop = (root / "desktop/src-tauri/core/src/translation.rs").read_text(encoding="utf-8")
+        context = (root / "desktop/src-tauri/core/src/engine.rs").read_text(encoding="utf-8")
         worker = (root / "tools/volunteer_worker.py").read_text(encoding="utf-8")
 
         def constant(pattern, source):

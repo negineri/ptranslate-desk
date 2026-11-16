@@ -2,13 +2,13 @@ use super::{timeout, JoinHandle, JoinSet, TcpStream, Url, CONNECT_TIMEOUT, MAX_C
 use std::{fs::Permissions, os::unix::fs::PermissionsExt, path::PathBuf};
 use tokio::net::UnixListener;
 
-pub(crate) struct Relays {
+pub struct Relays {
     directory: tempfile::TempDir,
     tasks: [JoinHandle<()>; 2],
 }
 
 impl Relays {
-    pub(crate) fn start(broker: &Url, engine_port: u16) -> Result<Self, String> {
+    pub fn start(broker: &Url, engine_port: u16) -> Result<Self, String> {
         let host = broker.host_str().ok_or("提供先のURLが不正です")?;
         let port = broker
             .port_or_known_default()
@@ -28,7 +28,7 @@ impl Relays {
         Ok(Self { directory, tasks })
     }
 
-    pub(crate) fn paths(&self) -> (PathBuf, PathBuf) {
+    pub fn paths(&self) -> (PathBuf, PathBuf) {
         let root = self.directory.path();
         (root.join("broker.sock"), root.join("engine.sock"))
     }

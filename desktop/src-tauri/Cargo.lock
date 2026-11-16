@@ -3053,6 +3053,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ptranslate-core"
+version = "0.0.0-dev"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "getrandom 0.3.4",
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+ "zeroize",
+ "zip",
+]
+
+[[package]]
 name = "ptranslate-desk"
 version = "0.0.0-dev"
 dependencies = [
@@ -3064,6 +3084,7 @@ dependencies = [
  "libc",
  "objc2",
  "objc2-app-kit",
+ "ptranslate-core",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -3082,6 +3103,23 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "ptranslate-worker"
+version = "0.0.0-dev"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "libc",
+ "ptranslate-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

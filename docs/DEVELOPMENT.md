@@ -87,8 +87,8 @@ node --test server/tests/test_translation.mjs
 node chrome-extension/build.mjs
 node --test chrome-extension/tests/
 node desktop/build.mjs
-cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
-cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
+cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all --check
+cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --workspace
 ```
 
 macOSのGUIセッションでは、実際のWebViewを使うスモーク試験も実行できます。
