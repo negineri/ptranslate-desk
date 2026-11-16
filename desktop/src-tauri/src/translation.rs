@@ -50,9 +50,10 @@ pub fn prompt(body: &Value) -> Result<(String, usize), String> {
     if !context.trim().is_empty() {
         value += &format!("<|plamo:tag|>context<|plamo:msg|>{}", context.trim());
     }
-    for (name, max, source_limit, target_limit) in
-        [("history", 4, MAX_CHARS, MAX_CHARS * 3), ("glossary", 200, 200, 200)]
-    {
+    for (name, max, source_limit, target_limit) in [
+        ("history", 4, MAX_CHARS, MAX_CHARS * 3),
+        ("glossary", 200, 200, 200),
+    ] {
         if let Some(raw) = body.get(name).filter(|v| !v.is_null()) {
             let pairs = raw.as_array().ok_or("文脈または用語集の形式が不正です")?;
             if pairs.len() > max {
