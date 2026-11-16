@@ -182,7 +182,7 @@ Pythonサービスとコンテナはどちらか一方を使います。
 | `TR_API_KEY`                        | 空                                            | 翻訳エンジンに付ける `Authorization: Bearer`     |
 | `TR_MODEL` | `plamo-3-translate` | 翻訳エンジンに渡すモデル名 |
 | `TR_LISTEN_HOST` / `TR_LISTEN_PORT` | `127.0.0.1` / `8002` (コンテナでは `0.0.0.0`) | 待ち受け                                         |
-| `TR_MAX_CHARS`                      | 4000                                          | 1 回の原文の上限 (文字)                          |
+| `TR_MAX_CHARS`                      | 1500                                          | 1 回の原文の上限 (文字)                          |
 | `TR_MAX_PROMPT_CHARS`               | 12000                                         | 文脈・前の訳・用語集を合わせた上限 (文字)        |
 | `TR_MAX_GLOSSARY` | 200 | 用語集の組数の上限 |
 | `TR_MAX_ACTIVE_PER_USER`            | 2                                             | 1 人が同時に流せる翻訳の数                       |

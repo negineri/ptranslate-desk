@@ -99,9 +99,10 @@ CANARY_MIN_SCORE = os.environ.get("TR_CANARY_MIN_SCORE", "0.93")
 CANARY_MIN_LENGTH = env_int("TR_CANARY_MIN_LENGTH", 120)
 API_KEY = os.environ.get("TR_API_KEY", "")
 MODEL = os.environ.get("TR_MODEL", "plamo-3-translate")
-# 1 回 (1 区切り) の原文の上限 (文字)。PLaMo のコンテキスト (16K トークン) は原文と訳の
-# 合計で、約 6,000 トークンを超える原文は繰り返しに入る (README.md の「翻訳エンジン」)
-MAX_CHARS = env_int("TR_MAX_CHARS", 4000)
+# 1 回 (1 区切り) の原文の上限 (文字)。クライアントの区切り (translation.mjs の CHUNK_CHARS) と
+# そろえる。訳の上限 (max_tokens) とエンジンに要るコンテキストはここから決まる
+# (docs/LOCAL_TRANSLATION.md の「コンテキストの長さ」)
+MAX_CHARS = env_int("TR_MAX_CHARS", 1500)
 # 文脈・前の訳・用語集を足した、プロンプト全体の上限 (文字)
 MAX_PROMPT_CHARS = env_int("TR_MAX_PROMPT_CHARS", 12000)
 MAX_GLOSSARY = env_int("TR_MAX_GLOSSARY", 200)

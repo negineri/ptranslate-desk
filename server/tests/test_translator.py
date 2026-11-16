@@ -9,6 +9,7 @@ import base64
 import http.client
 import importlib.util
 import json
+import re
 import socket
 import sys
 import threading
@@ -109,6 +110,28 @@ class ValidationTest(unittest.TestCase):
         self.assertRejected(req(glossary=["a => b"]), 400)
         self.assertRejected(req(history=[{"source": "a", "target": "b"}] * 5), 400)
         self.assertRejected(req(context="あ" * tr.MAX_PROMPT_CHARS), 413)
+
+    def test_limits_match_client_chunks_and_engine_context(self):
+        root = Path(__file__).resolve().parents[2]
+        chunk = (root / "server/static/translation.mjs").read_text(encoding="utf-8")
+        desktop = (root / "desktop/src-tauri/src/translation.rs").read_text(encoding="utf-8")
+        context = (root / "desktop/src-tauri/src/local/parallel.rs").read_text(encoding="utf-8")
+        worker = (root / "tools/volunteer_worker.py").read_text(encoding="utf-8")
+
+        def constant(pattern, source):
+            match = re.search(pattern, source, re.M)
+            self.assertIsNotNone(match, pattern)
+            return int(match.group(1))
+
+        # クライアントの区切り、サーバー、デスクトップのローカル翻訳で原文の上限をそろえる。
+        self.assertEqual(constant(r"^const CHUNK_CHARS = (\d+);", chunk), tr.MAX_CHARS)
+        self.assertEqual(constant(r"^pub const MAX_CHARS: usize = (\d+);", desktop), tr.MAX_CHARS)
+        per_slot = constant(r"^pub const CONTEXT_PER_SLOT: usize = (\d+);", context)
+        self.assertEqual(constant(r"^CONTEXT_PER_SLOT = (\d+)", worker), per_slot)
+        # 1 文字 1 トークンの最悪の場合も、プロンプトと訳の上限が 1 枠に収まる。
+        self.assertLessEqual(
+            tr.MAX_PROMPT_CHARS + tr.max_tokens("あ" * tr.MAX_CHARS) + 64, per_slot
+        )
 
     def test_accepts_and_drops_empty_pairs(self):
         got = tr.parse_request(

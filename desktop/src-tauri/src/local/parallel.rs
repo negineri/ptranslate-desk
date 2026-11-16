@@ -2,9 +2,9 @@
 use std::sync::Mutex;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 pub const MAX_PARALLEL: usize = 64;
-/// 1件あたりのコンテキスト。サーバーの上限 (プロンプト12000文字、訳6064トークン) で、
+/// 1件あたりのコンテキスト。サーバーの上限 (プロンプト12000文字、訳2314トークン) で、
 /// 1文字1トークン以下の文が切れずに収まる量 (docs/LOCAL_TRANSLATION.md)。
-pub const CONTEXT_PER_SLOT: usize = 20480;
+pub const CONTEXT_PER_SLOT: usize = 16384;
 struct State {
     limit: usize,
     active: usize,
