@@ -96,7 +96,7 @@ def engine(device, installation):
         "--port",
         str(port),
         "--ctx-size",
-        "32768",
+        "20480",
         "--parallel",
         "1",
         "--flash-attn",

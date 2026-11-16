@@ -30,6 +30,8 @@ DAY = 86400
 MODEL_FILE = "plamo-3-translate-2b-Q4_K_M.gguf"
 MODEL_DIGEST_HEADER = "X-PTranslate-Model-SHA256"
 ENGINE_TAG = "b11804"
+# 1枠あたりに要るコンテキスト。デスクトップの CONTEXT_PER_SLOT と同じ値
+CONTEXT_PER_SLOT = 20480
 ENGINE_COMMIT = "c7fc5094179bf8a9c73c18593db714f8da41a402"
 METADATA_LIMIT = 65536
 
@@ -164,8 +166,10 @@ class RemoteEngine:
             raise EngineMismatch("リモート推論先が承認済みのモデルを読み込んでいません")
         settings = props.get("default_generation_settings")
         context_size = settings.get("n_ctx") if isinstance(settings, dict) else None
-        if type(context_size) is not int or context_size < 32768:
-            raise EngineMismatch("リモート推論先には1枠あたり32768以上のコンテキストが必要です")
+        if type(context_size) is not int or context_size < CONTEXT_PER_SLOT:
+            raise EngineMismatch(
+                f"リモート推論先には1枠あたり{CONTEXT_PER_SLOT}以上のコンテキストが必要です"
+            )
 
     @contextmanager
     def relay(self):

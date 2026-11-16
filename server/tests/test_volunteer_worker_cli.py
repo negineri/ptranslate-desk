@@ -108,13 +108,17 @@ class WorkerCliTest(unittest.TestCase):
         good = {
             "build_info": "b11804-c7fc50941",
             "model_path": f"/models/{cli.MODEL_FILE}",
-            "default_generation_settings": {"n_ctx": 32768},
+            "default_generation_settings": {"n_ctx": cli.CONTEXT_PER_SLOT},
         }
         failures = [
             ({**good, "build_info": "b11804-abcdef0"}, cli.MODEL_SHA),
             ({**good, "build_info": "b12000-c7fc50941"}, cli.MODEL_SHA),
             ({**good, "model_path": "/models/other.gguf"}, cli.MODEL_SHA),
             ({**good, "default_generation_settings": {"n_ctx": 8192}}, cli.MODEL_SHA),
+            (
+                {**good, "default_generation_settings": {"n_ctx": cli.CONTEXT_PER_SLOT - 1}},
+                cli.MODEL_SHA,
+            ),
             (good, None),
             (good, "a" * 64),
         ]
@@ -136,7 +140,7 @@ class WorkerCliTest(unittest.TestCase):
         props = {
             "build_info": "b11804-abcdef0",
             "model_path": f"/models/{cli.MODEL_FILE}",
-            "default_generation_settings": {"n_ctx": 32768},
+            "default_generation_settings": {"n_ctx": cli.CONTEXT_PER_SLOT},
         }
         for override, digest, valid in (
             ({}, cli.MODEL_SHA, True),
