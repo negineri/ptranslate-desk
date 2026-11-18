@@ -22,6 +22,8 @@
   let scanTimer = null;
   let stabilityTimer = null;
   let modified = new WeakSet();
+  let changedContainers = new WeakSet();
+  let addedElements = new WeakSet();
   let rootsTimer = null;
   const roots = new Set();
   const observeOptions = { childList: true, characterData: true, subtree: true,
@@ -36,7 +38,12 @@
         if (written.get(node) === node.data && parents.get(node) === node.parentNode) continue;
         modified.add(node);
       } else if (record.type === "childList") {
-        for (const node of record.addedNodes) modified.add(node);
+        for (const node of record.addedNodes) {
+          if (node.nodeType === Node.ELEMENT_NODE) addedElements.add(node);
+        }
+        if ([...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === Node.TEXT_NODE)) {
+          changedContainers.add(record.target);
+        }
       }
       changed = true;
     }
@@ -221,10 +228,23 @@
     clearTimeout(stabilityTimer);
     scanTimer = null;
     stabilityTimer = null;
-    modified = new WeakSet();
+    resetChanges();
   }
 
-  function scan(initial = false) {
+  function resetChanges() {
+    modified = new WeakSet();
+    changedContainers = new WeakSet();
+    addedElements = new WeakSet();
+  }
+
+  function inNewElement(node) {
+    for (let el = textContainer(node); el; el = composedParent(el)) {
+      if (addedElements.has(el)) return true;
+    }
+    return false;
+  }
+
+  function scan() {
     if (!following) return;
     let removedRoot = false;
     for (const root of roots) {
@@ -252,10 +272,12 @@
         if (!previous.ready && now >= previous.readyAt) return { ...previous, ready: true };
         return previous;
       }
-      return { ...b, skipped: !/\p{L}/u.test(b.text), ready: initial, readyAt: now + STABILITY_MS,
+      const changedText = previous || b.nodes.some((n) => modified.has(n) || changedContainers.has(n.parentNode));
+      const ready = !changedText || inNewElement(b.nodes[0]);
+      return { ...b, skipped: !/\p{L}/u.test(b.text), ready, readyAt: now + STABILITY_MS,
         id: nextId++, parents: b.nodes.map((n) => n.parentNode), expected: b.nodes.map((n) => n.data) };
     });
-    modified = new WeakSet();
+    resetChanges();
     clearTimeout(stabilityTimer);
     const nextReady = next.reduce((earliest, b) => !b.ready && !b.skipped ? Math.min(earliest, b.readyAt) : earliest, Infinity);
     stabilityTimer = Number.isFinite(nextReady) ? setTimeout(() => {
@@ -462,7 +484,7 @@
     blocks = [];
     following = true;
     state = "idle";
-    scan(true);
+    scan();
     observer.observe(document.body, observeOptions);
     // attachShadow 自体は MutationObserver に通知されないので、遅れて作られた境界も探す。
     rootsTimer = setInterval(() => { if (watchRoots()) scheduleScan(); }, 1000);

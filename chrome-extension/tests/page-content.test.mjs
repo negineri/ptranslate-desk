@@ -248,8 +248,9 @@ test("画面外の本文より表示中のナビゲーションを先にし、�
   p.w.close();
 });
 
-async function waitUntil(predicate) {
-  for (let i = 0; i < 550; i++) {
+async function waitUntil(predicate, timeout = 5500) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
     if (predicate()) return;
     await new Promise((r) => setTimeout(r, 10));
   }
@@ -347,6 +348,17 @@ test("更新が続く文章は送らず、別の安定した文章は訳す", as
   assert.equal(p.connections.length, 2);
   await waitUntil(() => p.connections.length === 3);
   assert.deepEqual(Array.from(p.connections[2].messages[0].blocks, (b) => b.text), ["Final time"]);
+});
+
+test("新しく追加された要素は安定待ちをせずに送る", async (t) => {
+  const p = page("<p>Original</p>");
+  t.after(() => p.w.close());
+  complete(p.connections[0]);
+  const article = p.w.document.createElement("article");
+  p.w.document.body.append(article);
+  article.textContent = "New article";
+  await waitUntil(() => p.connections.length === 2, 1000);
+  assert.deepEqual(Array.from(p.connections[1].messages[0].blocks, (b) => b.text), ["New article"]);
 });
 
 test("翻訳先と一致した文章を完了後に再送しない", () => {
