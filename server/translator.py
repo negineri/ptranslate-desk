@@ -85,7 +85,6 @@ ACCOUNT_SIGNUP_URL = os.environ.get("TR_ACCOUNT_SIGNUP_URL", "")
 ACCOUNT_LINKS = os.environ.get("TR_ACCOUNT_LINKS", "{}")
 ACCOUNT_DELETE_KEY = os.environ.get("TR_ACCOUNT_DELETE_KEY", "")
 CONTRIBUTION_DAILY_LIMIT = env_int("TR_CONTRIBUTION_DAILY_LIMIT", 50000)
-WORKERS_PER_OWNER = env_int("TR_WORKERS_PER_OWNER", 2)
 WORKER_MAX_SLOTS = env_int("TR_WORKER_MAX_SLOTS", 64)
 WORKER_MODEL_SHA256 = os.environ.get("TR_WORKER_MODEL_SHA256", "")
 MIN_AGENT_VERSION = os.environ.get("TR_MIN_AGENT_VERSION", "")
@@ -802,7 +801,7 @@ class TranslationHTTPServer(ThreadingHTTPServer):
             if self.workers is None:
                 if not STATE_FILE:
                     raise HttpError(404, "ワーカーの登録は無効です")
-                registry = WorkerRegistry(STATE_FILE, WORKERS_PER_OWNER)
+                registry = WorkerRegistry(STATE_FILE)
                 hub = None
                 try:
                     hub = WorkerHub(registry, WORKER_MODEL_SHA256, MIN_AGENT_VERSION)
@@ -1552,9 +1551,7 @@ WORKER_TERMS_VERSION = 1
 class WorkerRegistry:
     """ワーカーの資格のハッシュと参加同意だけを保存する。"""
 
-    def __init__(self, path, per_owner=2):
-        if per_owner <= 0:
-            raise ValueError("TR_WORKERS_PER_OWNER は正の整数にしてください")
+    def __init__(self, path):
         path = Path(path)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if os.name != "nt" and (path.parent.stat().st_mode & 0o077):
@@ -1572,7 +1569,6 @@ class WorkerRegistry:
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.execute("PRAGMA secure_delete=ON")
         self.lock = threading.RLock()
-        self.per_owner = per_owner
         self.revocation_callback = None
         self.contribution_requests = Counter()
         try:
@@ -1877,13 +1873,6 @@ class WorkerRegistry:
                 "DELETE FROM workers WHERE owner=? AND expires<=? AND state!='revoked'",
                 (owner, time.time()),
             )
-            if (
-                self.db.execute("SELECT count(*) FROM workers WHERE owner=?", (owner,)).fetchone()[
-                    0
-                ]
-                >= self.per_owner
-            ):
-                raise HttpError(429, "登録できる端末の数を超えています")
             held = self.db.execute(
                 "SELECT quarantined FROM owners WHERE name=?", (owner,)
             ).fetchone()

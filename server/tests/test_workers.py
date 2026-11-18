@@ -141,13 +141,23 @@ class WorkerApiTest(unittest.TestCase):
             mock.call("/api/worker/renew", {"worker_id": data["worker_id"]}, "alice")[0], 200
         )
         self.assertEqual(mock.call("/api/worker/register", {"terms_version": True}, "bob")[0], 400)
-        self.assertEqual(mock.register("alice")[0], 200)
-        self.assertEqual(mock.register("alice")[0], 429)
         secret = data["secret"]
         self.assertEqual(
             mock.call("/api/worker/" + data["worker_id"], owner="alice", method="DELETE")[0], 200
         )
         self.assertEqual(mock.call("/api/worker/ping", {"active": []}, secret=secret)[0], 401)
+
+    def test_owner_can_register_more_than_two_workers(self):
+        mock, first = self.worker()
+        worker_ids = {first["worker_id"]}
+        for _ in range(4):
+            status, worker = mock.register("alice")
+            self.assertEqual(status, 200)
+            worker_ids.add(worker["worker_id"])
+        self.assertEqual(len(worker_ids), 5)
+        status, listing = mock.call("/api/worker/mine", owner="alice", method="GET")
+        self.assertEqual(status, 200)
+        self.assertCountEqual([worker["worker_id"] for worker in listing["workers"]], worker_ids)
 
     def test_worker_expiry_is_capped_by_trusted_authorization(self):
         def call(route, payload, expiration=None):
@@ -223,8 +233,7 @@ class WorkerApiTest(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 1)
             self.assertNotIn(data["worker_id"], self.hub.ready)
 
-    def test_expired_worker_does_not_fill_registration_limit(self):
-        self.hub.registry.per_owner = 1
+    def test_registration_removes_expired_workers_except_revoked(self):
         mock, data = self.worker()
         with self.hub.registry.lock, self.hub.registry.db:
             self.hub.registry.db.execute(
@@ -246,7 +255,11 @@ class WorkerApiTest(unittest.TestCase):
                 "UPDATE workers SET state='revoked',expires=?", (int(time.time()) - 1,)
             )
             self.hub.registry.db.commit()
-        self.assertEqual(mock.register("alice")[0], 429)
+        self.assertEqual(mock.register("alice")[0], 200)
+        self.assertEqual(
+            mock.call("/api/worker/renew", {"worker_id": replacement["worker_id"]}, "alice")[0],
+            403,
+        )
 
     def test_authentication_region_version_and_no_job(self):
         mock, data = self.worker()
