@@ -47,6 +47,19 @@ test("文字のある文章は言語を推測して省かず、数字や記号�
   }
 });
 
+test("翻訳先と確実に一致する区切りを除外し、混在した区切りや漢字だけの文は送る", async () => {
+  const server = fakeServer();
+  const texts = ["これは日本語の文章です。", "カタカナ", "Read more", "漢字", "Hello、こんにちは。"];
+  const messages = await runPage(texts.map((text, id) => ({ text, id })), server, {
+    settings: async () => ({ ...SETTINGS, target: "ja" }),
+  }).finished;
+  assert.deepEqual(messages.find((m) => m.type === "excluded").ids, [0, 1]);
+  assert.deepEqual(server.requests.map(({ body }) => body.text), texts.slice(2));
+  assert.equal(messages.at(-1).total, 3);
+  assert.equal(shouldTranslate("한국어 문장입니다", "ko"), false);
+  assert.equal(shouldTranslate("これは日本語の文章です。", "en"), true);
+});
+
 test("中国語を日本語へ、ASCII のスペイン語を英語へ送る", async () => {
   for (const [target, text] of [["ja", "该域名仅用于文档示例，无需获得许可。"], ["ja", "此網域僅用於文件範例。"], ["en", "Hola mundo"]]) {
     const server = fakeServer();
@@ -213,13 +226,14 @@ test("並列中の追加を反映し、実行中と完了済みを重複して�
   const blocks = [{ id: 0, text: "First" }, { id: 1, text: "Second" }, { id: 2, text: "Old pending" }];
   const { page, finished } = runPage(blocks, server);
   await waitUntil(() => release.size === 2);
-  page.postMessage({ type: "update", blocks: [...blocks, { id: 3, text: "New visible" }], ids: [3, 2] });
+  page.postMessage({ type: "update", blocks: [...blocks, { id: 3, text: "New visible" }, { id: 4, text: "追加された日本語です。" }], ids: [3, 4, 2] });
   await new Promise((r) => setTimeout(r, 0));
   release.get("Second")();
   await waitUntil(() => server.requests.length === 4);
   release.get("First")();
   const messages = await finished;
   assert.deepEqual(server.requests.map((r) => r.body.text), ["First", "Second", "New visible", "Old pending"]);
+  assert.deepEqual(messages.find((m) => m.type === "excluded").ids, [4]);
   assert.deepEqual(messages.at(-1), { type: "done", total: 4, omitted: 0, truncated: 0 });
 });
 

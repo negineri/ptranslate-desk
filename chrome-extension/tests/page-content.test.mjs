@@ -94,13 +94,14 @@ test("clip-pathで全体を隠した文字を省き、一部が残る文字と�
   p.w.close();
 });
 
-test("切り抜きが解除されて表示された文字は、変更後に翻訳対象へ追加する", async () => {
+test("切り抜きが解除されて表示された文字は、変更後に翻訳対象へ追加する", async (t) => {
   const p = page('<main><div id="clipped" style="position:absolute;clip:rect(0px,0px,0px,0px)"><h2>Newly visible headline</h2></div><p>Visible paragraph</p></main>', (w) => {
     w.Range.prototype.getClientRects = () => [rect(0, 10, 200, 20)];
   });
   assert.deepEqual(Array.from(p.blocks, (b) => b.text), ["Visible paragraph"]);
   p.w.document.querySelector("#clipped").style.clip = "auto";
-  await new Promise((resolve) => setTimeout(resolve, 220));
+  t.after(() => p.w.close());
+  await waitUntil(() => p.messages.some((message) => message.type === "update"));
   const update = p.messages.findLast((message) => message.type === "update");
   assert.ok(Array.from(update.blocks).some((block) => block.text === "Newly visible headline"));
   p.w.close();
@@ -248,7 +249,7 @@ test("画面外の本文より表示中のナビゲーションを先にし、�
 });
 
 async function waitUntil(predicate) {
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 550; i++) {
     if (predicate()) return;
     await new Promise((r) => setTimeout(r, 10));
   }
@@ -322,6 +323,41 @@ test("中止後と原文へ戻した後は、新しい文章を自動で訳さ�
     assert.equal(p.w.document.querySelector("p").textContent, "Second message");
     p.w.close();
   }
+});
+
+test("更新が続く文章は送らず、別の安定した文章は訳す", async (t) => {
+  const p = page("<time>Time one</time><p>Original</p>");
+  t.after(() => p.w.close());
+  complete(p.connections[0]);
+  const clock = p.w.document.querySelector("time");
+  let tick = 0;
+  // 文字ノードの書き換えと要素の textContent による置換をどちらも試す。
+  const timer = p.w.setInterval(() => {
+    const value = `Time tick ${++tick}`;
+    if (tick % 2) clock.firstChild.data = value;
+    else clock.textContent = value;
+  }, 100);
+  p.w.document.querySelector("p").textContent = "Stable article";
+  await waitUntil(() => p.connections.length === 2);
+  assert.deepEqual(Array.from(p.connections[1].messages[0].blocks, (b) => b.text), ["Stable article"]);
+  complete(p.connections[1]);
+  p.w.clearInterval(timer);
+  clock.textContent = "Final time";
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(p.connections.length, 2);
+  await waitUntil(() => p.connections.length === 3);
+  assert.deepEqual(Array.from(p.connections[2].messages[0].blocks, (b) => b.text), ["Final time"]);
+});
+
+test("翻訳先と一致した文章を完了後に再送しない", () => {
+  const p = page("<p>これは日本語です。</p>");
+  const connection = p.connections[0];
+  connection.receive({ type: "excluded", ids: [p.blocks[0].id] });
+  connection.receive({ type: "start", total: 0, target: "ja" });
+  connection.receive({ type: "done", total: 0 });
+  assert.equal(p.connections.length, 1);
+  assert.equal(p.w.document.querySelector("p").textContent, "これは日本語です。");
+  p.w.close();
 });
 
 test("数字だけのページでも監視を続け、文章が来たら一度だけ接続する", async () => {
@@ -412,7 +448,7 @@ test("後からattachShadowされた既存要素も見つける", async () => {
   complete(p.connections[0]);
   p.w.document.querySelector("news-feed").attachShadow({ mode: "open" }).innerHTML = '<p>Late shadow headline</p>';
   // 境界そのものの作成にはMutationObserver通知がないため、定期検出を待つ。
-  for (let i = 0; i < 200 && p.connections.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+  await waitUntil(() => p.connections.length === 2);
   assert.equal(p.connections.length, 2);
   assert.deepEqual(Array.from(p.connections[1].messages[0].blocks, (b) => b.text), ["Late shadow headline"]);
   p.w.close();

@@ -40,10 +40,17 @@ function wait(ms, signal) {
   });
 }
 
-// 文字種から言語を推測して省くと、中国語や ASCII の外国語を取りこぼす。
-// 翻訳先と同じ言語かどうかは推測せず、数字や記号だけの箇所を除く。
-export function shouldTranslate(text) {
-  return /\p{L}/u.test(text);
+// 漢字だけの文やラテン文字の言語は、文字種だけで言語を決めない。
+const TARGET_SCRIPTS = {
+  ja: { evidence: /[\p{Script=Hiragana}\p{Script=Katakana}]/gu, letters: /^[\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script=Han}]+$/u },
+  ko: { evidence: /\p{Script=Hangul}/gu, letters: /^[\p{Script=Hangul}\p{Script=Han}]+$/u },
+};
+
+export function shouldTranslate(text, target) {
+  const letters = text.match(/\p{L}/gu)?.join("");
+  if (!letters) return false;
+  const scripts = Object.hasOwn(TARGET_SCRIPTS, target) ? TARGET_SCRIPTS[target] : null;
+  return !scripts || !scripts.letters.test(letters) || (letters.match(scripts.evidence)?.length ?? 0) < 2;
 }
 
 // port: chrome.runtime.Port と同じ形。deps: relay と同じもの + settings(): Promise<設定>
@@ -206,7 +213,17 @@ export function runPageTask(port, deps) {
     if (common.source_lang && common.source_lang === common.target_lang) {
       throw new RelayError("same-lang", "原文と訳す先が同じ言語です");
     }
-    const candidates = blocks.filter((b) => shouldTranslate(b.text));
+    function translationCandidates(items) {
+      const candidates = [];
+      const excluded = [];
+      for (const block of items) {
+        if (shouldTranslate(block.text, common.target_lang)) candidates.push(block);
+        else excluded.push(block.id);
+      }
+      if (excluded.length) post({ type: "excluded", ids: excluded });
+      return candidates;
+    }
+    const candidates = translationCandidates(blocks);
     const todo = candidates.slice(0, MAX_BLOCKS);
     const omitted = candidates.length - todo.length;
     const name = (code) => config.languages?.find((l) => l.code === code)?.name || code;
@@ -233,8 +250,8 @@ export function runPageTask(port, deps) {
     let skipped = omitted;
     for (;;) {
       if (update) {
-        const candidates = update.filter((b) => b && Number.isInteger(b.id) && typeof b.text === "string" &&
-          shouldTranslate(b.text) && !completed.has(b.id) && !runningIds.has(b.id));
+        const candidates = translationCandidates(update.filter((b) =>
+          b && Number.isInteger(b.id) && typeof b.text === "string" && !completed.has(b.id) && !runningIds.has(b.id)));
         update = null;
         pending = candidates.slice(0, Math.max(0, MAX_BLOCKS - done - runningIds.size));
         skipped = candidates.length - pending.length;

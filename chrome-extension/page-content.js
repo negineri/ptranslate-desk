@@ -18,7 +18,10 @@
   const written = new Map(); // 自分が最後に書いた値。サイト側の変更とは区別する
   const parents = new Map();
   let nextId = 0;
+  const STABILITY_MS = 3000;
   let scanTimer = null;
+  let stabilityTimer = null;
+  let modified = new WeakSet();
   let rootsTimer = null;
   const roots = new Set();
   const observeOptions = { childList: true, characterData: true, subtree: true,
@@ -26,8 +29,18 @@
   let following = false;
   const observer = new MutationObserver((records) => {
     // ストリーミング中に自分が書いた文字で再収集を繰り返さない。
-    if (records.some((r) => r.type !== "characterData" || written.get(r.target) !== r.target.data ||
-        parents.get(r.target) !== r.target.parentNode)) scheduleScan();
+    let changed = false;
+    for (const record of records) {
+      if (record.type === "characterData") {
+        const node = record.target;
+        if (written.get(node) === node.data && parents.get(node) === node.parentNode) continue;
+        modified.add(node);
+      } else if (record.type === "childList") {
+        for (const node of record.addedNodes) modified.add(node);
+      }
+      changed = true;
+    }
+    if (changed) scheduleScan();
   });
   let blocks = []; // { id, nodes, text }
   let port = null;
@@ -205,10 +218,13 @@
     clearInterval(rootsTimer);
     rootsTimer = null;
     clearTimeout(scanTimer);
+    clearTimeout(stabilityTimer);
     scanTimer = null;
+    stabilityTimer = null;
+    modified = new WeakSet();
   }
 
-  function scan() {
+  function scan(initial = false) {
     if (!following) return;
     let removedRoot = false;
     for (const root of roots) {
@@ -227,20 +243,31 @@
         parents.delete(node);
       }
     }
+    const now = performance.now();
     const old = new Map(blocks.map((b) => [b.nodes[0], b]));
     const next = collect().map((b) => {
       const previous = old.get(b.nodes[0]);
       if (previous && previous.text === b.text && previous.nodes.length === b.nodes.length &&
-          previous.nodes.every((n, i) => n === b.nodes[i]) && current(previous)) return previous;
-      return { ...b, skipped: !/\p{L}/u.test(b.text), id: nextId++, parents: b.nodes.map((n) => n.parentNode), expected: b.nodes.map((n) => n.data) };
+          previous.nodes.every((n, i) => n === b.nodes[i] && !modified.has(n)) && current(previous)) {
+        if (!previous.ready && now >= previous.readyAt) return { ...previous, ready: true };
+        return previous;
+      }
+      return { ...b, skipped: !/\p{L}/u.test(b.text), ready: initial, readyAt: now + STABILITY_MS,
+        id: nextId++, parents: b.nodes.map((n) => n.parentNode), expected: b.nodes.map((n) => n.data) };
     });
-    const ids = new Set(next.map((b) => b.id));
-    const removedPending = blocks.some((b) => !b.done && !b.skipped && !ids.has(b.id));
-    const changed = next.length !== blocks.length || next.some((b, i) => b !== blocks[i]);
+    modified = new WeakSet();
+    clearTimeout(stabilityTimer);
+    const nextReady = next.reduce((earliest, b) => !b.ready && !b.skipped ? Math.min(earliest, b.readyAt) : earliest, Infinity);
+    stabilityTimer = Number.isFinite(nextReady) ? setTimeout(() => {
+      stabilityTimer = null;
+      scan();
+    }, Math.ceil(nextReady - now)) : null;
+    const previousPending = blocks.filter(pendingBlock);
     blocks = next;
-    if (!changed) return;
-    const pending = blocks.filter((b) => !b.done && !b.skipped);
-    if (removedPending) stopPort(); // チャンネルの古い要求を中断して、新しい本文へ切り替える
+    const pending = blocks.filter(pendingBlock);
+    if (pending.length === previousPending.length && pending.every((b, i) => b === previousPending[i])) return;
+    const pendingIds = new Set(pending.map((b) => b.id));
+    if (previousPending.some((b) => !pendingIds.has(b.id))) stopPort(); // チャンネルの古い要求を中断して、新しい本文へ切り替える
     if (!pending.length) {
       if (!port) {
         state = "done";
@@ -254,10 +281,14 @@
     } else launch();
   }
 
+  function pendingBlock(block) {
+    return block.ready && !block.done && !block.skipped;
+  }
+
   function orderedPending() {
     const visible = visibleBlocks();
     const ids = new Set(visible.map((b) => b.id));
-    return [...visible, ...blocks.filter((b) => !ids.has(b.id))].filter((b) => !b.done && !b.skipped);
+    return [...visible, ...blocks.filter((b) => !ids.has(b.id))].filter(pendingBlock);
   }
 
   function collect() {
@@ -313,7 +344,7 @@
   }
 
   function write(block, text) {
-    if (!current(block)) return;
+    if (!current(block) || block.nodes.some((n) => modified.has(n))) return;
     const [first, ...rest] = block.nodes;
     for (const n of block.nodes) if (!originals.has(n)) {
       originals.set(n, n.data);
@@ -431,7 +462,7 @@
     blocks = [];
     following = true;
     state = "idle";
-    scan();
+    scan(true);
     observer.observe(document.body, observeOptions);
     // attachShadow 自体は MutationObserver に通知されないので、遅れて作られた境界も探す。
     rootsTimer = setInterval(() => { if (watchRoots()) scheduleScan(); }, 1000);
@@ -461,6 +492,9 @@
         if (msg.volunteer) clearActivity();
         if (total) progress();
         else activity("対象なし", "ok");
+      } else if (msg.type === "excluded") {
+        const ids = new Set(msg.ids);
+        for (const block of blocks) if (ids.has(block.id)) block.skipped = true;
       } else if (msg.type === "waiting") {
         if (msg.waiting) waiting.add(msg.id);
         else waiting.delete(msg.id);
@@ -488,11 +522,11 @@
         if (warnings.length) show("一部未翻訳", "warn", ["stop", "restore", "again"], warnings.join(" / "));
         else show("完了", "ok", ["stop", "restore", "again"]);
         if (msg.omitted) {
-          for (const b of blocks) if (!b.done) b.skipped = true;
-        } else if (following && blocks.some((b) => !b.done && !b.skipped)) {
+          for (const b of blocks) if (pendingBlock(b)) b.skipped = true;
+        } else if (following && blocks.some(pendingBlock)) {
           // 完了直前に追加された文章が background に届かなかった場合も拾う。
           scan();
-          if (!port && blocks.some((b) => !b.done && !b.skipped)) launch();
+          if (!port && blocks.some(pendingBlock)) launch();
         }
       } else if (msg.type === "error") {
         state = "error";
