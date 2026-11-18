@@ -7,6 +7,9 @@ import json
 from email.message import Message
 import sys
 import tempfile
+import threading
+import time
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +22,31 @@ if sys.platform == "linux":
 
 @unittest.skipUnless(sys.platform == "linux", "無人ワーカーはLinux用")
 class WorkerCliTest(unittest.TestCase):
+    def test_participation_starts_independent_slots_with_one_credential(self):
+        slots_started = threading.Barrier(4)
+        configs = []
+
+        def worker(binary, config, stopping):
+            configs.append(config)
+            slots_started.wait(timeout=3)
+            return "rejected" if config.get("slot", 0) == 0 else "waiting"
+
+        args = SimpleNamespace(slots=4, binary=Path("/dummy/worker"))
+        state = {
+            "broker": "https://broker.example.com",
+            "worker_secret": "test-worker-secret",
+            "expires_at": time.time() + 60,
+            "renew_at": time.time() + 30,
+        }
+        with (
+            patch.object(cli, "refresh", return_value=None),
+            patch.object(cli, "run_worker", side_effect=worker),
+        ):
+            with self.assertRaisesRegex(cli.Failure, "ワーカー資格を拒否"):
+                cli.participate(args, None, state, 8080, "test-engine-secret", "b" * 64)
+        self.assertEqual({config.get("slot", 0) for config in configs}, {0, 1, 2, 3})
+        self.assertEqual({config["worker_secret"] for config in configs}, {"test-worker-secret"})
+
     def test_device_flow_and_registration_store_only_refresh_token(self):
         responses = [
             {"discovery_url": "https://id.example.com/discovery", "client_id": "worker"},

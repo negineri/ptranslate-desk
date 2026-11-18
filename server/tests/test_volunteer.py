@@ -71,11 +71,89 @@ class VolunteerTest(unittest.TestCase):
             **fields,
         }
 
+    def test_four_slots_share_one_worker_credential(self):
+        mock, worker = self.qualified("owner-a", "192.0.2.1")
+        polls = [
+            self.helper.run_thread(lambda slot=slot: mock.poll(MODEL, slot=slot))
+            for slot in range(4)
+        ]
+        self.helper.wait(lambda: len(self.helper.hub.ready) == 4)
+        self.assertEqual(mock.poll(MODEL, slot=1)[0], 409)
+        self.assertEqual(mock.poll(MODEL, slot=tr.WORKER_MAX_SLOTS)[0], 400)
+        group = "x" * 22
+        _, response = self.request(
+            {"group": group, "count": 4, "consent": 1}, path="/api/page-slots"
+        )
+        grant = json.load(response)
+        self.assertEqual(grant["count"], 4)
+        responses = []
+        for _ in range(4):
+            _, response = self.request(
+                self.body(purpose="page_visible", group=group, page_slot=grant["token"])
+            )
+            self.assertEqual(response.status, 200)
+            responses.append(response)
+        assignments = [poll.get(timeout=3)[1]["assignment_id"] for poll in polls]
+        self.assertEqual(len(set(assignments)), 4)
+        with self.helper.hub.condition:
+            self.assertEqual(
+                {item["worker"] for item in self.helper.hub.assignments.values()}, {worker["id"]}
+            )
+        _, repeated = self.request(
+            self.body(purpose="page_visible", group=group, page_slot=grant["token"])
+        )
+        self.assertEqual(repeated.status, 429)
+        self.assertEqual(json.load(repeated)["code"], "page_slot")
+        for aid in assignments:
+            self.assertEqual(
+                mock.result(aid, 0, text="Translated.", done=True, finish="stop")[0], 200
+            )
+        for response in responses:
+            self.assertIn(b"Translated.", response.read())
+
+    def test_page_grants_follow_capacity_and_next_free_slot_goes_to_new_user(self):
+        group = "x" * 22
+        hub = self.helper.hub
+        with hub.condition, patch.object(self.pool, "available", return_value=True):
+            self.assertEqual(self.pool.page_slots("alice", group, 100), {"count": 0})
+            try:
+                hub.ready.update(
+                    {
+                        str(index): ({"id": str(index), "owner": str(index)}, "")
+                        for index in range(100)
+                    }
+                )
+                grant = self.pool.page_slots("alice", group, 100)
+                self.assertEqual(grant["count"], 100)
+                for index in range(100):
+                    job = self.pool.submit_page("alice", "page_visible", group, grant["token"])
+                    self.assertIs(self.pool._next(), job)
+                    self.pool._begin(job, time.monotonic())
+                    self.pool.running.add(job)
+                    del hub.ready[str(index)]
+                self.assertEqual(self.pool.page_slots("bob", group, 100)["count"], 9)
+                bob = self.pool.page_demands["bob"]
+                for _ in range(9):
+                    self.pool.submit_page("bob", "page_visible", group, bob.token)
+                alice = next(iter(self.pool.running))
+                self.pool.running.remove(alice)
+                self.pool._end(alice)
+                self.assertEqual(self.pool._next().user, "bob")
+                self.assertEqual(self.pool.page_slots("alice", group, 100), {"count": 0})
+            finally:
+                hub.ready.clear()
+                self.pool.waiting.clear()
+                self.pool.running.clear()
+                self.pool.pages.clear()
+
     def test_missing_consent_never_assigns(self):
         mock, worker = self.qualified("owner-a", "192.0.2.1")
         waiting = self.poll(mock, worker)
         _, config = self.request(method="GET", path="/api/config")
-        self.assertEqual(json.load(config)["pool"], {"kind": "volunteer", "consent_version": 1})
+        self.assertEqual(
+            json.load(config)["pool"],
+            {"kind": "volunteer", "consent_version": 1, "page_slots": True},
+        )
         for consent in (None, True, 0, 2):
             _, response = self.request(self.body(consent=consent))
             self.assertEqual(response.status, 403)

@@ -174,8 +174,8 @@ async function authenticatedFetch(route, body, deps, abort, server) {
 
 // background から API を 1 回呼ぶ。返す body は読むたびに時間切れを延ばし、abort で止まる。
 // 失敗は RelayError (route・no-server・no-permission・timeout) か、接続の失敗 (そのほかの例外)
-export async function apiFetch(route, body, deps, abort) {
-  if (!Object.hasOwn(ROUTES, route)) throw new RelayError("route", "不明な API です");
+export async function apiFetch(route, body, deps, abort, { pageAdmission = false } = {}) {
+  if (!Object.hasOwn(ROUTES, route) && !(pageAdmission && route === "api/page-slots")) throw new RelayError("route", "不明な API です");
   const settings = await deps.settings?.();
   const local = settings?.mode === "local";
   const server = local ? "local" : settings?.server ?? await deps.server();
@@ -194,11 +194,12 @@ export async function apiFetch(route, body, deps, abort) {
     }
     return res;
   }
+  if (pageAdmission && !local) return send();
   return scheduler.run(key, limits.get(key) ?? 1, abort.signal, send);
 }
 
 async function httpFetch(route, body, deps, abort, server, token) {
-  const method = route === "api/anonymous" ? "POST" : ROUTES[route];
+  const method = route === "api/anonymous" || route === "api/page-slots" ? "POST" : ROUTES[route];
   if (!server) throw new RelayError("no-server", "接続先が未設定です。設定でサーバーURLを入れ、「接続」を押してください");
   if (!(await deps.hasPermission(server))) {
     throw new RelayError("no-permission", "サーバーへの接続が許可されていません。設定で「接続」を押してください");

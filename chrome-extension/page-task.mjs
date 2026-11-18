@@ -54,6 +54,8 @@ export function runPageTask(port, deps) {
   let requestDeps = deps;
   let priority = new Map();
   let update = null;
+  let takeSlot;
+  let closeAdmission;
   const onPriority = (msg) => {
     if (msg?.type === "update" && Array.isArray(msg.blocks)) update = msg.blocks;
     if ((msg?.type === "priority" || msg?.type === "update") && Array.isArray(msg.ids)) {
@@ -84,6 +86,7 @@ export function runPageTask(port, deps) {
       // 読まずに終わった応答の接続も閉じる。port はページの側が閉じる
       abort.abort();
       port.onMessage.removeListener(onPriority);
+      await closeAdmission?.();
     }
   });
 
@@ -91,6 +94,21 @@ export function runPageTask(port, deps) {
     let deadline = null;
     let attempt = 0;
     try {
+      if (takeSlot && route === "api/translate") {
+        const input = JSON.parse(body);
+        const until = Date.now() + (deps.busyTimeoutMs ?? BUSY_TIMEOUT_MS);
+        for (;;) {
+          const page_slot = await takeSlot(id);
+          input.purpose = priority.has(id) ? "page_visible" : "page_rest";
+          const res = await apiFetch(route, JSON.stringify({ ...input, page_slot }), requestDeps, abort, { pageAdmission: true });
+          const response = new Response(res.body, { status: res.status });
+          if (response.status !== 429) return ensureOk(response);
+          const error = await response.json().catch(() => ({}));
+          if (error.code !== "page_slot" || Date.now() >= until) {
+            throw new RelayError(error.code ?? "busy", error.error ?? "翻訳サーバーが混み合っています");
+          }
+        }
+      }
       for (;;) {
         abort.signal.throwIfAborted();
         const res = await apiFetch(route, body, requestDeps, abort);
@@ -132,6 +150,59 @@ export function runPageTask(port, deps) {
     const consent = await volunteerFields(settings, config,
       deps.incognito ? "シークレットウィンドウではボランティア枠を使えません" : "");
     const common = { ...requestSettings(sample, settings, config), ...consent };
+    const adaptive = config.pool?.page_slots === true && Boolean(consent.consent);
+    if (adaptive) {
+      const waiting = [];
+      let polling = false;
+      let requested = false;
+      const requestSlots = async (count, controller = abort) => {
+        requested = true;
+        const res = await apiFetch("api/page-slots", JSON.stringify({ group: groupId, count, ...consent }),
+          { ...requestDeps, timeoutMs: 5000 }, controller, { pageAdmission: true });
+        const response = await ensureOk(new Response(res.body, { status: res.status }));
+        return response.json();
+      };
+      closeAdmission = async () => {
+        if (requested) await requestSlots(0, new AbortController()).catch(() => {});
+      };
+      async function poll() {
+        polling = true;
+        let waitingSince = Date.now();
+        try {
+          while (waiting.length) {
+            const grant = await requestSlots(waiting.length);
+            abort.signal.throwIfAborted();
+            if (!Number.isSafeInteger(grant.count) || grant.count < 0 || grant.count > waiting.length ||
+                (grant.count && !/^[A-Za-z0-9_-]{22,128}$/.test(grant.token ?? ""))) {
+              throw new RelayError("bad-response", "ページの送信枠を読み取れませんでした");
+            }
+            if (grant.count) {
+              waiting.sort((a, b) => (priority.get(a.id) ?? Infinity) - (priority.get(b.id) ?? Infinity));
+              for (const entry of waiting.splice(0, grant.count)) entry.resolve(grant.token);
+              waitingSince = Date.now();
+            } else {
+              if (Date.now() - waitingSince >= (deps.busyTimeoutMs ?? 120_000)) {
+                throw new RelayError("busy", "翻訳ワーカーの空きを待ちましたが、翻訳を開始できませんでした");
+              }
+              post({ type: "waiting", id: -1, waiting: true });
+            }
+            if (waiting.length) await wait(deps.busyRetryMs ?? 500, abort.signal);
+          }
+        } catch (error) {
+          for (const entry of waiting.splice(0)) entry.reject(error);
+        } finally {
+          polling = false;
+          post({ type: "waiting", id: -1, waiting: false });
+        }
+      }
+      takeSlot = (id) => {
+        abort.signal.throwIfAborted();
+        return new Promise((resolve, reject) => {
+          waiting.push({ id, resolve, reject });
+          if (!polling) queueMicrotask(() => { if (!polling && waiting.length) void poll(); });
+        });
+      };
+    }
     if (common.source_lang && common.source_lang === common.target_lang) {
       throw new RelayError("same-lang", "原文と訳す先が同じ言語です");
     }
@@ -145,12 +216,18 @@ export function runPageTask(port, deps) {
     let done = 0;
     let pending = [...todo];
     const completed = new Set();
-    const running = new Map();
+    const running = new Set();
+    const finishedGroups = [];
+    let groupFinished;
+    const finishGroup = (result) => {
+      finishedGroups.push(result);
+      groupFinished?.();
+    };
     const runningIds = new Set();
     const batchable = (block) => !priority.has(block.id) &&
       block.text.length <= SHORT_TEXT_LENGTH && !/[\r\n]/.test(block.text) &&
       !/^\s*\d/.test(block.text);
-    const batchEnabled = Array.isArray(visibleIds) && common.target_lang === "ja" &&
+    const batchEnabled = !adaptive && Array.isArray(visibleIds) && common.target_lang === "ja" &&
       (!common.source_lang || common.source_lang === "en");
     let total = todo.length;
     let skipped = omitted;
@@ -163,7 +240,7 @@ export function runPageTask(port, deps) {
         skipped = candidates.length - pending.length;
         total = done + runningIds.size + pending.length;
       }
-      while (pending.length && running.size < concurrencyLimit(config) && !abort.signal.aborted) {
+      while (pending.length && running.size < (adaptive ? MAX_BLOCKS : concurrencyLimit(config)) && !abort.signal.aborted) {
         // 画面内を優先し、それぞれの領域で長文を先に送る。
         let nextIndex = 0;
         let bestPriority = Infinity;
@@ -191,13 +268,18 @@ export function runPageTask(port, deps) {
           }
         }
         for (const member of group) runningIds.add(member.id);
-        running.set(block.id, translateGroup(group, previous).then(
-          (results) => ({ group, results }),
-          (error) => ({ group, error }),
-        ));
+        running.add(block.id);
+        void translateGroup(group, previous).then(
+          (results) => finishGroup({ group, results }),
+          (error) => finishGroup({ group, error }),
+        );
       }
       if (!running.size) break;
-      const finished = await Promise.race(running.values());
+      if (!finishedGroups.length) {
+        await new Promise((resolve) => { groupFinished = resolve; });
+        groupFinished = undefined;
+      }
+      const finished = finishedGroups.shift();
       running.delete(finished.group[0].id);
       if ("error" in finished) throw finished.error;
       if (abort.signal.aborted) return;

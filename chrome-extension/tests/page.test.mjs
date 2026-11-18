@@ -319,7 +319,7 @@ test("認証や要求エラーは枠待ちとして再試行しない", async ()
   }
 });
 
-for (const advertised of [undefined, 1, 4, 12]) {
+for (const advertised of [undefined, 1, 4, 12, 100, 101]) {
   test(`接続先の通知に応じてページ翻訳を実行する (${advertised ?? "通知なし"})`, async () => {
     let active = 0, maximum = 0;
     const config = { ...CONFIG };
@@ -334,10 +334,12 @@ for (const advertised of [undefined, 1, 4, 12]) {
         return sse([{ t: body.text }, { done: true, finish: "stop" }]);
       },
     });
-    const messages = await runPage(Array.from({ length: 16 }, (_, id) => ({ id, text: `Paragraph ${id}` })), server).finished;
+    const count = Math.max(16, (advertised ?? 1) + 1);
+    const blocks = Array.from({ length: count }, (_, id) => ({ id, text: `Paragraph ${id}` }));
+    const messages = await runPage(blocks, server).finished;
     assert.equal(messages.at(-1).type, "done");
-    assert.equal(maximum, advertised ?? 1);
-    assert.equal(server.requests.length, 16);
+    assert.equal(maximum, Math.min(100, advertised ?? 1));
+    assert.equal(server.requests.length, count);
   });
 }
 
@@ -461,3 +463,54 @@ test("ボランティア枠には接続先の現行版に同意した通常ウ�
     }
   }
 });
+
+for (const capacity of [10, 100]) {
+  test(`ボランティア枠の増減に追従し、${capacity}枠でページを完了する`, async (t) => {
+    const previous = globalThis.chrome;
+    t.after(() => { globalThis.chrome = previous; });
+    globalThis.chrome = { storage: { local: { get: async () => ({ [`volunteer-consent:${SERVER}`]: 1 }) } } };
+    const token = "x".repeat(24);
+    let polls = 0;
+    let active = 0;
+    let maximum = 0;
+    let advertised = capacity;
+    let closed;
+    const released = new Promise((resolve) => { closed = resolve; });
+    const server = fakeServer({
+      config: () => Response.json({ ...CONFIG, pool: { kind: "volunteer", consent_version: 1, page_slots: true } }),
+      translate: async (body) => {
+        assert.equal(body.page_slot, token);
+        active++;
+        maximum = Math.max(maximum, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active--;
+        return sse([{ t: body.text }, { done: true, finish: "stop" }]);
+      },
+    });
+    const fetch = async (url, init) => {
+      if (!url.endsWith("/api/page-slots")) return server.fetch(url, init);
+      const { group, count, consent, ...rest } = JSON.parse(init.body);
+      assert.equal(typeof group, "string");
+      assert.equal(consent, 1);
+      assert.deepEqual(rest, {});
+      if (!count) {
+        closed();
+        return Response.json({ count: 0 });
+      }
+      if (++polls === 1) {
+        assert.equal(server.requests.length, 0);
+        return Response.json({ count: 0 });
+      }
+      const allowed = Math.min(count, Math.max(0, advertised - active));
+      if (capacity === 10 && polls === 2) advertised = 4;
+      return Response.json({ count: allowed, token });
+    };
+    const blocks = Array.from({ length: 100 }, (_, id) => ({ id, text: `Paragraph ${id}` }));
+    const messages = await runPage(blocks, server, { fetch, busyRetryMs: 1 }).finished;
+    await released;
+    assert.equal(messages.at(-1).type, "done");
+    assert.equal(maximum, capacity);
+    if (capacity === 10) assert.ok(polls > 10);
+    assert.equal(server.requests.length, 100);
+  });
+}

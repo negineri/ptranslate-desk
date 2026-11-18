@@ -79,6 +79,26 @@ class PoolTest(unittest.TestCase):
         self.assertFalse(pool.waiting)
         self.assertEqual(sum(pool.free), 3)
 
+    def test_page_parallelism_uses_idle_slots_and_rotates_waiting_users(self):
+        pool = tr.DirectPool([("http://localhost", 100)], page_slots_per_user=100)
+        cancel = threading.Event()
+        jobs = [pool.submit("alice", "page_visible") for _ in range(101)]
+        for job in jobs[:100]:
+            self.assertEqual(pool.acquire(job, cancel), 0)
+        self.assertEqual(pool.free, [0])
+        self.assertIsNone(pool._next())
+        other = pool.submit("bob", "page_visible")
+        self.assertIs(pool._next(), other)
+        pool.release(jobs[0], 0)
+        self.assertEqual(pool.acquire(other, cancel), 0)
+        for job in jobs[1:100]:
+            pool.release(job, 0)
+        pool.release(other, 0)
+        self.assertEqual(pool.acquire(jobs[-1], cancel), 0)
+        pool.release(jobs[-1], 0)
+        self.assertFalse(pool.pages)
+        self.assertEqual(pool.free, [100])
+
     def test_three_users_take_turns(self):
         pool = tr.DirectPool([("http://localhost", 1)])
         for user in ("alice", "alice", "bob", "bob", "carol"):

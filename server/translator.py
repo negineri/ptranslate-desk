@@ -86,6 +86,7 @@ ACCOUNT_LINKS = os.environ.get("TR_ACCOUNT_LINKS", "{}")
 ACCOUNT_DELETE_KEY = os.environ.get("TR_ACCOUNT_DELETE_KEY", "")
 CONTRIBUTION_DAILY_LIMIT = env_int("TR_CONTRIBUTION_DAILY_LIMIT", 50000)
 WORKERS_PER_OWNER = env_int("TR_WORKERS_PER_OWNER", 2)
+WORKER_MAX_SLOTS = env_int("TR_WORKER_MAX_SLOTS", 64)
 WORKER_MODEL_SHA256 = os.environ.get("TR_WORKER_MODEL_SHA256", "")
 MIN_AGENT_VERSION = os.environ.get("TR_MIN_AGENT_VERSION", "")
 AUDIT_UPSTREAMS = os.environ.get("TR_AUDIT_UPSTREAMS", "")
@@ -108,6 +109,7 @@ MAX_PROMPT_CHARS = env_int("TR_MAX_PROMPT_CHARS", 12000)
 MAX_GLOSSARY = env_int("TR_MAX_GLOSSARY", 200)
 # 1 人が同時に流せる翻訳の数。翻訳エンジンが同時に処理できる数を 1 人で埋めない
 MAX_ACTIVE_PER_USER = env_int("TR_MAX_ACTIVE_PER_USER", 2)
+PAGE_SLOTS_PER_USER = env_int("TR_PAGE_SLOTS_PER_USER", 1)
 # 翻訳エンジンが答えないときに諦めるまでの秒数 (前の人の翻訳を待つ時間を含む)
 UPSTREAM_TIMEOUT = env_int("TR_UPSTREAM_TIMEOUT", 600)
 # 待っている間に送るコメント行の間隔 (Cloudflare は 100 秒応答の無い接続を切る)
@@ -193,6 +195,7 @@ log = logging.getLogger("translator")
 active_lock = threading.Lock()
 active: dict[str, int] = {}
 page_active: dict[str, int] = {}
+adaptive_active = Counter()
 userinfo_lock = threading.Lock()
 userinfo_cache: dict[str, tuple[tuple[str, str], float]] = {}
 
@@ -486,10 +489,14 @@ class Job:
     tier: str = "registered"
     network: str = ""
     group: str | None = None
+    adaptive: bool = False
 
 
 class DirectPool:
-    def __init__(self, upstreams, timeout=120, aging=30, max_queue=256):
+    def __init__(self, upstreams, timeout=120, aging=30, max_queue=256, page_slots_per_user=1):
+        if page_slots_per_user <= 0:
+            raise ValueError("TR_PAGE_SLOTS_PER_USER は正の整数にしてください")
+        self.page_slots_per_user = page_slots_per_user
         self.urls = [url for url, _ in upstreams]
         self.free = [slots for _, slots in upstreams]
         self.total_slots = sum(self.free)
@@ -501,17 +508,21 @@ class DirectPool:
         self.max_queue = max_queue
         self.condition = threading.Condition()
         self.waiting = []
-        self.pages = set()
+        self.pages = Counter()
         self.turns = {}
         self.cursor = 0
 
-    def submit(self, user, purpose, tier="registered", network=""):
+    def submit(self, user, purpose, tier="registered", network="", *, adaptive=False):
         with self.condition:
             if len(self.waiting) >= self.max_queue:
                 return None
-            if sum(j.user == user for j in self.waiting) >= (4 if tier == "anonymous" else 8):
+            waiting_limit = 4 if tier == "anonymous" else max(8, self.page_slots_per_user + 1)
+            if (
+                not adaptive
+                and sum(j.user == user for j in self.waiting if not j.adaptive) >= waiting_limit
+            ):
                 raise HttpError(429, "待ち行列に置ける数を超えています")
-            job = Job(user, purpose, time.monotonic(), tier, network)
+            job = Job(user, purpose, time.monotonic(), tier, network, adaptive=adaptive)
             self.waiting.append(job)
             self.condition.notify_all()
             return job
@@ -519,7 +530,11 @@ class DirectPool:
     def _next(self, now=None):
         now = time.monotonic() if now is None else now
         eligible = [
-            j for j in self.waiting if j.purpose == "interactive" or j.user not in self.pages
+            j
+            for j in self.waiting
+            if j.purpose == "interactive"
+            or j.adaptive
+            or self.pages[j.user] < self.page_slots_per_user
         ]
         registered_waiting = any(j.tier == "registered" for j in self.waiting)
         # 1枠のプールでも匿名を進めるため、比率の枠は最低1とする。
@@ -553,6 +568,15 @@ class DirectPool:
         turns = [user for user in self.turns.get(rank, []) if user in users]
         turns.extend(user for user in users if user not in turns)
         self.turns[rank] = turns
+        if any(job.adaptive for job in candidates):
+            interactive = [job for job in candidates if job.purpose == "interactive"]
+            if interactive:
+                return min(interactive, key=lambda job: turns.index(job.user))
+            least = min(self.pages[job.user] for job in candidates)
+            return min(
+                (job for job in candidates if self.pages[job.user] == least),
+                key=lambda job: turns.index(job.user),
+            )
         return next(j for j in candidates if j.user == turns[0])
 
     def acquire(self, job, cancel):
@@ -591,7 +615,7 @@ class DirectPool:
         turns.remove(job.user)
         turns.append(job.user)
         if job.purpose != "interactive":
-            self.pages.add(job.user)
+            self.pages[job.user] += 1
         self._remove(job)
 
     def _remove(self, job):
@@ -611,7 +635,9 @@ class DirectPool:
                 if not self.network_running[job.network]:
                     del self.network_running[job.network]
         if job.purpose != "interactive":
-            self.pages.discard(job.user)
+            self.pages[job.user] -= 1
+            if not self.pages[job.user]:
+                del self.pages[job.user]
         self.condition.notify_all()
 
 
@@ -653,8 +679,12 @@ class UpstreamCancellation:
             pass  # 既に切断されている。
 
 
-def release_active(user, purpose="interactive"):
+def release_active(user, purpose="interactive", adaptive=False):
     with active_lock:
+        if adaptive:
+            adaptive_active[user] -= 1
+            if not adaptive_active[user]:
+                del adaptive_active[user]
         active[user] -= 1
         if not active[user]:
             del active[user]
@@ -879,6 +909,7 @@ class TranslationHTTPServer(ThreadingHTTPServer):
                         QUEUE_TIMEOUT,
                         AGING_SECONDS,
                         MAX_QUEUE,
+                        page_slots_per_user=PAGE_SLOTS_PER_USER,
                     )
                 else:
                     raise ValueError("TR_POOL_KIND が不正です")
@@ -887,6 +918,8 @@ class TranslationHTTPServer(ThreadingHTTPServer):
     def server_bind(self):
         self.worker_lock = threading.Lock()
         self.workers = None
+        if not 1 <= WORKER_MAX_SLOTS <= 1000:
+            raise ValueError("TR_WORKER_MAX_SLOTS は1〜1000の整数にしてください")
         if MAX_OPEN_REQUESTS <= 0:
             raise ValueError("TR_MAX_OPEN_REQUESTS は正の整数にしてください")
         self.open_requests = threading.BoundedSemaphore(MAX_OPEN_REQUESTS)
@@ -1089,7 +1122,11 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "user": name,
                         "pool": (
-                            {"kind": "volunteer", "consent_version": CONSENT_VERSION}
+                            {
+                                "kind": "volunteer",
+                                "consent_version": CONSENT_VERSION,
+                                "page_slots": self.tier == "registered",
+                            }
                             if POOL_KIND == "volunteer"
                             else {"kind": "direct"}
                         ),
@@ -1108,6 +1145,15 @@ class Handler(BaseHTTPRequestHandler):
                         },
                     },
                 )
+            if method == "POST" and path == "/api/page-slots" and POOL_KIND == "volunteer":
+                if self.tier != "registered":
+                    raise HttpError(403, "この利用方法ではページの一括受付を使えません")
+                body = self.read_json_body(max_bytes=1024)
+                self.require_volunteer_consent(body)
+                group, count = body.get("group"), body.get("count")
+                if not valid_page_group(group) or type(count) is not int or not 0 <= count <= 3000:
+                    raise HttpError(400, "ページの受付内容が不正です")
+                return self.send_json(200, self.server.get_pool().page_slots(user, group, count))
             if method == "POST" and path == "/api/translate":
                 return self.translate(user)
             raise HttpError(404, "Not found")
@@ -1130,6 +1176,7 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/client-config",
                     "/api/config",
                     "/api/translate",
+                    "/api/page-slots",
                     "/api/worker/register",
                     "/api/worker/renew",
                     "/api/worker/mine",
@@ -1342,19 +1389,21 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError):
             return True
 
-    def translate(self, user: str) -> None:
-        body = self.read_json_body()
+    @staticmethod
+    def require_volunteer_consent(body):
         if POOL_KIND == "volunteer" and (
             type(body.get("consent")) is not int or body["consent"] != CONSENT_VERSION
         ):
             raise HttpError(403, "ボランティア枠の利用には同意が必要です", "consent_required")
+
+    def translate(self, user: str) -> None:
+        body = self.read_json_body()
+        self.require_volunteer_consent(body)
         purpose = body.get("purpose", "interactive")
         if purpose not in PURPOSES:
             raise HttpError(400, "purpose が不正です")
         group = body.get("group")
-        if group is not None and (
-            not isinstance(group, str) or not re.fullmatch(r"[A-Za-z0-9_-]{22,128}", group)
-        ):
+        if group is not None and not valid_page_group(group):
             raise HttpError(400, "group が不正です")
         req = parse_request(body)
         pool = self.server.get_pool()
@@ -1362,15 +1411,29 @@ class Handler(BaseHTTPRequestHandler):
         tier = getattr(self, "tier", "registered")
         network = self.client_network() if tier == "anonymous" else ""
         user_limit = 1 if tier == "anonymous" else MAX_ACTIVE_PER_USER
+        slot = body.get("page_slot")
+        adaptive = slot is not None
+        if adaptive and (
+            not volunteer
+            or tier != "registered"
+            or purpose == "interactive"
+            or not valid_page_group(slot)
+            or group is None
+        ):
+            raise HttpError(400, "ページの送信枠が不正です")
         with active_lock:
-            if active.get(user, 0) >= user_limit or (
-                purpose != "interactive" and page_active.get(user, 0) >= max(1, user_limit - 1)
+            if not adaptive and (
+                active.get(user, 0) - adaptive_active[user] >= user_limit
+                or (purpose != "interactive" and page_active.get(user, 0) >= max(1, user_limit - 1))
             ):
                 raise HttpError(
                     429,
                     "同時に訳せる数を超えています。前の翻訳が終わってから送ってください",
                 )
-            job = pool.submit(user, purpose, tier, network)
+            if adaptive:
+                job = pool.submit_page(user, purpose, group, slot)
+            else:
+                job = pool.submit(user, purpose, tier, network)
             if job is None:
                 raise HttpError(503, "翻訳の待ち行列が一杯です", "busy")
             job.group = group
@@ -1386,6 +1449,8 @@ class Handler(BaseHTTPRequestHandler):
                     pool._remove(job)
                 raise
             active[user] = active.get(user, 0) + 1
+            if adaptive:
+                adaptive_active[user] += 1
             if purpose != "interactive":
                 page_active[user] = page_active.get(user, 0) + 1
         started = time.monotonic()
@@ -1408,7 +1473,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             with pool.condition:
                 pool._remove(job)
-            release_active(user, purpose)
+            release_active(user, purpose, adaptive)
             raise
         finish, out_chars = "error", 0
         try:
@@ -2022,7 +2087,7 @@ class WorkerHub:
             if self.checks is not None:
                 self.checks.health.invalidate(worker_id, owner)
             for wid, (worker, _) in list(self.ready.items()):
-                if wid in self.revoked_workers or worker["owner"] in self.revoked_owners:
+                if worker["id"] in self.revoked_workers or worker["owner"] in self.revoked_owners:
                     del self.ready[wid]
             for aid, assignment in list(self.assignments.items()):
                 if (
@@ -2044,7 +2109,10 @@ class WorkerHub:
         return self.registry.authenticate(secret)
 
     def poll(self, secret, body, network, disconnected):
-        if set(body) != {"agent_version", "model"}:
+        if (
+            set(body) - {"agent_version", "model", "slot"}
+            or not {"agent_version", "model"} <= body.keys()
+        ):
             raise HttpError(400, "ポーリングの項目が不正です")
         if (
             self.version(body["agent_version"]) < self.minimum_version
@@ -2052,10 +2120,14 @@ class WorkerHub:
         ):
             raise HttpError(403, "エージェントの版かモデルが対応していません")
         worker = self.valid(secret)
-        wid = worker["id"]
+        slot = body.get("slot", 0)
+        if type(slot) is not int or not 0 <= slot < WORKER_MAX_SLOTS:
+            raise HttpError(400, "ワーカーの枠番号が不正です")
+        worker_id = worker["id"]
+        wid = worker_id if slot == 0 else f"{worker_id}:{slot}"
         with self.condition:
-            if wid in self.polling or any(a["worker"] == wid for a in self.assignments.values()):
-                raise HttpError(409, "このワーカーは既に処理中です")
+            if wid in self.polling or any(a["slot"] == wid for a in self.assignments.values()):
+                raise HttpError(409, "このワーカーの枠は既に処理中です")
             self.polling.add(wid)
             self.ready[wid] = (worker, network)
             self.condition.notify_all()
@@ -2065,7 +2137,10 @@ class WorkerHub:
         try:
             while True:
                 with self.condition:
-                    if wid in self.revoked_workers or worker["owner"] in self.revoked_owners:
+                    if (
+                        worker["id"] in self.revoked_workers
+                        or worker["owner"] in self.revoked_owners
+                    ):
                         raise HttpError(401, "ワーカーの資格が無効です")
                     now = time.monotonic()
                     if self.closed or disconnected():
@@ -2151,9 +2226,9 @@ class WorkerHub:
                         (wid, worker, network)
                         for wid, (worker, network) in self.ready.items()
                         if worker["owner"] not in excluded
-                        and wid not in self.revoked_workers
+                        and worker["id"] not in self.revoked_workers
                         and worker["owner"] not in self.revoked_owners
-                        and (target_worker is None or wid == target_worker)
+                        and (target_worker is None or worker["id"] == target_worker)
                         and (not network or network not in excluded_networks)
                     ]
                     selected = (
@@ -2171,7 +2246,8 @@ class WorkerHub:
                         assignment_id = secrets.token_hex(16)
                         now = time.monotonic()
                         self.assignments[assignment_id] = {
-                            "worker": wid,
+                            "worker": worker["id"],
+                            "slot": wid,
                             "user_job": select_worker is not None,
                             "deadline": now + self.deadline_seconds,
                             "last": now,
@@ -2224,7 +2300,9 @@ class WorkerHub:
             finally:
                 with self.condition:
                     self.assignments.pop(assignment_id, None)
-                    self.deliveries.pop(wid, None)
+                    delivery = self.deliveries.get(wid)
+                    if delivery and delivery["assignment_id"] == assignment_id:
+                        self.deliveries.pop(wid)
                     self.condition.notify_all()
             if cancel.is_set():
                 return "cancelled"
@@ -2967,6 +3045,21 @@ class CanaryChecks:
             self.reserved.clear()
 
 
+def valid_page_group(value):
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{22,128}", value)
+
+
+@dataclass
+class PageDemand:
+    group: str
+    expires: float
+    count: int = 0
+    reserved: int = 0
+    token: str | None = None
+    grant_expires: float = 0
+    retry_after: float = 0
+
+
 class VolunteerPool(DirectPool):
     """待ち行列を共用し、参加端末への割り当てだけを仲介する。"""
 
@@ -2982,19 +3075,109 @@ class VolunteerPool(DirectPool):
         self.user_history = {}
         self.running = set()
         self.held = {}
+        self.page_demands: dict[str, PageDemand] = {}
         self.stats = {}
         self.degraded = False
         self.closed = threading.Event()
         self.reporter = threading.Thread(target=self.report_loop, daemon=True)
         self.reporter.start()
 
-    def available(self, worker):
+    def page_slots(self, user, group, count):
+        with self.condition:
+            now = time.monotonic()
+            for owner, page in list(self.page_demands.items()):
+                if now >= page.expires:
+                    del self.page_demands[owner]
+                elif page.reserved and now >= page.grant_expires:
+                    page.reserved = 0
+                    page.token = None
+                    page.count = 0
+                    page.retry_after = now + 2
+            page = self.page_demands.get(user)
+            if count == 0:
+                if page and page.group == group:
+                    del self.page_demands[user]
+                return {"count": 0}
+            if page and page.group != group:
+                raise HttpError(429, "別のタブでページを翻訳しています", "page_in_use")
+            if page is None:
+                if len(self.page_demands) >= self.max_queue:
+                    raise HttpError(503, "翻訳の待ち行列が一杯です", "busy")
+                page = self.page_demands[user] = PageDemand(group, now + 15)
+            page.expires = now + 15
+            page.count = max(0, count - page.reserved)
+            ready = sum(
+                self.available(worker, slot)
+                for slot, (worker, _) in self.hub.ready.items()
+                if worker["id"] not in self.hub.revoked_workers
+                and worker["owner"] not in self.hub.revoked_owners
+            )
+            waiting = Counter(job.user for job in self.waiting)
+            reserved = sum(entry.reserved for entry in self.page_demands.values())
+            buffer = min(8, len(self.running) // 4)
+            # 満杯の待ち行列にも、新しく待ち始めた利用者の1件を置ける余地を残す。
+            if self.running and not self.pages[user] and not waiting[user] and not page.reserved:
+                buffer += 1
+            capacity = (
+                min(
+                    ready + buffer,
+                    self.max_queue,
+                    max(0, MAX_OPEN_REQUESTS - len(self.running) - 2),
+                )
+                - len(self.waiting)
+                - reserved
+            )
+            candidates = {
+                owner: entry
+                for owner, entry in self.page_demands.items()
+                if entry.count and entry.token is None and now >= entry.retry_after
+            }
+            for _ in range(capacity):
+                if not candidates:
+                    break
+                owner = min(
+                    candidates,
+                    key=lambda owner: (
+                        self.pages[owner] + waiting[owner] + candidates[owner].reserved
+                    ),
+                )
+                entry = candidates[owner]
+                entry.reserved += 1
+                entry.count -= 1
+                entry.grant_expires = now + 5
+                if not entry.count:
+                    del candidates[owner]
+            if page.reserved and page.token is None:
+                page.token = secrets.token_urlsafe(24)
+                return {"count": page.reserved, "token": page.token}
+            return {"count": 0}
+
+    def submit_page(self, user, purpose, group, token):
+        with self.condition:
+            page = self.page_demands.get(user)
+            if (
+                page is None
+                or page.group != group
+                or page.token != token
+                or not page.reserved
+                or time.monotonic() >= page.grant_expires
+            ):
+                raise HttpError(429, "ページの送信枠を取り直してください", "page_slot")
+            page.reserved -= 1
+            if not page.reserved:
+                page.token = None
+            job = self.submit(user, purpose, adaptive=True)
+            if job is None:
+                raise HttpError(429, "ページの送信枠を取り直してください", "page_slot")
+            return job
+
+    def available(self, worker, slot=None):
         checks = self.hub.checks
         with checks.lock:
             return (
                 worker["expires"] > time.time()
                 and worker["id"] not in checks.busy_workers
-                and worker["id"] not in self.held
+                and (slot or worker["id"]) not in self.held
                 and not checks.needs_canary(worker)
             )
 
@@ -3068,14 +3251,14 @@ class VolunteerPool(DirectPool):
 
     def choose(self, job, candidates, assigned):
         # WorkerHub が condition を保持し、この選択と端末の確保を一緒に行う。
-        candidates = [item for item in candidates if self.available(item[1])]
+        candidates = [item for item in candidates if self.available(item[1], item[0])]
         if not candidates:
             return None
         now = time.monotonic()
         ready = [
             (worker["owner"], network)
-            for worker, network in self.hub.ready.values()
-            if self.available(worker)
+            for slot, (worker, network) in self.hub.ready.items()
+            if self.available(worker, slot)
         ]
         self.total_slots = len(ready) + len(self.running)
         first = job not in self.running
@@ -3121,7 +3304,7 @@ class VolunteerPool(DirectPool):
                     self._end(job)
                 elif job in self.waiting:
                     self._remove(job)
-            release_active(job.user, job.purpose)
+            release_active(job.user, job.purpose, job.adaptive)
 
     def note_worker_failure(self, worker, reason):
         try:

@@ -241,6 +241,7 @@ pub async fn set_worker_participation(
             app.clone(),
             registration.expires_at,
             crate::worker_agent::Bootstrap {
+                slot: 0,
                 broker: connection.server_url,
                 worker_secret: std::mem::take(&mut registration.secret),
                 model_sha256: String::new(),

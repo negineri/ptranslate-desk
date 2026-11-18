@@ -1,4 +1,4 @@
-//! 提供を続ける。資格を自動で更新し、1件ずつ制限付きのワーカーを起動する。
+//! 提供を続ける。資格を自動で更新し、枠ごとに制限付きのワーカーを起動する。
 use crate::{
     account::{now, refresh, Renewal},
     engine::{Installation, Managed, Remote, Target},
@@ -10,7 +10,11 @@ use ptranslate_core::{
     worker_supervisor::{run_configured, Status},
 };
 use std::{sync::Arc, time::Duration};
-use tokio::sync::{oneshot, watch};
+use tokio::{
+    sync::{oneshot, watch},
+    task::JoinSet,
+    time::Instant,
+};
 
 const INITIAL_RETRY: Duration = Duration::from_secs(5);
 const MAX_RETRY: Duration = Duration::from_secs(300);
@@ -55,18 +59,12 @@ pub fn stop_signal() -> Result<watch::Receiver<bool>> {
     Ok(receiver)
 }
 
-async fn pause(stop: &mut watch::Receiver<bool>, duration: Duration) {
-    tokio::select! {
-        _ = tokio::time::sleep(duration) => {}
-        _ = stop.wait_for(|stopped| *stopped) => {}
-    }
-}
-
 pub async fn run(
     client: &reqwest::Client,
     dir: &StateDir,
     mut state: State,
     engine: Engine,
+    slots: u16,
     mut stop: watch::Receiver<bool>,
     log: impl Fn(&str),
 ) -> Result<()> {
@@ -77,7 +75,7 @@ pub async fn run(
     let (mut target, remote) = match engine {
         Engine::Managed { install, threads } => {
             log("推論エンジンを起動しています");
-            let engine = Managed::start(&install, threads).await?;
+            let engine = Managed::start(&install, threads, slots).await?;
             let target = clone_target(&engine.target);
             managed = Some((engine, install, threads));
             (target, None)
@@ -90,7 +88,9 @@ pub async fn run(
         }
     };
     let mut next_attempt = 0;
-    let mut retry = INITIAL_RETRY;
+    let mut workers = JoinSet::new();
+    let mut retry = vec![INITIAL_RETRY; usize::from(slots)];
+    let mut ready_at = vec![Some(Instant::now()); usize::from(slots)];
     log("提供を開始しました");
     while !*stop.borrow() {
         let now = now();
@@ -117,49 +117,75 @@ pub async fn run(
         if *stop.borrow() {
             break;
         }
-        // 推論先が使えないときは、ジョブを取りに行かない。
-        let ready = if let Some(remote) = &remote {
-            match remote.verify().await {
-                Ok(()) => true,
-                Err(e) if e.fatal => return Err(e),
-                Err(_) => false,
-            }
-        } else if let Some((engine, install, threads)) = &mut managed {
-            if engine.alive() {
-                true
-            } else {
-                log("推論エンジンが終了したため、起動し直します");
-                match Managed::start(install, *threads).await {
-                    Ok(restarted) => {
-                        target = clone_target(&restarted.target);
-                        *engine = restarted;
-                        true
-                    }
+        let idle = ready_at
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, ready)| ready.filter(|time| *time <= Instant::now()).map(|_| slot))
+            .collect::<Vec<_>>();
+        if !idle.is_empty() {
+            // 推論先が使えないときは、ジョブを取りに行かない。
+            let ready = if let Some(remote) = &remote {
+                match remote.verify().await {
+                    Ok(()) => true,
                     Err(e) if e.fatal => return Err(e),
                     Err(_) => false,
                 }
+            } else if let Some((engine, install, threads)) = &mut managed {
+                if engine.alive() {
+                    true
+                } else {
+                    log("推論エンジンが終了したため、起動し直します");
+                    match Managed::start(install, *threads, slots).await {
+                        Ok(restarted) => {
+                            target = clone_target(&restarted.target);
+                            *engine = restarted;
+                            true
+                        }
+                        Err(e) if e.fatal => return Err(e),
+                        Err(_) => false,
+                    }
+                }
+            } else {
+                true
+            };
+            for slot in idle {
+                ready_at[slot] = if ready {
+                    let config = bootstrap(&state, &target, slot as u16);
+                    let mut worker_stop = stop.clone();
+                    workers.spawn(async move { (slot, run_once(config, &mut worker_stop).await) });
+                    None
+                } else {
+                    let delay = retry[slot];
+                    retry[slot] = (delay * 2).min(MAX_RETRY);
+                    Some(Instant::now() + delay)
+                };
             }
-        } else {
-            true
+            if !ready {
+                log("推論先を確認できないため、ジョブの受付を待機します。");
+            }
+        }
+        let (slot, result) = tokio::select! {
+            _ = stop.wait_for(|stopped| *stopped) => break,
+            _ = tokio::time::sleep(Duration::from_millis(250)) => continue,
+            completed = workers.join_next(), if !workers.is_empty() => {
+                completed
+                    .expect("実行中のワーカーがある")
+                    .map_err(|_| Failure::new("ワーカーの終了を確認できませんでした"))?
+            }
         };
-        let result = if ready {
-            run_once(&state, &target, &mut stop).await
-        } else {
-            log("推論先を確認できないため、ジョブの受付を待機します。");
-            Err(String::new())
-        };
+        let retry = &mut retry[slot];
         let delay = match result {
             Ok(Status::Rejected) => return Err(Failure::new("提供先がワーカー資格を拒否しました")),
             Ok(Status::Completed | Status::Waiting) => {
-                retry = INITIAL_RETRY;
+                *retry = INITIAL_RETRY;
                 Duration::from_millis(250)
             }
             Ok(Status::Quarantined | Status::Paused) => {
-                retry = INITIAL_RETRY;
+                *retry = INITIAL_RETRY;
                 Duration::from_secs(2)
             }
             other => {
-                if ready && !*stop.borrow() {
+                if !*stop.borrow() {
                     log(&match other {
                         Ok(Status::QuickWaiting) => {
                             "提供先が混み合っています。間をおいて再試行します。".to_owned()
@@ -174,13 +200,14 @@ pub async fn run(
                         _ => "ワーカーの処理を続けられませんでした。再試行します。".to_owned(),
                     });
                 }
-                let delay = retry;
-                retry = (retry * 2).min(MAX_RETRY);
+                let delay = *retry;
+                *retry = (delay * 2).min(MAX_RETRY);
                 delay
             }
         };
-        pause(&mut stop, delay).await;
+        ready_at[slot] = Some(Instant::now() + delay);
     }
+    while workers.join_next().await.is_some() {}
     log("提供を停止しました");
     Ok(())
 }
@@ -193,12 +220,9 @@ fn clone_target(target: &Target) -> Target {
     }
 }
 
-async fn run_once(
-    state: &State,
-    target: &Target,
-    stop: &mut watch::Receiver<bool>,
-) -> std::result::Result<Status, String> {
-    let config = Bootstrap {
+fn bootstrap(state: &State, target: &Target, slot: u16) -> Bootstrap {
+    Bootstrap {
+        slot,
         broker: state.broker.clone(),
         worker_secret: state.worker_secret.clone().unwrap_or_default(),
         model_sha256: target.model_sha256.clone(),
@@ -207,7 +231,13 @@ async fn run_once(
         engine_secret: target.secret.as_str().to_owned(),
         relay_port: None,
         relay_secret: None,
-    };
+    }
+}
+
+async fn run_once(
+    config: Bootstrap,
+    stop: &mut watch::Receiver<bool>,
+) -> std::result::Result<Status, String> {
     let (sender, receiver) = oneshot::channel();
     let run = run_configured(config, receiver, |_| {}, || true, || Some(()));
     tokio::pin!(run);
