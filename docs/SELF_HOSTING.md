@@ -81,7 +81,7 @@ cmake -B build -DGGML_CUDA=OFF
 cmake --build build --config Release --target llama-server -j 2
 ./build/bin/llama-server \
   -hf pfnet/plamo-3-translate-2b-GGUF:Q4_K_M \
-  --host 127.0.0.1 --port 8080 --ctx-size 16384 --parallel 1
+  --host 127.0.0.1 --port 8080 --ctx-size 16384 --parallel 1 --cache-ram 0
 ```
 
 初回はモデルのダウンロードが発生します。`GET http://127.0.0.1:8080/health` が200になるまで待ちます。
@@ -126,7 +126,7 @@ Wants=network-online.target
 [Service]
 User=ptranslate
 WorkingDirectory=/srv/llama.cpp
-ExecStart=/srv/llama.cpp/build/bin/llama-server -hf pfnet/plamo-3-translate-2b-GGUF:Q4_K_M --host 127.0.0.1 --port 8080 --ctx-size 16384 --parallel 1
+ExecStart=/srv/llama.cpp/build/bin/llama-server -hf pfnet/plamo-3-translate-2b-GGUF:Q4_K_M --host 127.0.0.1 --port 8080 --ctx-size 16384 --parallel 1 --cache-ram 0
 Restart=on-failure
 
 [Install]

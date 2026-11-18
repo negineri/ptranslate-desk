@@ -647,26 +647,15 @@ impl Local {
         secret.zeroize();
         drop(listener);
         let mut cmd = command(&install.engine);
-        cmd.args(["--model"])
-            .arg(install.model)
-            .args([
-                "--host",
-                "127.0.0.1",
-                "--port",
-                &port.to_string(),
-                "--ctx-size",
-                &(parallel::CONTEXT_PER_SLOT * count).to_string(),
-                "--parallel",
-                &count.to_string(),
-                "--flash-attn",
-                "on",
-                "--no-webui",
-                "--log-disable",
-            ])
-            .env("LLAMA_API_KEY", &endpoint.key)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        cmd.args(ptranslate_core::engine::server_args(
+            &install.model,
+            port,
+            count,
+        ))
+        .env("LLAMA_API_KEY", &endpoint.key)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
         let device = self.settings.lock().unwrap().device.clone();
         if device == "none" {
             cmd.args(["--device", "none", "--n-gpu-layers", "0"]);

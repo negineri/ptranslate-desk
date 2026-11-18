@@ -99,6 +99,8 @@ services:
       # 1 本あたり 16K (原文と訳の合計)。-c は -np 本に分けられる
       - -c
       - "${LLAMA_CTX:-32768}"
+      - --cache-ram
+      - "0"
       - -np
       - "${LLAMA_PARALLEL:-2}"
     volumes:

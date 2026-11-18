@@ -175,7 +175,7 @@ services:
     devices:
       - /dev/dri
     command: ["-hf", "pfnet/plamo-3-translate-2b-GGUF:Q4_K_M", "--host", "0.0.0.0", "--port", "8080",
-              "-c", "65536", "-np", "4", "-ngl", "99", "-fa", "on"]
+              "-c", "65536", "-np", "4", "-ngl", "99", "-fa", "on", "--cache-ram", "0"]
 ```
 
 Strix Halo（Radeon 8060S）のVulkanでは、上流のllama.cppだと、同じ入力でも前のリクエストの状態で訳が少し変わります。

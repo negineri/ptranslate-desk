@@ -214,6 +214,8 @@ pub fn server_args(model: &Path, port: u16, parallel: usize) -> Vec<std::ffi::Os
         parallel.to_string(),
         "--flash-attn".into(),
         "on".into(),
+        "--cache-ram".into(),
+        "0".into(),
         "--no-webui".into(),
         "--log-disable".into(),
     ] {
@@ -226,6 +228,14 @@ pub fn server_args(model: &Path, port: u16, parallel: usize) -> Vec<std::ffi::Os
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn server_args_disable_the_prompt_ram_cache() {
+        let args = server_args(Path::new("model.gguf"), 8080, 4);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--cache-ram" && pair[1] == "0"));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
