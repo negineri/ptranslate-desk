@@ -5,6 +5,8 @@ const { listen } = window.__TAURI__.event;
 const style = document.createElement("style");
 style.textContent = `#worker-registration form { display: grid; gap: 8px; margin-top: 12px; }
   #worker-registration input[name] { width: 100%; min-width: 0; }
+  #worker-existing-registrations { min-width: 0; }
+  #worker-existing { display: block; max-width: 100%; }
   #worker-registration form p { margin: 0; }`;
 document.head.append(style);
 const panel = document.createElement("details");
@@ -29,6 +31,13 @@ panel.innerHTML = `<summary>翻訳の処理を提供する</summary>
       <button type="button" id="worker-forget-commit">削除する</button>
       <button type="button" id="worker-forget-cancel">キャンセル</button>
     </fieldset>
+    <fieldset id="worker-existing-registrations" hidden>
+      <legend>提供先の登録済みワーカー</legend>
+      <label for="worker-existing">解除する登録</label>
+      <select id="worker-existing"></select>
+      <label><input type="checkbox" id="worker-existing-agree"> 選んだワーカーの資格を無効にする</label>
+      <button type="button" id="worker-existing-remove">選んだ登録を解除</button>
+    </fieldset>
   </form>
   <p class="hint" role="status"></p>
   <label id="worker-participation" hidden><input type="checkbox"> 翻訳の処理を提供する</label>
@@ -44,6 +53,10 @@ const forget = form.querySelector("#worker-forget");
 const confirmation = form.querySelector("#worker-forget-confirmation");
 const agree = form.querySelector("#worker-forget-agree");
 const serverUrlField = form.querySelector("#worker-server-url");
+const existingRegistrations = form.querySelector("#worker-existing-registrations");
+const existingWorker = form.querySelector("#worker-existing");
+const existingAgree = form.querySelector("#worker-existing-agree");
+const existingRemove = form.querySelector("#worker-existing-remove");
 const activityLine = panel.querySelector("#worker-activity");
 const participation = panel.querySelector("#worker-participation");
 const participationToggle = participation.querySelector("input");
@@ -52,6 +65,9 @@ const phaseLabels = {
   working: "処理中", paused: "一時停止中", quarantined: "検疫中", error: "処理を続けられませんでした",
   reauthorize: "提供先への再ログインが必要です。「資格を更新」を押してください",
 };
+const workerStates = new Map([
+  ["ready", "待機中"], ["probation", "試用中"], ["quarantine", "検疫中"], ["revoked", "失効"],
+]);
 let activity;
 
 function renderParticipation() {
@@ -96,6 +112,10 @@ function render() {
   forget.hidden = !registered || !state?.can_forget;
   forget.disabled = busy;
   confirmation.disabled = busy;
+  existingRegistrations.hidden = registered || !state?.workers?.length ||
+    serverUrlField.value !== state.connection.server_url;
+  existingRegistrations.disabled = busy;
+  existingRemove.disabled = !existingWorker.value || !existingAgree.checked;
   renderParticipation();
   if (!registered) {
     confirmation.hidden = true;
@@ -122,6 +142,13 @@ async function operate(command, args) {
     state = await invoke(command, args);
     serverUrlField.value = state.connection.server_url;
     terms.checked = false;
+    existingAgree.checked = false;
+    existingWorker.replaceChildren(new Option("選択してください", ""));
+    for (const worker of state.workers ?? []) {
+      const expires = new Date(worker.expires_at * 1000).toLocaleString("ja-JP");
+      const phase = workerStates.get(worker.state) ?? "状態不明";
+      existingWorker.add(new Option(`${worker.worker_id} · ${phase} · 有効期限 ${expires}`, worker.worker_id));
+    }
   } catch (failure) {
     error = String(failure);
     if (command === "revoke_worker" && state) state.can_forget = true;
@@ -139,6 +166,20 @@ form.addEventListener("submit", (event) => {
   void operate("register_worker", { serverUrl, termsVersion: state.terms_version });
 });
 renew.onclick = () => operate("renew_worker");
+function resetExistingConfirmation() {
+  existingAgree.checked = false;
+  render();
+}
+serverUrlField.addEventListener("input", resetExistingConfirmation);
+existingWorker.onchange = resetExistingConfirmation;
+existingAgree.onchange = render;
+existingRemove.onclick = () => {
+  if (existingRegistrations.hidden || !existingAgree.checked || !existingWorker.value) return;
+  void operate("remove_registered_worker", {
+    serverUrl: state.connection.server_url,
+    workerId: existingWorker.value,
+  });
+};
 participationToggle.onchange = () => operate("set_worker_participation", { enabled: participationToggle.checked });
 revoke.onclick = () => operate("revoke_worker");
 forget.onclick = () => { agree.checked = false; confirmation.hidden = false; };

@@ -56,6 +56,25 @@ struct Renewal {
     expires_in: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct RegisteredWorker {
+    worker_id: String,
+    state: String,
+    expires_at: u64,
+}
+
+#[derive(Deserialize)]
+struct WorkerList {
+    workers: Vec<RegisteredWorker>,
+}
+
+#[derive(Deserialize)]
+struct BrokerError {
+    error: String,
+}
+
+const DEVICE_LIMIT: &str = "登録できる端末の数を超えています";
+
 #[derive(Serialize)]
 pub struct Status {
     connection: Connection,
@@ -65,6 +84,7 @@ pub struct Status {
     terms_version: u32,
     message: Option<String>,
     can_forget: bool,
+    workers: Vec<RegisteredWorker>,
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -156,13 +176,17 @@ fn expiry(seconds: u64) -> Result<u64, String> {
         .ok_or_else(|| "ワーカー資格の有効期限を計算できませんでした".into())
 }
 
-async fn reply<T: DeserializeOwned>(mut response: Response) -> Result<T, String> {
+async fn reply<T: DeserializeOwned>(response: Response) -> Result<T, String> {
     if !response.status().is_success() {
         return Err(format!(
             "ワーカーの要求が失敗しました（HTTP {}）",
             response.status().as_u16()
         ));
     }
+    read_reply(response).await
+}
+
+async fn read_reply<T: DeserializeOwned>(mut response: Response) -> Result<T, String> {
     let mut body = Zeroizing::new(Vec::new());
     while let Some(chunk) = response
         .chunk()
@@ -175,6 +199,32 @@ async fn reply<T: DeserializeOwned>(mut response: Response) -> Result<T, String>
         body.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&body).map_err(|_| "仲介の応答が不正です".into())
+}
+
+async fn device_limit_status(connection: Connection, auth: &Auth) -> Status {
+    let mut result = status(connection, None);
+    result.message = Some(format!(
+        "{DEVICE_LIMIT}。解除できる登録がない場合は、資格の期限が切れるまで待つか、提供先の管理者に確認してください。"
+    ));
+    let listing = async {
+        reply::<WorkerList>(auth.send(Method::GET, "/api/worker/mine", None).await?).await
+    };
+    match listing.await {
+        Ok(listing) => {
+            result.workers = listing.workers;
+            if !result.workers.is_empty() {
+                result.message = Some(format!(
+                    "{DEVICE_LIMIT}。不要な登録を解除してから、もう一度登録してください。"
+                ));
+            }
+        }
+        Err(error) => {
+            result.message = Some(format!(
+                "{DEVICE_LIMIT}。登録済みの端末を取得できませんでした。{error}"
+            ));
+        }
+    }
+    result
 }
 
 fn require_main(window: &WebviewWindow) -> Result<(), String> {
@@ -203,6 +253,7 @@ fn status(connection: Connection, registration: Option<&Registration>) -> Status
         terms_version: TERMS_VERSION,
         message: None,
         can_forget: false,
+        workers: Vec::new(),
     }
 }
 
@@ -351,17 +402,27 @@ pub async fn register_worker(
     local::verify_worker_model(&app).await?;
     save(&app, &connection)?;
     let auth = authenticate(&app, &connection).await?;
-    let issued: Issued = reply(
-        auth.send(
+    let response = auth
+        .send(
             Method::POST,
             "/api/worker/register",
             Some(&json!({
                 "terms_version":terms_version
             })),
         )
-        .await?,
-    )
-    .await?;
+        .await?;
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        if read_reply::<BrokerError>(response)
+            .await
+            .is_ok_and(|failure| failure.error == DEVICE_LIMIT)
+        {
+            return Ok(device_limit_status(connection, &auth).await);
+        }
+        return Err(
+            "提供先が要求を制限しています（HTTP 429）。しばらくしてから登録してください。".into(),
+        );
+    }
+    let issued: Issued = reply(response).await?;
     let worker_id = issued.worker_id;
     let stored = expiry(issued.expires_in).and_then(|expires_at| {
         let registration = Registration {
@@ -391,6 +452,41 @@ pub async fn register_worker(
             Err(error)
         }
     }
+}
+
+#[tauri::command]
+pub async fn remove_registered_worker(
+    app: AppHandle,
+    window: WebviewWindow,
+    server_url: String,
+    worker_id: String,
+) -> Result<Status, String> {
+    require_main(&window)?;
+    let state = app.state::<RegistrationGate>();
+    let _gate = state
+        .0
+        .try_lock()
+        .map_err(|_| "ワーカーの設定を処理中です")?;
+    let connection = load(&app)?;
+    if connection.server_url.is_empty()
+        || connection.server_url != server_url
+        || !valid_id(&worker_id, 32)
+        || credential(&vault(&connection))?.is_some()
+    {
+        return Err("提供先と解除するワーカーの登録を確認してください".into());
+    }
+    let auth = authenticate(&app, &connection).await?;
+    let response = auth
+        .send(Method::DELETE, &format!("/api/worker/{worker_id}"), None)
+        .await?;
+    let message = match response.status().as_u16() {
+        200 => "登録を解除しました。もう一度登録してください。",
+        404 => "ワーカーの登録は既に解除されています。もう一度登録してください。",
+        code => return Err(format!("登録を解除できませんでした（HTTP {code}）")),
+    };
+    let mut result = status(connection, None);
+    result.message = Some(message.into());
+    Ok(result)
 }
 
 #[tauri::command]
