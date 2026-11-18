@@ -1,0 +1,28 @@
+name: Linux のビルド依存をインストール
+description: Ubuntu 24.04 のデスクトップビルド用パッケージを取得する
+runs:
+  using: composite
+  steps:
+    - id: week
+      shell: bash
+      run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+    - id: apt-cache
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/ptranslate-apt/*.deb
+        key: apt-ubuntu-24.04-${{ runner.arch }}-${{ hashFiles('.github/actions/linux-build-dependencies/action.yml') }}-${{ steps.week.outputs.value }}
+    - shell: bash
+      run: |
+        archives="$RUNNER_TEMP/ptranslate-apt"
+        mkdir -p "$archives"
+        network_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+        sudo apt-get "${network_options[@]}" update
+        sudo apt-get "${network_options[@]}" -o Dir::Cache::archives="$archives/" install -y \
+          build-essential pkg-config libwebkit2gtk-4.1-dev \
+          libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev bubblewrap
+    # タグと PR は main が保存したキャッシュを復元する。
+    - if: github.ref == 'refs/heads/main' && steps.apt-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/ptranslate-apt/*.deb
+        key: ${{ steps.apt-cache.outputs.cache-primary-key }}
