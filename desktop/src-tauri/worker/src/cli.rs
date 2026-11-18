@@ -12,7 +12,7 @@ const USAGE: &str = "\
 使い方:
   ptranslate-worker [--state DIR] authorize <提供先のURL> --accept-terms
   ptranslate-worker [--state DIR] [--data DIR] prepare
-  ptranslate-worker [--state DIR] [--data DIR] run [--threads N]
+  ptranslate-worker [--state DIR] [--data DIR] run [--threads N] [--slots N]
   ptranslate-worker [--state DIR] run --engine-url <URL> --engine-key-file <FILE>
                                       [--allow-engine-revision-mismatch]
   ptranslate-worker [--state DIR] run --engine-port <PORT> --engine-key-file <FILE> --model <FILE>
@@ -24,6 +24,7 @@ run        提供を始める。SIGTERM・SIGINT で止まる
 
 --state    refresh token とワーカー資格の保存先 (既定 $XDG_STATE_HOME/ptranslate-worker)
 --data     推論エンジンとモデルの保存先 (既定 $XDG_DATA_HOME/ptranslate-worker)
+--slots    同時に提供する翻訳枠 (既定1)
 --threads  推論エンジンの CPU スレッド数 (既定は llama.cpp の自動)
 --engine-url       自分で用意した別のサーバーの llama-server (HTTPS) を使う
 --engine-port      自分で用意したローカルの llama-server を使う
@@ -37,6 +38,7 @@ pub struct Args {
     pub server: Option<String>,
     pub accept_terms: bool,
     pub threads: Option<usize>,
+    pub slots: Option<u16>,
     pub engine_url: Option<String>,
     pub engine_port: Option<u16>,
     pub engine_key_file: Option<PathBuf>,
@@ -64,6 +66,15 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> std::result::Result<Ar
             "--data" => parsed.data = Some(text(args.next(), "--data")?.into()),
             "--accept-terms" => parsed.accept_terms = true,
             "--allow-engine-revision-mismatch" => parsed.allow_revision_mismatch = true,
+            "--slots" => {
+                parsed.slots = Some(
+                    text(args.next(), "--slots")?
+                        .parse()
+                        .ok()
+                        .filter(|n| (1..=1000).contains(n))
+                        .ok_or("--slots は1〜1000の整数にしてください")?,
+                )
+            }
             "--threads" => {
                 parsed.threads = Some(
                     text(args.next(), "--threads")?
@@ -137,6 +148,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> std::result::Result<Ar
         }
         "" => return Err("コマンドを指定してください (authorize・prepare・run)".into()),
         _ => unreachable!(),
+    }
+    if parsed.slots.is_some() && parsed.command != "run" {
+        return Err("--slots は run で指定してください".into());
     }
     Ok(parsed)
 }
@@ -252,7 +266,16 @@ async fn execute(args: Args) -> Result<()> {
                     threads: args.threads,
                 }
             };
-            run::run(&client, &dir, state, engine, stop, log).await
+            run::run(
+                &client,
+                &dir,
+                state,
+                engine,
+                args.slots.unwrap_or(1),
+                stop,
+                log,
+            )
+            .await
         }
         _ => unreachable!(),
     }
@@ -270,7 +293,8 @@ mod tests {
     fn parses_the_simple_forms() {
         let parsed = args(&["authorize", "https://t.example", "--accept-terms"]).unwrap();
         assert_eq!(parsed.server.as_deref(), Some("https://t.example"));
-        let parsed = args(&["--state", "/s", "run", "--threads", "4"]).unwrap();
+        let parsed = args(&["--state", "/s", "run", "--threads", "4", "--slots", "2"]).unwrap();
+        assert_eq!(parsed.slots, Some(2));
         assert_eq!((parsed.state, parsed.threads), (Some("/s".into()), Some(4)));
         let parsed = args(&[
             "run",
@@ -315,6 +339,9 @@ mod tests {
             &["run", "--allow-engine-revision-mismatch"],
             &["run", "--model", "/m"],
             &["run", "--threads", "0"],
+            &["run", "--slots", "0"],
+            &["run", "--slots", "1001"],
+            &["prepare", "--slots", "2"],
             &[
                 "run",
                 "--engine-port",

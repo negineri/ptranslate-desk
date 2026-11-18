@@ -73,8 +73,11 @@ class MockWorker:
             self.secret = data["secret"]
         return status, data
 
-    def poll(self, model, version="0.5.0"):
-        return self.call("/api/worker/poll", {"model": model, "agent_version": version})
+    def poll(self, model, version="0.5.0", *, slot=None):
+        body = {"model": model, "agent_version": version}
+        if slot is not None:
+            body["slot"] = slot
+        return self.call("/api/worker/poll", body)
 
     def result(self, assignment_id, seq, **fields):
         return self.call(

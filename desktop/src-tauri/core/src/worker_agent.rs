@@ -29,6 +29,8 @@ impl From<()> for RequestError {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bootstrap {
+    #[serde(default, skip_serializing_if = "slot_is_zero")]
+    pub slot: u16,
     pub broker: String,
     pub worker_secret: String,
     pub model_sha256: String,
@@ -37,6 +39,10 @@ pub struct Bootstrap {
     pub engine_secret: String,
     pub relay_port: Option<u16>,
     pub relay_secret: Option<String>,
+}
+
+fn slot_is_zero(slot: &u16) -> bool {
+    *slot == 0
 }
 
 impl Drop for Bootstrap {
@@ -373,10 +379,13 @@ impl Agent {
         mut parent_closed: tokio::sync::oneshot::Receiver<()>,
         permission: impl std::future::Future<Output = Result<()>>,
     ) -> Result<&'static str> {
-        let poll = json!({
+        let mut poll = json!({
             "agent_version":self.config.agent_version,
             "model":self.config.model_sha256
         });
+        if self.config.slot != 0 {
+            poll["slot"] = json!(self.config.slot);
+        }
         let assignment: Assignment = tokio::select! {
             _ = &mut parent_closed => return Ok("paused"),
             result = async {
@@ -611,6 +620,7 @@ mod tests {
             .spawn()
             .unwrap();
             let config = Bootstrap {
+                slot: 0,
                 broker: broker_url.to_string(),
                 worker_secret: format!("ptw_{}", "a".repeat(64)),
                 model_sha256: "b".repeat(64),
@@ -695,6 +705,7 @@ mod tests {
                 let engine_port = engine.local_addr().unwrap().port();
                 let input = Zeroizing::new(
                     serde_json::to_vec(&Bootstrap {
+                        slot: 0,
                         broker: url.to_string(),
                         worker_secret: format!("ptw_{}", "a".repeat(64)),
                         model_sha256: "b".repeat(64),
@@ -828,6 +839,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         let broker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut agent = Agent::new(Bootstrap {
+            slot: 3,
             broker: "https://example.com/".into(),
             worker_secret: format!("ptw_{}", "a".repeat(64)),
             model_sha256: "b".repeat(64),
@@ -851,8 +863,9 @@ mod tests {
         ] {
             let (_parent, closed) = tokio::sync::oneshot::channel();
             let serve = async {
-                let (mut socket, route, _) = mock_request(&broker).await;
+                let (mut socket, route, body) = mock_request(&broker).await;
                 assert_eq!(route, "/api/worker/poll");
+                assert_eq!(body["slot"], 3);
                 socket
                     .write_all(
                         format!(
@@ -876,6 +889,7 @@ mod tests {
         let broker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let engine = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut agent = Agent::new(Bootstrap {
+            slot: 0,
             broker: "https://example.com/".into(),
             worker_secret: format!("ptw_{}", "a".repeat(64)),
             model_sha256: "b".repeat(64),
@@ -984,6 +998,7 @@ mod tests {
         let broker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let engine = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut agent = Agent::new(Bootstrap {
+            slot: 0,
             broker: "https://example.com/".into(),
             worker_secret: format!("ptw_{}", "a".repeat(64)),
             model_sha256: "b".repeat(64),

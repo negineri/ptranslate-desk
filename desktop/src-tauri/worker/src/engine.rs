@@ -202,7 +202,7 @@ pub struct Managed {
 }
 
 impl Managed {
-    pub async fn start(install: &Installation, threads: Option<usize>) -> Result<Self> {
+    pub async fn start(install: &Installation, threads: Option<usize>, slots: u16) -> Result<Self> {
         let port = {
             let listener = std::net::TcpListener::bind("127.0.0.1:0")
                 .map_err(|_| Failure::new("推論エンジンのポートを確保できませんでした"))?;
@@ -214,7 +214,7 @@ impl Managed {
         let key = random_key()?;
         let mut command = Command::new(&install.engine);
         command
-            .args(server_args(&install.model, port, 1))
+            .args(server_args(&install.model, port, usize::from(slots)))
             // このビルドは CPU だけで動かす。
             .args(["--device", "none", "--n-gpu-layers", "0"])
             .env("LLAMA_API_KEY", key.as_str())

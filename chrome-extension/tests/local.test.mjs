@@ -13,7 +13,7 @@ test("通知の上限に従い、旧接続先と不正な値は安全に扱う",
   for (const value of [0, -1, 1.5, "2", Infinity, null]) assert.equal(concurrencyLimit({ concurrency: { max_in_flight: value } }), 1);
   assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 4 } }), 4);
   assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 2 } }), 2);
-  assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 1000 } }), 64);
+  assert.equal(concurrencyLimit({ concurrency: { max_in_flight: 1000 } }), 100);
 });
 
 test("Native Messagingのバイト列から分割された日本語も復元する", async () => {

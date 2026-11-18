@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib import error, parse, request
 
 from prepare_local_engine import MODEL_SHA
@@ -498,56 +499,90 @@ def participate(args, path, state, port, secret, model_hash, verify=None):
         nonlocal stopped
         stopped = True
 
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+    previous_term = signal.signal(signal.SIGTERM, stop)
+    previous_int = signal.signal(signal.SIGINT, stop)
     next_attempt = 0
-    delay = 5
-    while not stopped:
-        now = time.time()
-        if now >= next_attempt or now >= state["expires_at"]:
+    slots = args.slots
+    delays = [5] * slots
+    retry_at = [0.0] * slots
+    pending = {}
+    binary = args.binary.resolve()
+    try:
+        with ThreadPoolExecutor(max_workers=slots) as executor:
             try:
-                outcome = refresh(path, state)
-            except Failure:
-                if now >= state["expires_at"]:
-                    raise Failure("ワーカー資格が期限切れで更新できません") from None
-                next_attempt = now + 60
-                print("資格を更新できませんでした。再試行します。", file=sys.stderr, flush=True)
-            else:
-                if outcome == "reauthorize":
-                    raise Failure("提供先の再認可が必要です。authorize を実行してください")
-                if outcome == "rejected":
-                    raise Failure("提供先が資格の更新を拒否しました")
-                next_attempt = state["renew_at"]
-        if stopped:
-            break
-        try:
-            if verify is not None:
-                verify()
-        except EngineMismatch:
-            raise
-        except Failure:
-            result = "engine_unavailable"
-        else:
-            if stopped:
-                break
-            result = run_worker(args.binary.resolve(), config, lambda: stopped)
-        if result == "rejected":
-            raise Failure("提供先がワーカー資格を拒否しました")
-        if result in ("completed", "waiting", "quarantined"):
-            delay = 5
-            sleep_seconds = 2 if result == "quarantined" else 0.25
-        else:
-            message = (
-                "リモート推論先の確認に失敗したため、ジョブの受付を待機します。"
-                if result == "engine_unavailable"
-                else "ワーカーの処理を続けられませんでした。再試行します。"
-            )
-            print(message, file=sys.stderr, flush=True)
-            sleep_seconds = delay
-            delay = min(delay * 2, 300)
-        until = time.monotonic() + sleep_seconds
-        while not stopped and time.monotonic() < until:
-            time.sleep(0.25)
+                while not stopped:
+                    now = time.time()
+                    if now >= next_attempt or now >= state["expires_at"]:
+                        try:
+                            outcome = refresh(path, state)
+                        except Failure:
+                            if now >= state["expires_at"]:
+                                raise Failure("ワーカー資格が期限切れで更新できません") from None
+                            next_attempt = now + 60
+                            print(
+                                "資格を更新できませんでした。再試行します。",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                        else:
+                            if outcome == "reauthorize":
+                                raise Failure(
+                                    "提供先の再認可が必要です。authorize を実行してください"
+                                )
+                            if outcome == "rejected":
+                                raise Failure("提供先が資格の更新を拒否しました")
+                            next_attempt = state["renew_at"]
+                    now = time.monotonic()
+                    for slot, future in list(pending.items()):
+                        if not future.done():
+                            continue
+                        del pending[slot]
+                        result = future.result()
+                        if result == "rejected":
+                            raise Failure("提供先がワーカー資格を拒否しました")
+                        if result in ("completed", "waiting", "quarantined"):
+                            delays[slot] = 5
+                            retry_at[slot] = now + (2 if result == "quarantined" else 0.25)
+                        else:
+                            print(
+                                "ワーカーの処理を続けられませんでした。再試行します。",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            retry_at[slot] = now + delays[slot]
+                            delays[slot] = min(delays[slot] * 2, 300)
+                    ready = [
+                        slot
+                        for slot in range(slots)
+                        if slot not in pending and retry_at[slot] <= now
+                    ]
+                    if ready and not stopped:
+                        try:
+                            if verify is not None:
+                                verify()
+                        except EngineMismatch:
+                            raise
+                        except Failure:
+                            print(
+                                "リモート推論先の確認に失敗したため、ジョブの受付を待機します。",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            for slot in ready:
+                                retry_at[slot] = now + delays[slot]
+                                delays[slot] = min(delays[slot] * 2, 300)
+                        else:
+                            for slot in ready:
+                                worker_config = dict(config, slot=slot) if slot else config.copy()
+                                pending[slot] = executor.submit(
+                                    run_worker, binary, worker_config, lambda: stopped
+                                )
+                    time.sleep(0.25)
+            finally:
+                stopped = True
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+        signal.signal(signal.SIGINT, previous_int)
 
 
 def main():
@@ -562,6 +597,7 @@ def main():
     service = commands.add_parser("run", help="提供を開始し、資格を自動更新する")
     service.add_argument("--binary", type=Path, required=True)
     service.add_argument("--model", type=Path)
+    service.add_argument("--slots", type=int, default=1, help="同時に提供する翻訳枠の数")
     target = service.add_mutually_exclusive_group(required=True)
     target.add_argument("--engine-port", type=int, help="ローカルの llama-server のポート")
     target.add_argument("--engine-url", help="リモートの llama-server の HTTPS オリジン")
@@ -572,6 +608,8 @@ def main():
     )
     service.add_argument("--engine-key-file", type=Path, required=True)
     args = parser.parse_args()
+    if args.command == "run" and not 1 <= args.slots <= 1000:
+        service.error("--slots は1〜1000の整数にしてください")
     if args.command == "run" and args.allow_engine_revision_mismatch and not args.engine_url:
         service.error("--allow-engine-revision-mismatch には --engine-url が必要です")
     try:
