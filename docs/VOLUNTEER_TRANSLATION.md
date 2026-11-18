@@ -733,6 +733,8 @@ ptranslate-worker run --engine-url https://gpu.example.com --engine-key-file /pa
 - 推論側は既定で llama.cpp `b11804`（コミット `c7fc5094179bf8a9c73c18593db714f8da41a402`）と承認済みの
   `plamo-3-translate-2b-Q4_K_M.gguf` を使う。1枠あたりのコンテキストを16384以上にする
   （1枠なら `--parallel 1 --ctx-size 16384`、2枠なら `--parallel 2 --ctx-size 32768`）。
+- 自動起動では `--cache-ram 0` を指定してプロンプトの RAM キャッシュを止める。
+  `--engine-url`・`--engine-port` の推論先と、運営が `TR_AUDIT_UPSTREAMS` に指定する確認用エンジンにも、起動時に `--cache-ram 0` を指定することを推奨する。
   値の根拠は [LOCAL_TRANSLATION.md](LOCAL_TRANSLATION.md) の「コンテキストの長さ」。
 - パッチ済みのビルドを使う場合は、`--engine-url` とあわせて `--allow-engine-revision-mismatch` を指定すると、
   リビジョンの不一致を許可する。ビルド情報の取得、モデル名・SHA-256・コンテキスト長の照合、および仲介の検疫は引き続き行う。
